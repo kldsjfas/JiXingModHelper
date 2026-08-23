@@ -43,7 +43,11 @@ def check_static_files() -> None:
 
 
 def check_categories() -> None:
-    from astral_party_auto.modkit.categories import ASSET_TYPES, category_label
+    from astral_party_auto.modkit.categories import (
+        ASSET_TYPES,
+        annotate_texture_name_duplicates,
+        category_label,
+    )
 
     assert category_label("chip") == "筹码"
     assert [type_id for type_id, _label in ASSET_TYPES] == [
@@ -52,6 +56,141 @@ def check_categories() -> None:
         "mesh",
         "anim",
     ]
+    rows = annotate_texture_name_duplicates([
+        ("a.bundle", "Same"),
+        ("b.bundle", "Same"),
+        ("c.bundle", "Only"),
+    ])
+    assert rows == [
+        ("a.bundle", "Same", 2),
+        ("b.bundle", "Same", 2),
+        ("c.bundle", "Only", 1),
+    ]
+
+
+def check_migration_matching() -> None:
+    import astral_party_auto.modkit.migration as migration
+
+    old_records = [
+        migration.MigrationTexture("HeroCard", 1024, 1024),
+        migration.MigrationTexture("HeroIcon", 256, 256),
+    ]
+    current_records = {
+        "new-main.bundle": old_records,
+        "other.bundle": [migration.MigrationTexture("HeroCard", 1024, 1024)],
+    }
+    previous_scan = migration.scan_bundle_textures
+    try:
+        migration.scan_bundle_textures = lambda path: (
+            old_records
+            if Path(path).name == "old.bundle"
+            else [old_records[0]]
+            if Path(path).name == "single.bundle"
+            else current_records.get(Path(path).name, [])
+        )
+        plan = migration.plan_bundle_migration(
+            "old.bundle",
+            {
+                "new-main.bundle": ["HeroCard", "HeroIcon"],
+                "other.bundle": ["HeroCard"],
+            },
+            lambda name: Path(name),
+        )
+        assert len(plan.matched) == 2
+        assert {entry.target_bundle for entry in plan.matched} == {"new-main.bundle"}
+
+        ambiguous = migration.plan_bundle_migration(
+            "single.bundle",
+            {"a.bundle": ["HeroCard"], "b.bundle": ["HeroCard"]},
+            lambda name: Path(name),
+        )
+        assert len(ambiguous.ambiguous) == 1
+        assert not ambiguous.matched
+    finally:
+        migration.scan_bundle_textures = previous_scan
+
+
+def check_hot_draft_bundle_names() -> None:
+    import astral_party_auto.mod_controller as module
+
+    class FakeManager:
+        def __init__(self, paths):
+            self.paths = paths
+
+        def bundle_path(self, name):
+            return self.paths.get(name)
+
+    with TemporaryDirectory(prefix="jixing_hot_draft_") as root_value:
+        root = Path(root_value)
+        data_dir = root / "data"
+        made_dir = root / "made"
+        data_dir.mkdir()
+        made_dir.mkdir()
+        hot_a = root / "cache-a" / ("a" * 32) / "__data"
+        hot_b = root / "cache-b" / ("b" * 32) / "__data"
+        hot_a.parent.mkdir(parents=True)
+        hot_b.parent.mkdir(parents=True)
+        hot_a.write_bytes(b"A")
+        hot_b.write_bytes(b"B")
+        image = root / "replacement.png"
+        image.write_bytes(b"PNG")
+        logical_a = "a" * 32 + ".bundle"
+        logical_b = "b" * 32 + ".bundle"
+        paths = {logical_a: hot_a, logical_b: hot_b}
+
+        previous = (
+            module.DATA_DIR,
+            module.MADE_DIR,
+            module.DRAFT_META,
+            module.PREVIEW_DIR,
+            module.replace_bundle_texture,
+        )
+
+        def fake_replace(src, _image, out, target_name=None, **_kwargs):
+            Path(out).parent.mkdir(parents=True, exist_ok=True)
+            Path(out).write_bytes(Path(src).read_bytes() + b":" + str(target_name).encode())
+            return str(target_name)
+
+        try:
+            module.DATA_DIR = data_dir
+            module.MADE_DIR = made_dir
+            module.DRAFT_META = data_dir / "draft.json"
+            module.PREVIEW_DIR = data_dir / "previews"
+            module.replace_bundle_texture = fake_replace
+
+            controller = object.__new__(module.ModController)
+            controller.aa_dirs = (root,)
+            controller.manager = FakeManager(paths)
+            controller.draft_items = []
+            controller.draft_name = "自检"
+            controller.log = lambda _message: None
+
+            controller.add_texture_to_draft(
+                hot_a,
+                image,
+                "TextureA",
+                bundle_name=logical_a,
+            )
+            controller.add_texture_to_draft(
+                hot_b,
+                image,
+                "TextureB",
+                bundle_name=logical_b,
+            )
+
+            assert {item["bundle"] for item in controller.draft_items} == {logical_a, logical_b}
+            assert (made_dir / "_draft" / logical_a).exists()
+            assert (made_dir / "_draft" / logical_b).exists()
+            assert not (made_dir / "_draft" / "__data").exists()
+            assert controller.original_bundle_path(logical_a) == hot_a
+        finally:
+            (
+                module.DATA_DIR,
+                module.MADE_DIR,
+                module.DRAFT_META,
+                module.PREVIEW_DIR,
+                module.replace_bundle_texture,
+            ) = previous
 
 
 def check_hot_update_cache() -> None:
@@ -279,6 +418,8 @@ def main() -> int:
     print("=== safe selfcheck ===")
     check("static files", check_static_files)
     check("categories", check_categories)
+    check("migration matching", check_migration_matching)
+    check("hot-cache draft bundle names", check_hot_draft_bundle_names)
     check("hot-update cache layout", check_hot_update_cache)
     check("mod layering", check_mod_layering)
     check("draft removal", check_draft_removal)

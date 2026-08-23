@@ -1,6 +1,7 @@
 """界面与 modkit 之间的编排层：检测游戏、安装/还原、分类浏览、作品集制作。"""
 from __future__ import annotations
 
+import gc
 import json
 import re
 import shutil
@@ -15,6 +16,7 @@ from typing import Callable
 from .core.config import APP_ROOT
 from .core.detector import find_game_install, launch_direct, launch_with_steam
 from .modkit import (
+    BundleMigrationPlan,
     ModManager,
     all_categories,
     bundle_dirs_for_exe,
@@ -27,6 +29,8 @@ from .modkit import (
     find_anim_preview_texture,
     list_text_assets,
     load_asset_index,
+    logical_bundle_name,
+    plan_bundle_migration,
     read_text_asset,
     replace_bundle_animation_raw,
     replace_bundle_text,
@@ -706,11 +710,16 @@ class ModController:
         image_path: str | Path,
         texture_name: str | None = None,
         crop_box: tuple[int, int, int, int] | None = None,
+        *,
+        bundle_name: str | None = None,
+        note: str | None = None,
     ) -> dict:
         self._require_game()
         bundle_path = Path(bundle_path)
-        # 统一用游戏目录下的文件名（备份与 aa 包同名）
-        bundle_name = bundle_path.name
+        # 热更新缓存的磁盘文件都叫 __data，作品集必须保存 catalog 中的逻辑包名。
+        bundle_name = Path(bundle_name).name if bundle_name else logical_bundle_name(bundle_path)
+        if not bundle_name.lower().endswith(".bundle"):
+            raise RuntimeError(f"无法确定资源包名称：{bundle_name}")
         pack_dir = self._draft_dir()
         out_bundle = pack_dir / bundle_name
         # 底图：优先备份原皮 → 传入路径 → 游戏目录
@@ -737,7 +746,7 @@ class ModController:
             "kind": "texture",
             "bundle": bundle_name,
             "name": replaced,
-            "note": Path(image_path).name,
+            "note": note or Path(image_path).name,
             "at": datetime.now().isoformat(timespec="seconds"),
         }
         self.draft_items = [x for x in self.draft_items if not (
@@ -748,17 +757,27 @@ class ModController:
         self.log(f"已加入作品集：{replaced} ← {Path(image_path).name}（共 {len(self.draft_items)} 项）")
         return item
 
-    def add_text_to_draft(self, bundle_path: str | Path, asset_name: str, new_text: str) -> dict:
+    def add_text_to_draft(
+        self,
+        bundle_path: str | Path,
+        asset_name: str,
+        new_text: str,
+        *,
+        bundle_name: str | None = None,
+    ) -> dict:
         self._require_game()
         bundle_path = Path(bundle_path)
+        bundle_name = Path(bundle_name).name if bundle_name else logical_bundle_name(bundle_path)
+        if not bundle_name.lower().endswith(".bundle"):
+            raise RuntimeError(f"无法确定资源包名称：{bundle_name}")
         pack_dir = self._draft_dir()
-        out_bundle = pack_dir / bundle_path.name
+        out_bundle = pack_dir / bundle_name
         # 若作品集里已有同 bundle，基于作品集版本继续改，否则用原版
         src = out_bundle if out_bundle.exists() else bundle_path
         replaced = replace_bundle_text(src, asset_name, new_text, out_bundle)
         item = {
             "kind": "text",
-            "bundle": bundle_path.name,
+            "bundle": bundle_name,
             "name": replaced,
             "note": f"文本 {len(new_text)} 字",
             "at": datetime.now().isoformat(timespec="seconds"),
@@ -780,14 +799,18 @@ class ModController:
         raw_path: str | Path | None = None,
         preview_texture: str | None = None,
         crop_box: tuple[int, int, int, int] | None = None,
+        bundle_name: str | None = None,
     ) -> dict:
         """动画替换：给图则换同包预览贴图；给 .animbin 则换 AnimationClip 字节。"""
         self._require_game()
         bundle_path = Path(bundle_path)
+        bundle_name = Path(bundle_name).name if bundle_name else logical_bundle_name(bundle_path)
+        if not bundle_name.lower().endswith(".bundle"):
+            raise RuntimeError(f"无法确定资源包名称：{bundle_name}")
         pack_dir = self._draft_dir()
-        out_bundle = pack_dir / bundle_path.name
-        backup = DATA_DIR / "backups" / bundle_path.name
-        game_b = self.bundle_path(bundle_path.name)
+        out_bundle = pack_dir / bundle_name
+        backup = DATA_DIR / "backups" / bundle_name
+        game_b = self.bundle_path(bundle_name)
         if backup.exists():
             base = backup
         elif bundle_path.exists():
@@ -795,7 +818,7 @@ class ModController:
         elif game_b:
             base = game_b
         else:
-            raise RuntimeError(f"找不到资源包：{bundle_path.name}")
+            raise RuntimeError(f"找不到资源包：{bundle_name}")
         src = out_bundle if out_bundle.exists() else base
 
         if raw_path:
@@ -984,6 +1007,143 @@ class ModController:
             return zip_path
         self.log(f"已导出作品集文件夹：{final_dir}")
         return final_dir
+
+    # ---------- 旧 Mod 迁移 ----------
+    @staticmethod
+    def _migration_source_files(source: str | Path) -> list[Path]:
+        source_path = Path(source).resolve()
+        if source_path.is_file():
+            return [source_path]
+        if not source_path.is_dir():
+            raise RuntimeError("找不到旧 Mod 文件或文件夹。")
+
+        files = list(source_path.rglob("*.bundle"))
+        files.extend(path for path in source_path.rglob("__data") if path.is_file())
+        unique: dict[str, Path] = {}
+        for path in files:
+            unique.setdefault(str(path.resolve()).lower(), path.resolve())
+        return sorted(unique.values(), key=lambda path: str(path).lower())
+
+    def plan_old_mod_migration(
+        self,
+        source: str | Path,
+    ) -> tuple[list[BundleMigrationPlan], list[str]]:
+        """扫描旧资源包并生成安全迁移计划；无法唯一匹配的资源保持只读。"""
+        self._require_game()
+        if not self.index:
+            raise RuntimeError("贴图索引为空，请先到“浏览资源”刷新索引。")
+
+        source_files = self._migration_source_files(source)
+        if not source_files:
+            raise RuntimeError("没有找到 .bundle 或 __data 资源文件。")
+
+        plans: list[BundleMigrationPlan] = []
+        warnings: list[str] = []
+        metadata_cache: dict[str, dict[str, tuple[int, int]]] = {}
+        for source_file in source_files:
+            try:
+                plan = plan_bundle_migration(
+                    source_file,
+                    self.index,
+                    self.bundle_path,
+                    metadata_cache=metadata_cache,
+                )
+            except Exception as exc:
+                warnings.append(f"{source_file.name}：{exc}")
+                continue
+            if not plan.textures:
+                warnings.append(f"{source_file.name}：没有读到贴图")
+                continue
+            plans.append(plan)
+        if not plans:
+            detail = f"\n{warnings[0]}" if warnings else ""
+            raise RuntimeError(f"旧 Mod 中没有可读取的贴图。{detail}")
+        # UnityPy 的资源对象存在循环引用；及时回收，避免旧 bundle 在 Windows 上一直被占用。
+        gc.collect()
+        return plans, warnings
+
+    @staticmethod
+    def migration_plan_summary(
+        plans: list[BundleMigrationPlan],
+        warnings: list[str] | None = None,
+    ) -> dict:
+        return {
+            "files": len(plans),
+            "textures": sum(len(plan.textures) for plan in plans),
+            "matched": sum(len(plan.matched) for plan in plans),
+            "ambiguous": sum(len(plan.ambiguous) for plan in plans),
+            "missing": sum(len(plan.missing) for plan in plans),
+            "target_bundles": len({
+                entry.target_bundle
+                for plan in plans
+                for entry in plan.matched
+                if entry.target_bundle
+            }),
+            "warnings": list(warnings or []),
+        }
+
+    def migrate_old_mod(self, plans: list[BundleMigrationPlan]) -> dict:
+        """把迁移计划里的唯一匹配项写入作品集；不直接安装到游戏。"""
+        self._require_game()
+        added = 0
+        failed: list[str] = []
+        duplicate_targets = 0
+        written_targets: set[tuple[str, str]] = set()
+
+        with tempfile.TemporaryDirectory(prefix="jixing_migrate_") as temp_value:
+            temp_dir = Path(temp_value)
+            image_number = 0
+            for plan in plans:
+                for entry in plan.matched:
+                    target_bundle = entry.target_bundle
+                    if not target_bundle:
+                        continue
+                    target_key = (target_bundle, entry.texture.name)
+                    if target_key in written_targets:
+                        duplicate_targets += 1
+                        continue
+                    target_path = self.bundle_path(target_bundle)
+                    if target_path is None:
+                        failed.append(f"{entry.texture.name}：当前资源包不存在")
+                        continue
+
+                    safe_name = re.sub(r"[^\w\-]+", "_", entry.texture.name)[:48] or "texture"
+                    image_path = temp_dir / f"{image_number:04d}_{safe_name}.png"
+                    image_number += 1
+                    try:
+                        info = extract_texture_png(
+                            plan.source_path,
+                            image_path,
+                            target_name=entry.texture.name,
+                        )
+                        if info is None:
+                            raise RuntimeError("无法导出旧贴图")
+                        self.add_texture_to_draft(
+                            target_path,
+                            image_path,
+                            texture_name=entry.texture.name,
+                            bundle_name=target_bundle,
+                            note=f"迁移自 {plan.source_path.name}",
+                        )
+                    except Exception as exc:
+                        failed.append(f"{entry.texture.name}：{exc}")
+                        continue
+                    written_targets.add(target_key)
+                    added += 1
+
+        report = self.migration_plan_summary(plans)
+        report.update({
+            "added": added,
+            "failed": len(failed),
+            "failed_details": failed[:20],
+            "duplicate_targets": duplicate_targets,
+        })
+        self.log(
+            f"旧 Mod 迁移完成：加入作品集 {added} 张，"
+            f"歧义跳过 {report['ambiguous']} 张，未找到 {report['missing']} 张，失败 {len(failed)} 张。"
+        )
+        gc.collect()
+        return report
 
     # ---------- 后台建索引 ----------
     def build_index_async(self, progress: Callable[[int, int], None], on_done: Callable[[int], None]) -> None:

@@ -89,6 +89,21 @@
           <article class="card">
             <div class="section-heading">
               <div>
+                <h2>迁移旧 Mod</h2>
+                <p>读取旧版 bundle 里的贴图，匹配当前资源后加入作品集；重名不确定的会自动跳过。</p>
+              </div>
+            </div>
+            <div class="action-row">
+              <button id="choose-migration-file" class="button ghost">选择旧资源包</button>
+              <button id="choose-migration-folder" class="button ghost">选择旧 Mod 文件夹</button>
+              <button id="run-migration" class="button purple" disabled>迁移到作品集</button>
+            </div>
+            <div id="migration-analysis" class="notice">还没有选择旧 Mod。</div>
+          </article>
+
+          <article class="card">
+            <div class="section-heading">
+              <div>
                 <h2>Mod 预览</h2>
                 <p id="mod-preview-title">选待装包或点已装「预览」后，左侧点资源包看图。</p>
               </div>

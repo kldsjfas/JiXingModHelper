@@ -1,6 +1,7 @@
 """读取游戏的 Unity 资源包（Addressable bundle）：列出资源、导出预览、建立索引。"""
 from __future__ import annotations
 
+import gc
 import json
 import os
 from dataclasses import dataclass
@@ -102,18 +103,26 @@ def read_bundle_textures(bundle_path: str | Path) -> list[TextureInfo]:
     """读出一个资源包里的所有贴图信息（名字 + 尺寸），不导出像素，尽量快。"""
     textures: list[TextureInfo] = []
     env = UnityPy.load(str(bundle_path))
-    for obj in env.objects:
-        if obj.type.name != "Texture2D":
-            continue
-        try:
-            data = obj.read()
-        except Exception:
-            continue
-        name = getattr(data, "m_Name", "") or getattr(data, "name", "") or "(未命名)"
-        width = int(getattr(data, "m_Width", 0) or 0)
-        height = int(getattr(data, "m_Height", 0) or 0)
-        textures.append(TextureInfo(name=str(name), width=width, height=height))
-    return textures
+    obj = data = None
+    try:
+        for obj in env.objects:
+            if obj.type.name != "Texture2D":
+                continue
+            try:
+                data = obj.read()
+            except Exception:
+                continue
+            name = getattr(data, "m_Name", "") or getattr(data, "name", "") or "(未命名)"
+            width = int(getattr(data, "m_Width", 0) or 0)
+            height = int(getattr(data, "m_Height", 0) or 0)
+            textures.append(TextureInfo(name=str(name), width=width, height=height))
+        return textures
+    finally:
+        # UnityPy 的 Environment 与内部文件互相引用；主动断开局部引用并回收，
+        # 否则 Windows 会暂时锁住用户选中的旧 bundle / 草稿 bundle。
+        obj = data = None
+        env = None
+        gc.collect()
 
 
 def read_bundle_asset_names(bundle_path: str | Path) -> dict[str, list[str]]:
@@ -152,21 +161,27 @@ def extract_texture_png(
 ) -> TextureInfo | None:
     """导出资源包里的贴图为 PNG。target_name 为空时取第一张。"""
     env = UnityPy.load(str(bundle_path))
-    for obj in env.objects:
-        if obj.type.name != "Texture2D":
-            continue
-        data = obj.read()
-        name = str(getattr(data, "m_Name", "") or getattr(data, "name", "") or "(未命名)")
-        if target_name and name != target_name:
-            continue
-        image = data.image
-        if image is None:
-            continue
-        out = Path(out_png)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        image.convert("RGBA").save(out)
-        return TextureInfo(name=name, width=image.width, height=image.height)
-    return None
+    obj = data = image = None
+    try:
+        for obj in env.objects:
+            if obj.type.name != "Texture2D":
+                continue
+            data = obj.read()
+            name = str(getattr(data, "m_Name", "") or getattr(data, "name", "") or "(未命名)")
+            if target_name and name != target_name:
+                continue
+            image = data.image
+            if image is None:
+                continue
+            out = Path(out_png)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            image.convert("RGBA").save(out)
+            return TextureInfo(name=name, width=image.width, height=image.height)
+        return None
+    finally:
+        obj = data = image = None
+        env = None
+        gc.collect()
 
 
 def _latest_catalog_path(cache_root: Path) -> Path | None:

@@ -171,3 +171,13 @@ def dedupe_by_texture_name(
         else:
             count[tex] += 1
     return [(first[t], t, count[t]) for t in order]
+
+
+def annotate_texture_name_duplicates(
+    rows: list[tuple[str, str]],
+) -> list[tuple[str, str, int]]:
+    """保留每个 bundle，仅附上同名资源数量，供界面区分选择。"""
+    counts: dict[str, int] = {}
+    for _bundle, texture_name in rows:
+        counts[texture_name] = counts.get(texture_name, 0) + 1
+    return [(bundle, texture_name, counts[texture_name]) for bundle, texture_name in rows]

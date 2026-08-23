@@ -33,6 +33,7 @@
     selection: null,
     draftIndex: -1,
     pendingMod: null,
+    migrationSource: null,
     replacement: null,
     busy: false,
     modBundles: [],
@@ -363,7 +364,7 @@
     state.resourcePage = Math.min(state.resourcePage, pages - 1);
     const start = state.resourcePage * PAGE_SIZE;
     const chunk = state.resources.slice(start, start + PAGE_SIZE);
-    if (status) status.textContent = total ? `已加载 ${total} 条（同名已合并）` : "没有匹配";
+    if (status) status.textContent = total ? `已加载 ${total} 条（同名资源分开显示）` : "没有匹配";
     if (pageLabel) pageLabel.textContent = total ? `第 ${state.resourcePage + 1}/${pages} 页` : "";
     if (!chunk.length) {
       list.innerHTML = `<div class="notice">没有匹配的资源。</div>`;
@@ -375,8 +376,10 @@
       const item = document.createElement("button");
       item.type = "button";
       item.className = "resource-item" + (key === selKey ? " is-active" : "");
-      const label = row.duplicates > 1 ? `${row.name}  ×${row.duplicates}包` : row.name;
-      item.innerHTML = `<span>${escapeHtml(label)}</span>`;
+      const bundleLabel = shortBundleName(row.bundle);
+      const detail = row.duplicates > 1 ? `同名 ${row.duplicates} 个 · ${bundleLabel}` : bundleLabel;
+      item.innerHTML = `<span>${escapeHtml(row.name)}</span><small>${escapeHtml(detail)}</small>`;
+      item.title = `${row.name}\n${row.bundle}`;
       item.addEventListener("click", () => selectResource(row.bundle, row.name));
       list.appendChild(item);
     });
@@ -597,6 +600,12 @@
       .replace(/"/g, "&quot;");
   }
 
+  function shortBundleName(value) {
+    const name = String(value || "").replace(/\.bundle$/i, "");
+    if (name.length <= 16) return name || "未知包";
+    return `${name.slice(0, 8)}…${name.slice(-6)}`;
+  }
+
   function bindEvents() {
     $$(".nav-button").forEach((btn) => btn.addEventListener("click", () => showPage(btn.dataset.page)));
     $$("[data-page-link]").forEach((btn) =>
@@ -617,6 +626,9 @@
     $("#choose-mod-folder")?.addEventListener("click", () => chooseMod("folder"));
     $("#choose-mod-archive")?.addEventListener("click", () => chooseMod("archive"));
     $("#install-mod")?.addEventListener("click", installMod);
+    $("#choose-migration-file")?.addEventListener("click", () => chooseMigrationSource("file"));
+    $("#choose-migration-folder")?.addEventListener("click", () => chooseMigrationSource("folder"));
+    $("#run-migration")?.addEventListener("click", runMigration);
 
     $("#asset-type")?.addEventListener("change", (e) => {
       state.assetType = e.target.value;
@@ -817,6 +829,44 @@
       renderInstalled();
       renderDashboard();
       toast(`安装完成：${data.name}`);
+    } catch (_) {}
+  }
+
+  function migrationReportText(report, finished = false) {
+    if (!report) return "还没有选择旧 Mod。";
+    const prefix = finished
+      ? `迁移完成：已加入作品集 ${report.added || 0} 张。`
+      : `已扫描 ${report.files || 0} 个包、${report.textures || 0} 张贴图。`;
+    const details = `可匹配 ${report.matched || 0}，重名歧义 ${report.ambiguous || 0}，新版缺失 ${report.missing || 0}`;
+    const failed = finished && report.failed ? `，失败 ${report.failed}` : "";
+    const warning = report.warnings?.length ? `\n另有 ${report.warnings.length} 个文件无法读取。` : "";
+    return `${prefix}\n${details}${failed}。${warning}`;
+  }
+
+  async function chooseMigrationSource(mode) {
+    try {
+      const data = await call(
+        "choose_migration_source",
+        { busy: true, busyText: "分析旧 Mod…" },
+        mode
+      );
+      if (!data) return;
+      state.migrationSource = data;
+      $("#migration-analysis").textContent = `${data.path}\n${migrationReportText(data)}`;
+      $("#run-migration").disabled = !(data.matched > 0);
+      toast(`找到 ${data.matched || 0} 张可迁移贴图`);
+    } catch (_) {}
+  }
+
+  async function runMigration() {
+    if (!state.migrationSource) return;
+    try {
+      const data = await call("run_migration", { busy: true, busyText: "迁移旧贴图…" });
+      state.draft = data.draft || state.draft;
+      renderDraftList();
+      $("#migration-analysis").textContent = migrationReportText(data.report, true);
+      $("#run-migration").disabled = true;
+      toast(`迁移完成：${data.report?.added || 0} 张已加入作品集`);
     } catch (_) {}
   }
 
