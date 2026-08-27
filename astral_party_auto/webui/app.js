@@ -30,6 +30,10 @@
     categoryId: "hand_card",
     resources: [],
     resourcePage: 0,
+    totalResources: 0,
+    multiSelectMode: false,
+    selectedResources: [],
+    browseRequestSeq: 0,
     query: "",
     characterFilter: "",
     characterList: [],
@@ -338,6 +342,60 @@
     return state.characterLabels?.bundles?.[bundle] || "";
   }
 
+  function resourceKey(bundle, name) {
+    return `${bundle}::${name}`;
+  }
+
+  function isResourceSelected(bundle, name) {
+    const key = resourceKey(bundle, name);
+    return state.selectedResources.some((item) => resourceKey(item.bundle, item.name) === key);
+  }
+
+  function updateMultiSelectUI() {
+    const info = $("#multi-select-info");
+    if (info) {
+      info.textContent = state.multiSelectMode ? `已选 ${state.selectedResources.length} 项` : "";
+      info.classList.toggle("is-hidden", !state.multiSelectMode);
+    }
+    const applyBtn = $("#apply-resource-character");
+    if (applyBtn) {
+      applyBtn.textContent = state.multiSelectMode ? "批量标注选中资源" : "标注当前资源";
+      applyBtn.disabled = state.multiSelectMode ? state.selectedResources.length === 0 : !state.selection;
+    }
+    const bundleBtn = $("#apply-bundle-character");
+    if (bundleBtn) bundleBtn.disabled = state.multiSelectMode || !state.selection;
+  }
+
+  function setMultiSelectMode(on) {
+    state.multiSelectMode = !!on;
+    if (!state.multiSelectMode) state.selectedResources = [];
+    const btn = $("#multi-select-toggle");
+    if (btn) {
+      btn.classList.toggle("is-active", state.multiSelectMode);
+      btn.textContent = state.multiSelectMode ? "☑ 退出多选" : "☑ 多选";
+    }
+    updateMultiSelectUI();
+    renderResources();
+  }
+
+  function toggleSelectedResource(bundle, name) {
+    const key = resourceKey(bundle, name);
+    const index = state.selectedResources.findIndex(
+      (item) => resourceKey(item.bundle, item.name) === key
+    );
+    if (index >= 0) {
+      state.selectedResources.splice(index, 1);
+    } else {
+      state.selectedResources.push({ bundle, name });
+    }
+    updateMultiSelectUI();
+    renderResources();
+  }
+
+  function exitMultiSelect() {
+    if (state.multiSelectMode) setMultiSelectMode(false);
+  }
+
   async function refreshBrowse() {
     fillAssetTypes();
     try {
@@ -355,6 +413,7 @@
       if (validateBtn) validateBtn.classList.toggle("is-hidden", state.assetType !== "dynamic");
       if (!state.categories.some((c) => c.id === state.categoryId)) {
         state.categoryId = state.categories[0]?.id || "all";
+        state.resourcePage = 0;
       }
       renderCategories();
       await loadResources();
@@ -380,6 +439,7 @@
       btn.addEventListener("click", () => {
         state.categoryId = cat.id;
         state.resourcePage = 0;
+        exitMultiSelect();
         renderCategories();
         loadResources();
       });
@@ -388,26 +448,37 @@
   }
 
   async function loadResources() {
+    const seq = ++state.browseRequestSeq;
     $("#resource-status").textContent = "加载中…";
     try {
-      const rows = await call(
+      const data = await call(
         "browse_assets",
         { quiet: true },
         state.assetType,
         state.categoryId,
         state.query || "",
-        state.characterFilter || ""
+        state.characterFilter || "",
+        state.resourcePage,
+        PAGE_SIZE
       );
-      state.resources = rows || [];
-      if (!state.resources.length) {
+      if (seq !== state.browseRequestSeq) return;
+      state.resources = (data && data.items) || [];
+      state.totalResources = (data && data.total) || 0;
+      const pages = Math.max(1, Math.ceil(state.totalResources / PAGE_SIZE));
+      if (state.resourcePage > pages - 1) {
+        state.resourcePage = Math.max(0, pages - 1);
+        return loadResources();
+      }
+      if (!state.resources.length && state.resourcePage === 0) {
         state.selection = null;
         renderPreview();
         updateExportButtons();
       }
-      state.resourcePage = 0;
       renderResources();
     } catch (err) {
+      if (seq !== state.browseRequestSeq) return;
       state.resources = [];
+      state.totalResources = 0;
       renderResources();
       $("#resource-status").textContent = err.message || "加载失败";
     }
@@ -419,27 +490,30 @@
     const pageLabel = $("#resource-page-label");
     if (!list) return;
     list.innerHTML = "";
-    const total = state.resources.length;
+    const total = state.totalResources || state.resources.length || 0;
     const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
     state.resourcePage = Math.min(state.resourcePage, pages - 1);
-    const start = state.resourcePage * PAGE_SIZE;
-    const chunk = state.resources.slice(start, start + PAGE_SIZE);
-    if (status) status.textContent = total ? `已加载 ${total} 条（按 Bundle 排序，同名分开显示）` : "没有匹配";
+    const items = state.resources || [];
+    if (status) status.textContent = total ? `共 ${total} 条（按 Bundle 排序，同名分开显示）` : "没有匹配";
     if (pageLabel) pageLabel.textContent = total ? `第 ${state.resourcePage + 1}/${pages} 页` : "";
-    if (!chunk.length) {
+    if (!items.length) {
       list.innerHTML = `<div class="notice">没有匹配的资源。</div>`;
       return;
     }
     const selKey = state.selection ? `${state.selection.bundle}::${state.selection.name}` : "";
-    chunk.forEach((row) => {
+    items.forEach((row) => {
       const key = `${row.bundle}::${row.name}`;
       const item = document.createElement("button");
       item.type = "button";
-      item.className = "resource-item" + (key === selKey ? " is-active" : "");
+      item.className = "resource-item";
+      const isSelected = state.multiSelectMode && isResourceSelected(row.bundle, row.name);
+      if (!state.multiSelectMode && key === selKey) item.classList.add("is-active");
+      if (isSelected) item.classList.add("is-selected");
       const char = row.character || effectiveCharacter(row.bundle, row.name);
       const badge = char ? `<span class="character-badge">${escapeHtml(char)}</span>` : "";
       const bundleLabel = shortBundleName(row.bundle);
       const detail = row.duplicates > 1 ? `同名 ${row.duplicates} 个 · ${bundleLabel}` : bundleLabel;
+      const multiCheck = state.multiSelectMode ? `<span class="multi-check">${isSelected ? "✓" : ""}</span>` : "";
       item.innerHTML = `
         <span class="resource-main">
           <span class="resource-bundle">${escapeHtml(row.bundle)}</span>
@@ -447,10 +521,17 @@
         </span>
         ${badge}
         <small>${escapeHtml(detail)}</small>
+        ${multiCheck}
       `;
       item.title = `${row.name}
 ${row.bundle}`;
-      item.addEventListener("click", () => selectResource(row.bundle, row.name));
+      item.addEventListener("click", () => {
+        if (state.multiSelectMode) {
+          toggleSelectedResource(row.bundle, row.name);
+        } else {
+          selectResource(row.bundle, row.name);
+        }
+      });
       list.appendChild(item);
     });
   }
@@ -496,6 +577,7 @@ ${row.bundle}`;
       $("#apply-resource-character").disabled = true;
       $("#apply-bundle-character").disabled = true;
       $("#refresh-resource").disabled = true;
+      updateMultiSelectUI();
       return;
     }
     if (title) title.textContent = sel.caption || sel.name || "资源";
@@ -519,6 +601,7 @@ ${row.bundle}`;
     }
     if (go) go.disabled = ["mesh", "dynamic"].includes(sel.asset_type || sel.kind);
     updateExportButtons();
+    updateMultiSelectUI();
   }
 
   function updateExportButtons() {
@@ -938,7 +1021,9 @@ ${row.bundle}`;
     $("#asset-type")?.addEventListener("change", (e) => {
       state.assetType = e.target.value;
       state.categoryId = state.assetType === "texture" ? "hand_card" : "all";
+      state.resourcePage = 0;
       state.selection = null;
+      exitMultiSelect();
       renderPreview();
       const hint = $("#asset-type-hint");
       if (hint) hint.textContent = TYPE_HINTS[state.assetType] || "";
@@ -947,16 +1032,35 @@ ${row.bundle}`;
     $("#resource-search-button")?.addEventListener("click", () => {
       state.query = $("#resource-search").value.trim();
       state.resourcePage = 0;
+      exitMultiSelect();
       loadResources();
     });
     $("#character-filter")?.addEventListener("change", (e) => {
       state.characterFilter = e.target.value;
       state.resourcePage = 0;
+      exitMultiSelect();
       loadResources();
     });
+    $("#multi-select-toggle")?.addEventListener("click", () => {
+      setMultiSelectMode(!state.multiSelectMode);
+    });
     $("#apply-resource-character")?.addEventListener("click", async () => {
-      if (!state.selection) return;
       const char = $("#resource-character")?.value || "";
+      if (state.multiSelectMode) {
+        if (!state.selectedResources.length) {
+          toast("请先选择要批量标注的资源", true);
+          return;
+        }
+        const count = state.selectedResources.length;
+        const items = state.selectedResources.map((r) => ({ bundle: r.bundle, name: r.name }));
+        state.characterLabels = await call("set_resources_character", { quiet: true }, items, char);
+        fillResourceCharacterSelect();
+        setMultiSelectMode(false);
+        await loadResources();
+        toast(`已批量标注 ${count} 个资源`);
+        return;
+      }
+      if (!state.selection) return;
       state.characterLabels = await call("set_resource_character", { quiet: true }, state.selection.bundle, state.selection.name, char);
       fillResourceCharacterSelect();
       const eff = effectiveCharacter(state.selection.bundle, state.selection.name);
@@ -965,7 +1069,7 @@ ${row.bundle}`;
       await loadResources();
     });
     $("#apply-bundle-character")?.addEventListener("click", async () => {
-      if (!state.selection) return;
+      if (state.multiSelectMode || !state.selection) return;
       const char = $("#resource-character")?.value || "";
       state.characterLabels = await call("set_bundle_character", { quiet: true }, state.selection.bundle, char);
       fillResourceCharacterSelect();
@@ -978,6 +1082,7 @@ ${row.bundle}`;
       if (e.key === "Enter") {
         state.query = e.target.value.trim();
         state.resourcePage = 0;
+        exitMultiSelect();
         loadResources();
       }
     });
@@ -986,14 +1091,14 @@ ${row.bundle}`;
     $("#resource-prev")?.addEventListener("click", () => {
       if (state.resourcePage > 0) {
         state.resourcePage -= 1;
-        renderResources();
+        loadResources();
       }
     });
     $("#resource-next")?.addEventListener("click", () => {
-      const pages = Math.max(1, Math.ceil(state.resources.length / PAGE_SIZE));
+      const pages = Math.max(1, Math.ceil((state.totalResources || 0) / PAGE_SIZE));
       if (state.resourcePage < pages - 1) {
         state.resourcePage += 1;
-        renderResources();
+        loadResources();
       }
     });
     $("#go-studio")?.addEventListener("click", () => {

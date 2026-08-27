@@ -34,7 +34,7 @@ _TYPE_MAP = {
 }
 
 ASSET_TYPE_KEYS = ("texture", "text", "mesh", "anim", "dynamic")
-INDEX_VERSION = 6
+INDEX_VERSION = 7
 
 BundleDirectories = str | Path | Iterable[str | Path]
 
@@ -135,7 +135,11 @@ def read_bundle_textures(bundle_path: str | Path) -> list[TextureInfo]:
 def read_bundle_asset_names(bundle_path: str | Path) -> dict[str, list[str]]:
     """一次扫包，按类型收集资源名。
 
-    返回 texture/text/mesh/anim/dynamic → [name,...]。
+    返回 texture/text/mesh/anim/dynamic → [name,...]，并额外返回：
+    - sprite：Sprite 对象名字
+    - atlas：被 Sprite 引用的 Texture2D 图集名（动画源图，不是动画帧）
+    - sequence_frames：可用于序列帧组的非图集贴图/精灵图名字
+
     - TextAsset 只收录可读文本到 text；FairyGUI（*_fui）等二进制不会混入 text。
     - dynamic 收集视频、Live2D/Spine/GIF/FairyGUI 等动态 2D 候选，以及序列帧组名。
     本游戏音效不在 Addressable bundle 的 AudioClip 里，故不索引音频。
@@ -144,6 +148,9 @@ def read_bundle_asset_names(bundle_path: str | Path) -> dict[str, list[str]]:
 
     out: dict[str, list[str]] = {k: [] for k in ASSET_TYPE_KEYS}
     texture_names: set[str] = set()
+    sprite_names: set[str] = set()
+    texture_path_names: dict[int, str] = {}
+    sprite_texture_paths: set[int] = set()
     dynamic_seen: set[str] = set()
     env = UnityPy.load(str(bundle_path))
     for obj in env.objects:
@@ -176,6 +183,16 @@ def read_bundle_asset_names(bundle_path: str | Path) -> dict[str, list[str]]:
             if name not in texture_names:
                 texture_names.add(name)
                 out["texture"].append(name)
+            if tn == "Sprite":
+                sprite_names.add(name)
+                rd = getattr(data, "m_RD", None)
+                tex = getattr(rd, "texture", None) if rd is not None else None
+                if tex is not None:
+                    pid = getattr(tex, "m_PathID", None)
+                    if pid:
+                        sprite_texture_paths.add(pid)
+            elif tn == "Texture2D":
+                texture_path_names[obj.path_id] = name
         elif kind == "text":
             raw = text_asset_bytes(data)
             dynamic_kind = classify_text_asset(name, raw)
@@ -199,12 +216,24 @@ def read_bundle_asset_names(bundle_path: str | Path) -> dict[str, list[str]]:
         else:
             out[kind].append(name)
 
-    # 序列帧贴图：同包同名前缀 + 数字帧号成组，组名作为 dynamic 资源项
-    for group in sequence_groups_from_names(texture_names):
+    # 识别图集：被 Sprite 引用的 Texture2D 是动画源图，不是动画帧。
+    atlas_names = {
+        texture_path_names[pid]
+        for pid in sprite_texture_paths
+        if pid in texture_path_names
+    }
+    sequence_frame_names = [name for name in texture_names if name not in atlas_names]
+
+    # 序列帧贴图：同包同名前缀 + 数字帧号成组，组名作为 dynamic 资源项。
+    # 只用非图集贴图/精灵图组成动画帧，避免把 Cry-001 这类图集混进序列帧。
+    for group in sequence_groups_from_names(sequence_frame_names):
         if group.base and group.base not in dynamic_seen:
             dynamic_seen.add(group.base)
             out["dynamic"].append(group.base)
 
+    out["sprite"] = sorted(sprite_names)
+    out["atlas"] = sorted(atlas_names)
+    out["sequence_frames"] = sorted(sequence_frame_names)
     return out
 
 
@@ -386,8 +415,9 @@ def build_asset_index(
         except Exception:
             names_by_type = {k: [] for k in ASSET_TYPE_KEYS}
         for kind, names in names_by_type.items():
-            if names:
-                typed[kind][bundle.name] = names
+            if kind not in ASSET_TYPE_KEYS or not names:
+                continue
+            typed[kind][bundle.name] = names
         if progress is not None and not progress(done, total, bundle.name):
             break
     _save_typed_index(cache_path, typed, source=bundle_source_key(aa_dirs))
