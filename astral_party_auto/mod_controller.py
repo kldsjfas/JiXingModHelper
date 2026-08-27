@@ -475,18 +475,16 @@ class ModController:
                     continue
                 yield bundle, name
 
-    def browse_labelled(
+    def _iter_labelled_rows(
         self,
-        cat_id: str = "all",
-        query: str = "",
-        limit: int = 500,
+        cat_id: str,
+        query: str,
         *,
-        asset_type: str = "texture",
+        asset_type: str,
         character: str = "",
-    ) -> list[tuple[str, str, str]]:
-        """返回 (bundle, name, character)，未标注在前、已标注在后，均按 bundle/name 排序。"""
+    ):
+        """按前端排序产出 (bundle, name, character)：未标注在前、已标注在后。"""
         char_filter = (character or "").strip()
-        out: list[tuple[str, str, str]] = []
 
         def matches(eff: str) -> bool:
             if char_filter == "__unmarked":
@@ -502,9 +500,7 @@ class ModController:
                 continue
             if not matches(eff):
                 continue
-            out.append((bundle, name, eff))
-            if len(out) >= limit:
-                return out
+            yield bundle, name, eff
 
         # 第二遍：已标注角色
         for bundle, name in self._iter_browse_rows(asset_type, cat_id, query):
@@ -513,11 +509,58 @@ class ModController:
                 continue
             if not matches(eff):
                 continue
-            out.append((bundle, name, eff))
-            if len(out) >= limit:
-                return out
+            yield bundle, name, eff
 
+    def browse_labelled(
+        self,
+        cat_id: str = "all",
+        query: str = "",
+        limit: int = 500,
+        offset: int = 0,
+        *,
+        asset_type: str = "texture",
+        character: str = "",
+    ) -> list[tuple[str, str, str]]:
+        """返回 (bundle, name, character)，未标注在前、已标注在后，均按 bundle/name 排序。"""
+        out: list[tuple[str, str, str]] = []
+        seen = 0
+        for row in self._iter_labelled_rows(
+            cat_id,
+            query,
+            asset_type=asset_type,
+            character=character,
+        ):
+            if seen < offset:
+                seen += 1
+                continue
+            out.append(row)
+            if len(out) >= limit:
+                break
         return out
+
+    def count_labelled(
+        self,
+        cat_id: str = "all",
+        query: str = "",
+        *,
+        asset_type: str = "texture",
+        character: str = "",
+    ) -> int:
+        char_filter = (character or "").strip()
+
+        def matches(eff: str) -> bool:
+            if char_filter == "__unmarked":
+                return not eff
+            if char_filter:
+                return eff == char_filter
+            return True
+
+        total = 0
+        for bundle, name in self._iter_browse_rows(asset_type, cat_id, query):
+            eff = self.effective_character(bundle, name)
+            if matches(eff):
+                total += 1
+        return total
 
     def preview_bundle(
         self,
@@ -692,9 +735,9 @@ class ModController:
             return self.selection
 
         if asset_type == "dynamic":
-            # 用与索引一致的贴图名集合（Texture2D + Sprite，已去重）
+            # 用与索引一致的贴图名集合，但排除被 Sprite 引用的 Texture2D 图集。
             names_by_type = read_bundle_asset_names(path)
-            texture_names = names_by_type.get("texture") or []
+            texture_names = names_by_type.get("sequence_frames") or names_by_type.get("texture") or []
             groups = [
                 group for group in sequence_groups_from_names(texture_names)
                 if group.base == asset_name
@@ -1483,6 +1526,20 @@ class ModController:
         self._save_character_labels()
         return self.character_labels()
 
+    def set_resources_character(self, items: list[dict], character: str) -> dict:
+        character = (character or "").strip()
+        for item in items or []:
+            bundle = str(item.get("bundle", "") or "")
+            name = str(item.get("name", "") or "")
+            if not bundle or not name:
+                continue
+            if character:
+                self._resource_labels.setdefault(bundle, {})[name] = character
+            else:
+                self._resource_labels.get(bundle, {}).pop(name, None)
+        self._save_character_labels()
+        return self.character_labels()
+
     def set_bundle_character(self, bundle: str, character: str) -> dict:
         character = (character or "").strip()
         if character:
@@ -1598,7 +1655,7 @@ class ModController:
             names_by_type = read_bundle_asset_names(path)
         except Exception:
             return False
-        texture_names = names_by_type.get("texture") or []
+        texture_names = names_by_type.get("sequence_frames") or names_by_type.get("texture") or []
         low = name.lower()
 
         # FairyGUI：需要能找到对应 atlas 贴图

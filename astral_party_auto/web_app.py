@@ -432,19 +432,33 @@ class DesktopApi:
         category_id: str,
         query: str = "",
         character: str = "",
-    ) -> list[dict]:
-        limit = 1000 if asset_type == "texture" else 500
-        rows = self.controller.browse_labelled(
+        page: int = 0,
+        page_size: int = 50,
+    ) -> dict:
+        page = max(0, int(page or 0))
+        page_size = max(1, int(page_size or 50))
+        offset = page * page_size
+        total = self.controller.count_labelled(
             category_id,
             query,
-            limit=limit,
             asset_type=asset_type,
             character=character,
         )
-        return [
-            {"bundle": bundle, "name": name, "character": char}
-            for bundle, name, char in rows
-        ]
+        rows = self.controller.browse_labelled(
+            category_id,
+            query,
+            limit=page_size,
+            offset=offset,
+            asset_type=asset_type,
+            character=character,
+        )
+        return {
+            "items": [
+                {"bundle": bundle, "name": name, "character": char}
+                for bundle, name, char in rows
+            ],
+            "total": total,
+        }
 
     @exposed
     def get_sequence_frames(self, bundle: str, name: str) -> dict:
@@ -458,7 +472,7 @@ class DesktopApi:
         if not path:
             raise RuntimeError(f"找不到资源包：{bundle}")
         names_by_type = read_bundle_asset_names(path)
-        texture_names = names_by_type.get("texture") or []
+        texture_names = names_by_type.get("sequence_frames") or names_by_type.get("texture") or []
         groups = [
             group for group in sequence_groups_from_names(texture_names)
             if group.base == name
@@ -504,6 +518,10 @@ class DesktopApi:
     @exposed
     def set_bundle_character(self, bundle: str, character: str) -> dict:
         return self.controller.set_bundle_character(bundle, character)
+
+    @exposed
+    def set_resources_character(self, items: list[dict], character: str) -> dict:
+        return self.controller.set_resources_character(items, character)
 
     @exposed
     def select_asset(self, asset_type: str, bundle: str, name: str, force: bool = False) -> dict:

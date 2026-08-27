@@ -778,6 +778,34 @@ input {
   color: var(--soft);
 }
 
+.resource-item .multi-check {
+  flex: 0 0 auto;
+  margin-left: auto;
+  width: 16px;
+  color: var(--soft);
+  font-weight: 700;
+  text-align: center;
+}
+
+.resource-item.is-selected {
+  color: #fff;
+  background: var(--purple);
+}
+
+.resource-item.is-selected .multi-check {
+  color: #fff;
+}
+
+.multi-select-info {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+#multi-select-toggle.is-active {
+  color: #fff;
+  background: var(--purple);
+}
+
 .resource-item:hover,
 .draft-item:hover { filter: brightness(1.1); }
 .resource-item.is-active,

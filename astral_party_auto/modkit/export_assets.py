@@ -9,7 +9,7 @@ from pathlib import Path
 import UnityPy
 from PIL import Image
 
-from .bundles import extract_texture_png
+from .bundles import extract_texture_png, read_bundle_asset_names
 from .dynamic import (
     find_sequence_preview_texture,
     sequence_groups_from_names,
@@ -222,18 +222,8 @@ def export_sequence_apng(
     fps: int = 30,
 ) -> Path:
     """导出序列帧为无损 APNG 动画（30fps 默认）。"""
-    env = UnityPy.load(str(bundle_path))
-    texture_names: list[str] = []
-    for obj in env.objects:
-        if obj.type.name not in ("Texture2D", "Sprite"):
-            continue
-        try:
-            data = obj.read()
-        except Exception:
-            continue
-        name = str(getattr(data, "m_Name", "") or "")
-        if name:
-            texture_names.append(name)
+    names_by_type = read_bundle_asset_names(bundle_path)
+    texture_names = names_by_type.get("sequence_frames") or names_by_type.get("texture") or []
 
     groups = [
         group for group in sequence_groups_from_names(texture_names)
@@ -288,18 +278,8 @@ def export_dynamic(
     fmt: str | None = None,
 ) -> Path:
     """导出动态 2D 资源：序列帧优先导出第一帧 PNG，否则导出原始字节。"""
-    env = UnityPy.load(str(bundle_path))
-    texture_names: list[str] = []
-    for obj in env.objects:
-        if obj.type.name not in ("Texture2D", "Sprite"):
-            continue
-        try:
-            data = obj.read()
-        except Exception:
-            continue
-        name = str(getattr(data, "m_Name", "") or "")
-        if name:
-            texture_names.append(name)
+    names_by_type = read_bundle_asset_names(bundle_path)
+    texture_names = names_by_type.get("sequence_frames") or names_by_type.get("texture") or []
 
     # 序列帧：按 fmt 导出 APNG 或第一帧 PNG
     if any(group.base == asset_name for group in sequence_groups_from_names(texture_names)):
@@ -315,6 +295,7 @@ def export_dynamic(
                 return out
 
     # TextAsset / 视频：导出原始字节
+    env = UnityPy.load(str(bundle_path))
     for obj in env.objects:
         if obj.type.name == "TextAsset":
             try:
