@@ -26,6 +26,18 @@ from .categories import (
     describe_selection,
     filter_by_category,
 )
+from .dynamic import (
+    DYNAMIC_KIND_LABELS,
+    SEQUENCE_MIN_FRAMES,
+    SequenceGroup,
+    classify_text_asset,
+    extract_fairygui_dynamic_names,
+    find_fairygui_atlas_texture,
+    find_sequence_preview_texture,
+    sequence_groups_from_names,
+    sorted_sequence_names,
+    text_asset_bytes,
+)
 from .export_assets import default_export_name, export_by_type
 from .maker import (
     decode_text_asset_raw,
@@ -37,6 +49,7 @@ from .maker import (
     replace_bundle_animation_raw,
     replace_bundle_text,
     replace_bundle_texture,
+    replace_bundle_texture_from_bundle,
 )
 from .manager import ModAnalysis, ModManager
 from .migration import (
@@ -69,6 +82,16 @@ __all__ = [
     "count_by_category",
     "describe_selection",
     "filter_by_category",
+    "DYNAMIC_KIND_LABELS",
+    "SEQUENCE_MIN_FRAMES",
+    "SequenceGroup",
+    "classify_text_asset",
+    "extract_fairygui_dynamic_names",
+    "find_fairygui_atlas_texture",
+    "find_sequence_preview_texture",
+    "sequence_groups_from_names",
+    "sorted_sequence_names",
+    "text_asset_bytes",
     "default_export_name",
     "decode_text_asset_raw",
     "export_by_type",
@@ -80,6 +103,7 @@ __all__ = [
     "replace_bundle_animation_raw",
     "replace_bundle_text",
     "replace_bundle_texture",
+    "replace_bundle_texture_from_bundle",
     "ModAnalysis",
     "ModManager",
     "BundleMigrationPlan",

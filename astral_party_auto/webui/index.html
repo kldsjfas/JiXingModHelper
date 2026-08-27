@@ -60,6 +60,7 @@
               <button class="button ghost" data-page-link="pack">我的作品集</button>
               <button class="button ghost" data-action="refresh-detection">刷新检测</button>
               <button class="button ghost" data-action="open-assets">打开资源目录</button>
+              <button class="button danger" data-action="quick-sfw-texture">一键创建去SFW贴图Mod</button>
             </div>
             <small id="game-path">自动检测游戏路径中…</small>
           </article>
@@ -135,10 +136,16 @@
             <section class="panel resource-panel">
               <div class="search-row">
                 <input id="resource-search" type="search" placeholder="搜索资源名 / 包名…">
+                <select id="character-filter" title="按角色筛选（需先手动标注）">
+                  <option value="">全部</option>
+                  <option value="__unmarked">未标注</option>
+                </select>
                 <button id="resource-search-button" class="button ghost compact">搜索</button>
                 <button id="build-index" class="button purple compact">刷新索引</button>
+                <button id="validate-dynamic" class="button gold compact is-hidden">校验动态资源</button>
+                <button id="multi-select-toggle" class="button ghost compact" title="多选批量标注角色">☑ 多选</button>
               </div>
-              <div class="list-meta"><span id="resource-status">请选择分类</span><span id="resource-page-label"></span></div>
+              <div class="list-meta"><span id="resource-status">请选择分类</span><span id="multi-select-info" class="multi-select-info is-hidden"></span><span id="resource-page-label"></span></div>
               <div id="resource-list" class="resource-list"></div>
               <div class="pager">
                 <button id="resource-prev" class="button ghost compact">上一页</button>
@@ -154,6 +161,17 @@
                 <div class="action-row two-up">
                   <button id="export-primary" class="button ghost" disabled>导出</button>
                   <button id="export-secondary" class="button ghost" disabled>副格式</button>
+                </div>
+                <div class="action-row">
+                  <button id="refresh-resource" class="button ghost compact" disabled>刷新资源</button>
+                </div>
+              </div>
+              <div class="character-label-box">
+                <label for="resource-character">角色标注</label>
+                <select id="resource-character"></select>
+                <div class="action-row two-up">
+                  <button id="apply-resource-character" class="button ghost compact" disabled>标注当前资源</button>
+                  <button id="apply-bundle-character" class="button ghost compact" disabled>整个Bundle标注</button>
                 </div>
               </div>
             </aside>
@@ -220,6 +238,17 @@
   <div id="loading-overlay" class="loading-overlay"><div class="spinner"></div><span>正在连接本地后端…</span></div>
   <div id="busy-overlay" class="busy-overlay is-hidden"><div class="spinner"></div><span id="busy-text">处理中…</span></div>
   <div id="toast-region" class="toast-region" aria-live="polite"></div>
+
+  <div id="lightbox-overlay" class="lightbox-overlay is-hidden">
+    <div class="lightbox-toolbar">
+      <span id="lightbox-title" class="lightbox-title">图片预览</span>
+      <button id="lightbox-close" class="lightbox-close" title="关闭预览">×</button>
+    </div>
+    <div id="lightbox-stage" class="lightbox-stage">
+      <img id="lightbox-image" alt="大图预览" draggable="false">
+    </div>
+    <div class="lightbox-hint">滚轮缩放 · 拖拽平移 · 点击空白关闭</div>
+  </div>
 
   <div id="crop-modal" class="modal-overlay is-hidden">
     <div class="modal crop-modal">

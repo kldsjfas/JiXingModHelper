@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import hmac
 import json
 import mimetypes
 import os
@@ -178,7 +179,7 @@ class DesktopApi:
             backup_count = sum(1 for _ in controller.manager.backup_dir.glob("*.bundle"))
         game_name = "未检测到"
         if controller.game_install:
-            game_name = controller.game_install.install_dir.name
+            game_name = controller.game_install.name
         return {
             "has_game": controller.has_game,
             "game_name": game_name,
@@ -240,7 +241,7 @@ class DesktopApi:
         if dash.get("has_game"):
             self._append_log(f"已连接游戏：{dash.get('game_exe') or dash.get('game_name')}")
         else:
-            self._append_log("未检测到游戏。可点「刷新检测」，或确认 Steam 已安装吉星派对。")
+            self._append_log("未检测到游戏。可点「刷新检测」，或确认已安装 Steam 或 TapTap 版吉星派对。")
         return {
             "dashboard": dash,
             "installed": self.controller.installed_mods(),
@@ -473,17 +474,131 @@ class DesktopApi:
         ]
 
     @exposed
-    def browse_assets(self, asset_type: str, category_id: str, query: str = "") -> list[dict]:
-        limit = 500 if asset_type == "texture" else 200
-        rows = self.controller.browse(category_id, query, limit=limit, asset_type=asset_type)
-        return [
-            {"bundle": bundle, "name": name, "duplicates": duplicates}
-            for bundle, name, duplicates in annotate_texture_name_duplicates(rows)
-        ]
+    def browse_assets(
+        self,
+        asset_type: str,
+        category_id: str,
+        query: str = "",
+        character: str = "",
+        page: int = 0,
+        page_size: int = 50,
+    ) -> dict:
+        page = max(0, int(page or 0))
+        page_size = max(1, int(page_size or 50))
+        offset = page * page_size
+        total = self.controller.count_labelled(
+            category_id,
+            query,
+            asset_type=asset_type,
+            character=character,
+        )
+        rows = self.controller.browse_labelled(
+            category_id,
+            query,
+            limit=page_size,
+            offset=offset,
+            asset_type=asset_type,
+            character=character,
+        )
+        names_only = [(bundle, name) for bundle, name, _char in rows]
+        annotated = annotate_texture_name_duplicates(names_only)
+        return {
+            "items": [
+                {
+                    "bundle": bundle,
+                    "name": name,
+                    "character": char,
+                    "duplicates": duplicates,
+                }
+                for (bundle, name, char), (_b, _n, duplicates) in zip(rows, annotated)
+            ],
+            "total": total,
+        }
 
     @exposed
-    def select_asset(self, asset_type: str, bundle: str, name: str) -> dict:
-        selection = self.controller.set_selection(bundle, name, asset_type=asset_type)
+    def get_sequence_frames(self, bundle: str, name: str) -> dict:
+        from astral_party_auto.modkit.bundles import read_bundle_asset_names
+        from astral_party_auto.modkit.dynamic import (
+            sequence_groups_from_names,
+            sorted_sequence_names,
+        )
+
+        path = self.controller.original_bundle_path(bundle)
+        if not path:
+            raise RuntimeError(f"找不到资源包：{bundle}")
+        names_by_type = read_bundle_asset_names(path)
+        texture_names = names_by_type.get("sequence_frames") or names_by_type.get("texture") or []
+        groups = [
+            group for group in sequence_groups_from_names(texture_names)
+            if group.base == name
+        ]
+        if not groups:
+            raise RuntimeError("该资源不是序列帧动画组。")
+        group = groups[0]
+        frame_names = sorted_sequence_names(group.names)[:120]
+        frames = []
+        width = height = 0
+        for frame_name in frame_names:
+            png, info = self.controller.preview_bundle(
+                path,
+                frame_name,
+                tag=f"seqframe_{bundle[:16]}",
+            )
+            if png:
+                frames.append(self._image_data(png))
+                if info:
+                    width, height = info.width, info.height
+        return {
+            "frames": frames,
+            "names": frame_names,
+            "fps": 30,
+            "width": width,
+            "height": height,
+            "total": group.frame_count,
+            "truncated": group.frame_count > len(frame_names),
+        }
+
+    @exposed
+    def get_character_list(self) -> list[str]:
+        return self.controller.character_list()
+
+    @exposed
+    def get_character_labels(self) -> dict:
+        return self.controller.character_labels()
+
+    @exposed
+    def set_resource_character(self, bundle: str, name: str, character: str) -> dict:
+        return self.controller.set_resource_character(bundle, name, character)
+
+    @exposed
+    def set_bundle_character(self, bundle: str, character: str) -> dict:
+        return self.controller.set_bundle_character(bundle, character)
+
+    @exposed
+    def set_resources_character(self, items: list[dict], character: str) -> dict:
+        return self.controller.set_resources_character(items, character)
+
+    @exposed
+    def select_asset(self, asset_type: str, bundle: str, name: str, force: bool = False) -> dict:
+        selection = self.controller.set_selection(
+            bundle,
+            name,
+            asset_type=asset_type,
+            force=bool(force),
+        )
+        return self._selection_payload(selection) or {}
+
+    @exposed
+    def refresh_selection(self) -> dict | None:
+        if not self.controller.selection:
+            return None
+        sel = self.controller.selection
+        selection = self.controller.set_selection(
+            sel.get("bundle", ""),
+            sel.get("name", ""),
+            asset_type=sel.get("asset_type") or sel.get("kind") or "texture",
+            force=True,
+        )
         return self._selection_payload(selection) or {}
 
     @exposed
@@ -503,6 +618,13 @@ class DesktopApi:
             default_name = str(Path(default_name).with_suffix(f".{fmt}"))
         elif asset_type == "anim" and variant == "secondary":
             default_name = str(Path(default_name).with_suffix(".animbin"))
+        elif asset_type == "dynamic" and selection.get("frame_names"):
+            if variant == "secondary":
+                fmt = "png"
+                default_name = str(Path(default_name).with_suffix(".png"))
+            else:
+                fmt = "apng"
+                default_name = str(Path(default_name).with_suffix(".apng"))
         file_path = self._pick_path(
             "save",
             save_filename=default_name,
@@ -717,6 +839,12 @@ class DesktopApi:
         return {"installed": self.controller.installed_mods(), "dashboard": self._dashboard_state()}
 
     @exposed
+    def quick_create_sfw_texture(self) -> dict:
+        result = self.controller.quick_create_sfw_texture_mod()
+        result["dashboard"] = self._dashboard_state()
+        return result
+
+    @exposed
     def build_index(self) -> dict:
         if not self.controller.has_game:
             raise RuntimeError("没有检测到游戏。")
@@ -734,6 +862,27 @@ class DesktopApi:
             )
 
         self.controller.build_index_async(progress, finished)
+        return {"started": True}
+
+    @exposed
+    def validate_dynamic(self) -> dict:
+        if not self.controller.has_game:
+            raise RuntimeError("没有检测到游戏。")
+
+        def progress(done: int, total: int, current: str) -> None:
+            self._emit(
+                "dynamic_validate_progress",
+                {"done": done, "total": total, "current": current},
+            )
+
+        def worker() -> None:
+            try:
+                result = self.controller.validate_dynamic_resources(progress)
+                self._emit("dynamic_validate_done", result)
+            except Exception as exc:
+                self._emit("dynamic_validate_done", {"error": str(exc)})
+
+        threading.Thread(target=worker, daemon=True).start()
         return {"started": True}
 
     @exposed
@@ -767,12 +916,43 @@ def _free_port() -> int:
     return port
 
 
-def _build_server(api: "DesktopApi"):
+def _build_server(api: "DesktopApi", api_token: str):
     """把 DesktopApi 的 @exposed 方法包成一个本地 HTTP 服务（前端用 fetch 调）。"""
     import bottle
 
+    if not api_token:
+        raise ValueError("本地 API token 不能为空。")
+
     web_root = str(WEB_DIR)
     app = bottle.Bottle()
+
+    @app.hook("after_request")
+    def _security_headers():
+        bottle.response.set_header("Cache-Control", "no-store")
+        bottle.response.set_header("Referrer-Policy", "no-referrer")
+        bottle.response.set_header("X-Content-Type-Options", "nosniff")
+        bottle.response.set_header(
+            "Content-Security-Policy",
+            "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
+            "script-src 'self'; connect-src 'self'; object-src 'none'; "
+            "base-uri 'none'; frame-ancestors 'none'",
+        )
+
+    def _json_error(status: int, message: str) -> str:
+        bottle.response.status = status
+        bottle.response.content_type = "application/json"
+        return json.dumps({"ok": False, "error": message}, ensure_ascii=False)
+
+    def _request_is_authorized() -> bool:
+        supplied_token = bottle.request.get_header("X-JiXing-Token", "")
+        if not hmac.compare_digest(supplied_token, api_token):
+            return False
+
+        origin = bottle.request.get_header("Origin")
+        if not origin:
+            return True
+        expected_origin = f"http://{bottle.request.get_header('Host')}"
+        return hmac.compare_digest(origin.rstrip("/"), expected_origin.rstrip("/"))
 
     @app.get("/")
     def _index():
@@ -780,22 +960,28 @@ def _build_server(api: "DesktopApi"):
 
     @app.get("/poll")
     def _poll():
+        if not _request_is_authorized():
+            return _json_error(403, "请求未授权。")
         bottle.response.content_type = "application/json"
         return json.dumps(api.poll_events(bottle.request.query.get("since", "0")), ensure_ascii=False)
 
     @app.post("/api/<name>")
     def _call(name):
+        if not _request_is_authorized():
+            return _json_error(403, "请求未授权。")
+        if bottle.request.content_type.lower() != "application/json":
+            return _json_error(415, "接口只接受 application/json。")
+
         bottle.response.content_type = "application/json"
         method = getattr(api, name, None)
         if method is None or not getattr(method, "_exposed", False):
-            bottle.response.status = 404
-            return json.dumps({"ok": False, "error": f"未知接口 {name}"}, ensure_ascii=False)
+            return _json_error(404, f"未知接口 {name}")
         try:
             args = bottle.request.json
         except Exception:
-            args = None
+            return _json_error(400, "JSON 请求体无效。")
         if not isinstance(args, list):
-            args = []
+            return _json_error(400, "JSON 请求体必须是参数数组。")
         return json.dumps(method(*args), ensure_ascii=False)
 
     @app.get("/<path:path>")

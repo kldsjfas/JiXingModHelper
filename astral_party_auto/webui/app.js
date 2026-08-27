@@ -3,6 +3,8 @@
   "use strict";
 
   const PAGE_SIZE = 25;
+  const API_TOKEN = new URLSearchParams(window.location.hash.slice(1)).get("token") || "";
+  const API_HEADERS = { "X-JiXing-Token": API_TOKEN };
   const PAGE_TITLES = {
     dashboard: "仪表盘",
     manage: "Mod 管理",
@@ -16,6 +18,7 @@
     text: "可读配置/文案。FairyGUI 二进制已过滤。",
     mesh: "3D 三角面模型，只导出不替换。",
     anim: "Unity 动画片段。预览为同包第一帧/图集，可换图或 .animbin。",
+    dynamic: "动态 2D 图像：序列帧、视频、Live2D/GIF/FairyGUI 等。",
   };
 
   const state = {
@@ -29,7 +32,14 @@
     categoryId: "hand_card",
     resources: [],
     resourcePage: 0,
+    totalResources: 0,
+    multiSelectMode: false,
+    selectedResources: [],
+    browseRequestSeq: 0,
     query: "",
+    characterFilter: "",
+    characterList: [],
+    characterLabels: { bundles: {}, resources: {} },
     selection: null,
     draftIndex: -1,
     pendingMod: null,
@@ -39,6 +49,20 @@
     modBundles: [],
     modBundleActive: "",
     modPreviewTitle: "",
+    sequenceFrames: [],
+    sequenceTimer: null,
+    lightboxFrames: [],
+    lightboxSequenceTimer: null,
+    lightbox: {
+      scale: 1,
+      tx: 0,
+      ty: 0,
+      dragging: false,
+      startX: 0,
+      startY: 0,
+      origTx: 0,
+      origTy: 0,
+    },
   };
 
   const $ = (sel, root = document) => root.querySelector(sel);
@@ -79,7 +103,7 @@
   async function api(name, ...args) {
     const resp = await fetch("/api/" + name, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { ...API_HEADERS, "Content-Type": "application/json" },
       body: JSON.stringify(args),
     });
     const result = await resp.json();
@@ -138,7 +162,7 @@
     if (path) {
       path.textContent = d.has_game
         ? `自动找到的游戏：${d.game_exe || ""}`
-        : "未找到游戏，请确认 Steam 已安装吉星派对。";
+        : "未找到游戏，请确认已安装 Steam 或 TapTap 版吉星派对。";
     }
     setHeaderStatus(d.has_game ? "游戏已连接" : "未检测到游戏", !d.has_game);
   }
@@ -278,6 +302,7 @@
       { id: "text", label: "文本" },
       { id: "mesh", label: "3D模型" },
       { id: "anim", label: "动画" },
+      { id: "dynamic", label: "动态图像" },
     ]).forEach((t) => {
       const opt = document.createElement("option");
       opt.value = t.id;
@@ -289,13 +314,108 @@
     if (hint) hint.textContent = TYPE_HINTS[state.assetType] || "";
   }
 
+  function fillCharacterFilter() {
+    const sel = $("#character-filter");
+    if (!sel) return;
+    const current = state.characterFilter || "";
+    const options = ['<option value="">全部</option>', '<option value="__unmarked">未标注</option>'];
+    (state.characterList || []).forEach((c) => {
+      options.push(`<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`);
+    });
+    sel.innerHTML = options.join("");
+    sel.value = current;
+  }
+
+  function fillResourceCharacterSelect() {
+    const sel = $("#resource-character");
+    if (!sel) return;
+    const current = sel.value || "";
+    const options = ['<option value="">未标注</option>'];
+    (state.characterList || []).forEach((c) => {
+      options.push(`<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`);
+    });
+    sel.innerHTML = options.join("");
+    if (current && (state.characterList || []).includes(current)) sel.value = current;
+  }
+
+  function effectiveCharacter(bundle, name) {
+    const res = state.characterLabels?.resources?.[bundle]?.[name];
+    if (res) return res;
+    return state.characterLabels?.bundles?.[bundle] || "";
+  }
+
+  function resourceKey(bundle, name) {
+    return `${bundle}::${name}`;
+  }
+
+  function isResourceSelected(bundle, name) {
+    const key = resourceKey(bundle, name);
+    return state.selectedResources.some((item) => resourceKey(item.bundle, item.name) === key);
+  }
+
+  function updateMultiSelectUI() {
+    const info = $("#multi-select-info");
+    if (info) {
+      info.textContent = state.multiSelectMode ? `已选 ${state.selectedResources.length} 项` : "";
+      info.classList.toggle("is-hidden", !state.multiSelectMode);
+    }
+    const applyBtn = $("#apply-resource-character");
+    if (applyBtn) {
+      applyBtn.textContent = state.multiSelectMode ? "批量标注选中资源" : "标注当前资源";
+      applyBtn.disabled = state.multiSelectMode ? state.selectedResources.length === 0 : !state.selection;
+    }
+    const bundleBtn = $("#apply-bundle-character");
+    if (bundleBtn) bundleBtn.disabled = state.multiSelectMode || !state.selection;
+  }
+
+  function setMultiSelectMode(on) {
+    state.multiSelectMode = !!on;
+    if (!state.multiSelectMode) state.selectedResources = [];
+    const btn = $("#multi-select-toggle");
+    if (btn) {
+      btn.classList.toggle("is-active", state.multiSelectMode);
+      btn.textContent = state.multiSelectMode ? "☑ 退出多选" : "☑ 多选";
+    }
+    updateMultiSelectUI();
+    renderResources();
+  }
+
+  function toggleSelectedResource(bundle, name) {
+    const key = resourceKey(bundle, name);
+    const index = state.selectedResources.findIndex(
+      (item) => resourceKey(item.bundle, item.name) === key
+    );
+    if (index >= 0) {
+      state.selectedResources.splice(index, 1);
+    } else {
+      state.selectedResources.push({ bundle, name });
+    }
+    updateMultiSelectUI();
+    renderResources();
+  }
+
+  function exitMultiSelect() {
+    if (state.multiSelectMode) setMultiSelectMode(false);
+  }
+
   async function refreshBrowse() {
     fillAssetTypes();
     try {
-      const cats = await call("get_categories", { quiet: true }, state.assetType);
+      const [cats, charList, labels] = await Promise.all([
+        call("get_categories", { quiet: true }, state.assetType),
+        call("get_character_list", { quiet: true }),
+        call("get_character_labels", { quiet: true }),
+      ]);
       state.categories = cats || [];
+      state.characterList = charList || [];
+      state.characterLabels = labels || { bundles: {}, resources: {} };
+      fillCharacterFilter();
+      fillResourceCharacterSelect();
+      const validateBtn = $("#validate-dynamic");
+      if (validateBtn) validateBtn.classList.toggle("is-hidden", state.assetType !== "dynamic");
       if (!state.categories.some((c) => c.id === state.categoryId)) {
         state.categoryId = state.categories[0]?.id || "all";
+        state.resourcePage = 0;
       }
       renderCategories();
       await loadResources();
@@ -321,6 +441,7 @@
       btn.addEventListener("click", () => {
         state.categoryId = cat.id;
         state.resourcePage = 0;
+        exitMultiSelect();
         renderCategories();
         loadResources();
       });
@@ -329,25 +450,37 @@
   }
 
   async function loadResources() {
+    const seq = ++state.browseRequestSeq;
     $("#resource-status").textContent = "加载中…";
     try {
-      const rows = await call(
+      const data = await call(
         "browse_assets",
         { quiet: true },
         state.assetType,
         state.categoryId,
-        state.query || ""
+        state.query || "",
+        state.characterFilter || "",
+        state.resourcePage,
+        PAGE_SIZE
       );
-      state.resources = rows || [];
-      if (!state.resources.length) {
+      if (seq !== state.browseRequestSeq) return;
+      state.resources = (data && data.items) || [];
+      state.totalResources = (data && data.total) || 0;
+      const pages = Math.max(1, Math.ceil(state.totalResources / PAGE_SIZE));
+      if (state.resourcePage > pages - 1) {
+        state.resourcePage = Math.max(0, pages - 1);
+        return loadResources();
+      }
+      if (!state.resources.length && state.resourcePage === 0) {
         state.selection = null;
         renderPreview();
         updateExportButtons();
       }
-      state.resourcePage = 0;
       renderResources();
     } catch (err) {
+      if (seq !== state.browseRequestSeq) return;
       state.resources = [];
+      state.totalResources = 0;
       renderResources();
       $("#resource-status").textContent = err.message || "加载失败";
     }
@@ -359,28 +492,48 @@
     const pageLabel = $("#resource-page-label");
     if (!list) return;
     list.innerHTML = "";
-    const total = state.resources.length;
+    const total = state.totalResources || state.resources.length || 0;
     const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
     state.resourcePage = Math.min(state.resourcePage, pages - 1);
-    const start = state.resourcePage * PAGE_SIZE;
-    const chunk = state.resources.slice(start, start + PAGE_SIZE);
-    if (status) status.textContent = total ? `已加载 ${total} 条（同名资源分开显示）` : "没有匹配";
+    const items = state.resources || [];
+    if (status) status.textContent = total ? `共 ${total} 条（按 Bundle 排序，同名分开显示）` : "没有匹配";
     if (pageLabel) pageLabel.textContent = total ? `第 ${state.resourcePage + 1}/${pages} 页` : "";
-    if (!chunk.length) {
+    if (!items.length) {
       list.innerHTML = `<div class="notice">没有匹配的资源。</div>`;
       return;
     }
     const selKey = state.selection ? `${state.selection.bundle}::${state.selection.name}` : "";
-    chunk.forEach((row) => {
+    items.forEach((row) => {
       const key = `${row.bundle}::${row.name}`;
       const item = document.createElement("button");
       item.type = "button";
-      item.className = "resource-item" + (key === selKey ? " is-active" : "");
+      item.className = "resource-item";
+      const isSelected = state.multiSelectMode && isResourceSelected(row.bundle, row.name);
+      if (!state.multiSelectMode && key === selKey) item.classList.add("is-active");
+      if (isSelected) item.classList.add("is-selected");
+      const char = row.character || effectiveCharacter(row.bundle, row.name);
+      const badge = char ? `<span class="character-badge">${escapeHtml(char)}</span>` : "";
       const bundleLabel = shortBundleName(row.bundle);
       const detail = row.duplicates > 1 ? `同名 ${row.duplicates} 个 · ${bundleLabel}` : bundleLabel;
-      item.innerHTML = `<span>${escapeHtml(row.name)}</span><small>${escapeHtml(detail)}</small>`;
-      item.title = `${row.name}\n${row.bundle}`;
-      item.addEventListener("click", () => selectResource(row.bundle, row.name));
+      const multiCheck = state.multiSelectMode ? `<span class="multi-check">${isSelected ? "✓" : ""}</span>` : "";
+      item.innerHTML = `
+        <span class="resource-main">
+          <span class="resource-bundle">${escapeHtml(row.bundle)}</span>
+          <span class="resource-name">${escapeHtml(row.name)}</span>
+        </span>
+        ${badge}
+        <small>${escapeHtml(detail)}</small>
+        ${multiCheck}
+      `;
+      item.title = `${row.name}
+${row.bundle}`;
+      item.addEventListener("click", () => {
+        if (state.multiSelectMode) {
+          toggleSelectedResource(row.bundle, row.name);
+        } else {
+          selectResource(row.bundle, row.name);
+        }
+      });
       list.appendChild(item);
     });
   }
@@ -389,9 +542,24 @@
     try {
       const sel = await call("select_asset", { busy: true, busyText: "加载预览…" }, state.assetType, bundle, name);
       state.selection = sel;
+      if (sel.asset_type === "dynamic" && sel.frame_names && sel.frame_names.length) {
+        const seq = await call("get_sequence_frames", { quiet: true }, bundle, name);
+        state.sequenceFrames = (seq && seq.frames) || [];
+        state.sequenceFps = (seq && seq.fps) || 30;
+      } else {
+        state.sequenceFrames = [];
+        state.sequenceFps = 30;
+      }
       renderPreview();
       renderResources();
       updateExportButtons();
+      fillResourceCharacterSelect();
+      const eff = effectiveCharacter(bundle, name);
+      const charSel = $("#resource-character");
+      if (charSel) charSel.value = eff || "";
+      $("#apply-resource-character").disabled = false;
+      $("#apply-bundle-character").disabled = false;
+      $("#refresh-resource").disabled = false;
     } catch (_) {}
   }
 
@@ -406,21 +574,36 @@
       if (desc) desc.textContent = "点中间列表的一项";
       if (media) media.innerHTML = "<span>等待选择</span>";
       if (go) go.disabled = true;
+      stopSequencePreview();
+      state.sequenceFrames = [];
+      $("#apply-resource-character").disabled = true;
+      $("#apply-bundle-character").disabled = true;
+      $("#refresh-resource").disabled = true;
+      updateMultiSelectUI();
       return;
     }
     if (title) title.textContent = sel.caption || sel.name || "资源";
     if (desc) desc.textContent = sel.category_desc || "";
     if (media) {
-      if (sel.preview_data) {
+      const isSeq = sel.asset_type === "dynamic" && state.sequenceFrames.length;
+      if (isSeq) {
+        media.innerHTML = `<img src="${state.sequenceFrames[0]}" alt="preview">`;
+        const img = media.querySelector("img");
+        startSequencePreview(img, state.sequenceFrames, state.sequenceFps || 30);
+      } else if (sel.preview_data) {
+        stopSequencePreview();
         media.innerHTML = `<img src="${sel.preview_data}" alt="preview">`;
       } else if (sel.text_preview) {
+        stopSequencePreview();
         media.innerHTML = `<pre>${escapeHtml(sel.text_preview)}</pre>`;
       } else {
+        stopSequencePreview();
         media.innerHTML = "<span>无可视预览</span>";
       }
     }
-    if (go) go.disabled = (sel.asset_type || sel.kind) === "mesh";
+    if (go) go.disabled = ["mesh", "dynamic"].includes(sel.asset_type || sel.kind);
     updateExportButtons();
+    updateMultiSelectUI();
   }
 
   function updateExportButtons() {
@@ -449,6 +632,14 @@
     } else if (kind === "anim") {
       a.textContent = "导出 JSON";
       b.textContent = "导出二进制";
+    } else if (kind === "dynamic") {
+      if (sel.frame_names && sel.frame_names.length) {
+        a.textContent = "导出 APNG";
+        b.textContent = "导出首帧 PNG";
+      } else {
+        a.textContent = "导出";
+        b.textContent = "导出";
+      }
     } else {
       a.textContent = "导出";
       b.textContent = "导出";
@@ -492,6 +683,13 @@
       cropBtn?.classList.add("is-hidden");
       setMedia($("#studio-original"), null, "3D 模型仅导出");
       setMedia($("#studio-replacement"), null, "不支持替换");
+    } else if (kind === "dynamic") {
+      imageMode.classList.remove("is-hidden");
+      textMode.classList.add("is-hidden");
+      chooseBtn.classList.add("is-hidden");
+      cropBtn?.classList.add("is-hidden");
+      setMedia($("#studio-original"), sel.preview_data, "无预览图");
+      setMedia($("#studio-replacement"), null, "动态资源当前仅支持浏览/导出");
     } else {
       imageMode.classList.remove("is-hidden");
       textMode.classList.add("is-hidden");
@@ -513,6 +711,173 @@
     if (!el) return;
     if (dataUrl) el.innerHTML = `<img src="${dataUrl}" alt="">`;
     else el.innerHTML = `<span>${escapeHtml(fallback || "—")}</span>`;
+  }
+
+  function openLightbox(src, title, frames) {
+    const overlay = $("#lightbox-overlay");
+    const img = $("#lightbox-image");
+    const titleEl = $("#lightbox-title");
+    if (!overlay || !img || !src) return;
+    state.lightbox.scale = 1;
+    state.lightbox.tx = 0;
+    state.lightbox.ty = 0;
+    state.lightbox.dragging = false;
+    stopLightboxSequence();
+    if (titleEl) titleEl.textContent = title || "图片预览";
+    overlay.classList.remove("is-hidden");
+    let initialized = false;
+    const init = () => {
+      if (initialized) return;
+      initialized = true;
+      resetLightboxView();
+      if (frames && frames.length) startLightboxSequence(frames, state.sequenceFps || 30);
+    };
+    img.onload = () => {
+      img.onload = null;
+      requestAnimationFrame(init);
+    };
+    img.src = src;
+    if (img.complete && img.naturalWidth) {
+      requestAnimationFrame(init);
+    }
+  }
+
+  function closeLightbox() {
+    const overlay = $("#lightbox-overlay");
+    const img = $("#lightbox-image");
+    const stage = $("#lightbox-stage");
+    if (!overlay) return;
+    overlay.classList.add("is-hidden");
+    stopLightboxSequence();
+    if (img) img.src = "";
+    if (stage) stage.classList.remove("dragging");
+    state.lightbox.dragging = false;
+  }
+
+  function resetLightboxView() {
+    const stage = $("#lightbox-stage");
+    const img = $("#lightbox-image");
+    if (!stage || !img) return;
+    if (!img.naturalWidth) {
+      // 某些大图 dataURL 在 complete 后仍未解码完成，等待后再适配
+      requestAnimationFrame(resetLightboxView);
+      return;
+    }
+    // 以实际窗口客户区为准，避免个别环境下 stage.getBoundingClientRect 返回异常尺寸。
+    const viewportW = window.innerWidth || stage.clientWidth || 800;
+    const viewportH = window.innerHeight || stage.clientHeight || 600;
+    const toolbar = $("#lightbox-toolbar");
+    const toolbarH = toolbar ? toolbar.getBoundingClientRect().height : 56;
+    const availW = Math.max(100, viewportW);
+    const availH = Math.max(100, viewportH - toolbarH);
+    const pad = 48;
+    const fit = Math.min(
+      1,
+      (availW - pad) / img.naturalWidth,
+      (availH - pad) / img.naturalHeight
+    );
+    state.lightbox.scale = Math.max(0.1, fit || 1);
+    state.lightbox.tx = (availW - img.naturalWidth * state.lightbox.scale) / 2;
+    state.lightbox.ty = (availH - img.naturalHeight * state.lightbox.scale) / 2;
+    // 固定图片布局尺寸，切换序列帧时保持缩放/平移对齐
+    img.style.width = img.naturalWidth + "px";
+    img.style.height = img.naturalHeight + "px";
+    applyLightboxTransform();
+  }
+
+  function applyLightboxTransform() {
+    const img = $("#lightbox-image");
+    const s = state.lightbox;
+    if (!img) return;
+    // 必须固定为左上角原点，否则缩放会放大 translate 偏移导致无法居中
+    img.style.transformOrigin = "0 0";
+    img.style.transform = `translate(${s.tx}px, ${s.ty}px) scale(${s.scale})`;
+  }
+
+  function handleLightboxWheel(e) {
+    e.preventDefault();
+    const stage = $("#lightbox-stage");
+    const s = state.lightbox;
+    if (!stage || !s) return;
+    const rect = stage.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    const factor = e.deltaY < 0 ? 1.18 : 1 / 1.18;
+    const newScale = Math.min(20, Math.max(0.1, s.scale * factor));
+    const ix = (mx - s.tx) / s.scale;
+    const iy = (my - s.ty) / s.scale;
+    s.tx = mx - ix * newScale;
+    s.ty = my - iy * newScale;
+    s.scale = newScale;
+    applyLightboxTransform();
+  }
+
+  function startLightboxDrag(e) {
+    if (e.button !== 0) return;
+    const s = state.lightbox;
+    s.dragging = true;
+    s.startX = e.clientX;
+    s.startY = e.clientY;
+    s.origTx = s.tx;
+    s.origTy = s.ty;
+    const stage = $("#lightbox-stage");
+    if (stage) stage.classList.add("dragging");
+    e.preventDefault();
+  }
+
+  function moveLightboxDrag(e) {
+    const s = state.lightbox;
+    if (!s.dragging) return;
+    s.tx = s.origTx + (e.clientX - s.startX);
+    s.ty = s.origTy + (e.clientY - s.startY);
+    applyLightboxTransform();
+  }
+
+  function endLightboxDrag() {
+    state.lightbox.dragging = false;
+    const stage = $("#lightbox-stage");
+    if (stage) stage.classList.remove("dragging");
+  }
+
+  function stopSequencePreview() {
+    if (state.sequenceTimer) {
+      clearInterval(state.sequenceTimer);
+      state.sequenceTimer = null;
+    }
+  }
+
+  function stopLightboxSequence() {
+    if (state.lightboxSequenceTimer) {
+      clearInterval(state.lightboxSequenceTimer);
+      state.lightboxSequenceTimer = null;
+    }
+    state.lightboxFrames = [];
+  }
+
+  function startSequencePreview(img, frames, fps) {
+    stopSequencePreview();
+    if (!img || !frames || !frames.length) return;
+    let index = 0;
+    img.src = frames[0];
+    const interval = Math.max(33, Math.round(1000 / (fps || 30)));
+    state.sequenceTimer = setInterval(() => {
+      index = (index + 1) % frames.length;
+      img.src = frames[index];
+    }, interval);
+  }
+
+  function startLightboxSequence(frames, fps) {
+    stopLightboxSequence();
+    const img = $("#lightbox-image");
+    if (!img || !frames || !frames.length) return;
+    state.lightboxFrames = frames;
+    let index = 0;
+    img.src = frames[0];
+    const interval = Math.max(33, Math.round(1000 / (fps || 30)));
+    state.lightboxSequenceTimer = setInterval(() => {
+      index = (index + 1) % frames.length;
+      img.src = frames[index];
+    }, interval);
   }
 
   function renderDraftList() {
@@ -623,6 +988,31 @@
       btn.addEventListener("click", () => doAction(btn.dataset.action))
     );
 
+    // 点击任意预览小图，打开全屏大图预览
+    document.addEventListener("click", (e) => {
+      const img = e.target.closest(".preview-media img");
+      if (img && img.src) {
+        const isBrowsePreview = img.closest("#preview-media") !== null;
+        const frames = isBrowsePreview && state.sequenceFrames.length ? state.sequenceFrames : null;
+        openLightbox(img.src, img.alt || "图片预览", frames);
+      }
+    });
+
+    // 全屏大图预览：关闭 / 滚轮缩放 / 拖拽平移
+    $("#lightbox-close")?.addEventListener("click", closeLightbox);
+    $("#lightbox-overlay")?.addEventListener("click", (e) => {
+      if (e.target === $("#lightbox-overlay") || e.target === $("#lightbox-stage")) {
+        closeLightbox();
+      }
+    });
+    $("#lightbox-stage")?.addEventListener("wheel", handleLightboxWheel, { passive: false });
+    $("#lightbox-image")?.addEventListener("mousedown", startLightboxDrag);
+    window.addEventListener("mousemove", moveLightboxDrag);
+    window.addEventListener("mouseup", endLightboxDrag);
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") closeLightbox();
+    });
+
     $("#choose-mod-folder")?.addEventListener("click", () => chooseMod("folder"));
     $("#choose-mod-archive")?.addEventListener("click", () => chooseMod("archive"));
     $("#install-mod")?.addEventListener("click", installMod);
@@ -633,7 +1023,9 @@
     $("#asset-type")?.addEventListener("change", (e) => {
       state.assetType = e.target.value;
       state.categoryId = state.assetType === "texture" ? "hand_card" : "all";
+      state.resourcePage = 0;
       state.selection = null;
+      exitMultiSelect();
       renderPreview();
       const hint = $("#asset-type-hint");
       if (hint) hint.textContent = TYPE_HINTS[state.assetType] || "";
@@ -642,27 +1034,73 @@
     $("#resource-search-button")?.addEventListener("click", () => {
       state.query = $("#resource-search").value.trim();
       state.resourcePage = 0;
+      exitMultiSelect();
       loadResources();
+    });
+    $("#character-filter")?.addEventListener("change", (e) => {
+      state.characterFilter = e.target.value;
+      state.resourcePage = 0;
+      exitMultiSelect();
+      loadResources();
+    });
+    $("#multi-select-toggle")?.addEventListener("click", () => {
+      setMultiSelectMode(!state.multiSelectMode);
+    });
+    $("#apply-resource-character")?.addEventListener("click", async () => {
+      const char = $("#resource-character")?.value || "";
+      if (state.multiSelectMode) {
+        if (!state.selectedResources.length) {
+          toast("请先选择要批量标注的资源", true);
+          return;
+        }
+        const count = state.selectedResources.length;
+        const items = state.selectedResources.map((r) => ({ bundle: r.bundle, name: r.name }));
+        state.characterLabels = await call("set_resources_character", { quiet: true }, items, char);
+        fillResourceCharacterSelect();
+        setMultiSelectMode(false);
+        await loadResources();
+        toast(`已批量标注 ${count} 个资源`);
+        return;
+      }
+      if (!state.selection) return;
+      state.characterLabels = await call("set_resource_character", { quiet: true }, state.selection.bundle, state.selection.name, char);
+      fillResourceCharacterSelect();
+      const eff = effectiveCharacter(state.selection.bundle, state.selection.name);
+      const charSel = $("#resource-character");
+      if (charSel) charSel.value = eff || "";
+      await loadResources();
+    });
+    $("#apply-bundle-character")?.addEventListener("click", async () => {
+      if (state.multiSelectMode || !state.selection) return;
+      const char = $("#resource-character")?.value || "";
+      state.characterLabels = await call("set_bundle_character", { quiet: true }, state.selection.bundle, char);
+      fillResourceCharacterSelect();
+      const eff = effectiveCharacter(state.selection.bundle, state.selection.name);
+      const charSel = $("#resource-character");
+      if (charSel) charSel.value = eff || "";
+      await loadResources();
     });
     $("#resource-search")?.addEventListener("keydown", (e) => {
       if (e.key === "Enter") {
         state.query = e.target.value.trim();
         state.resourcePage = 0;
+        exitMultiSelect();
         loadResources();
       }
     });
     $("#build-index")?.addEventListener("click", buildIndex);
+    $("#validate-dynamic")?.addEventListener("click", validateDynamic);
     $("#resource-prev")?.addEventListener("click", () => {
       if (state.resourcePage > 0) {
         state.resourcePage -= 1;
-        renderResources();
+        loadResources();
       }
     });
     $("#resource-next")?.addEventListener("click", () => {
-      const pages = Math.max(1, Math.ceil(state.resources.length / PAGE_SIZE));
+      const pages = Math.max(1, Math.ceil((state.totalResources || 0) / PAGE_SIZE));
       if (state.resourcePage < pages - 1) {
         state.resourcePage += 1;
-        renderResources();
+        loadResources();
       }
     });
     $("#go-studio")?.addEventListener("click", () => {
@@ -675,6 +1113,7 @@
     });
     $("#export-primary")?.addEventListener("click", () => exportSelection("primary"));
     $("#export-secondary")?.addEventListener("click", () => exportSelection("secondary"));
+    $("#refresh-resource")?.addEventListener("click", refreshResource);
 
     $("#choose-replacement")?.addEventListener("click", chooseReplacement);
     $("#crop-replacement")?.addEventListener("click", cropReplacement);
@@ -794,6 +1233,14 @@
         toast("已刷新检测");
       } else if (action === "open-assets") {
         await call("open_asset_dir");
+      } else if (action === "quick-sfw-texture") {
+        if (!confirm("将扫描所有 *_sfw 贴图，并用同包无 _sfw 版本替换后自动安装为 Mod（自动备份原文件）。继续？")) return;
+        const data = await call("quick_create_sfw_texture", { busy: true, busyText: "正在创建并安装去SFW贴图Mod…" });
+        state.installed = data.installed || state.installed;
+        state.dashboard = data.dashboard || state.dashboard;
+        renderInstalled();
+        renderDashboard();
+        toast(`已创建并安装：${data.name}，替换 ${data.pairs} 张贴图 / ${data.bundle_count} 个资源包`);
       }
     } catch (_) {}
   }
@@ -880,12 +1327,44 @@
     }
   }
 
+  async function validateDynamic() {
+    try {
+      await call("validate_dynamic", { busy: false });
+      setBusy(true, "校验动态资源…");
+      toast("开始校验动态资源，请稍候…");
+    } catch (_) {
+      setBusy(false);
+    }
+  }
+
   async function exportSelection(variant) {
     if (!state.selection) return;
     try {
       const data = await call("export_selection", { busy: true, busyText: "导出中…" }, variant);
       if (!data) return;
       toast(`已导出：${data.path}`);
+    } catch (_) {}
+  }
+
+  async function refreshResource() {
+    if (!state.selection) return;
+    try {
+      const sel = await call("refresh_selection", { busy: true, busyText: "刷新资源…" });
+      state.selection = sel;
+      if (sel && sel.asset_type === "dynamic" && sel.frame_names && sel.frame_names.length) {
+        const seq = await call("get_sequence_frames", { quiet: true }, sel.bundle, sel.name);
+        state.sequenceFrames = (seq && seq.frames) || [];
+        state.sequenceFps = (seq && seq.fps) || 30;
+      } else {
+        state.sequenceFrames = [];
+      }
+      renderPreview();
+      updateExportButtons();
+      fillResourceCharacterSelect();
+      const eff = effectiveCharacter(sel.bundle, sel.name);
+      const charSel = $("#resource-character");
+      if (charSel) charSel.value = eff || "";
+      toast("资源已刷新");
     } catch (_) {}
   }
 
@@ -1138,6 +1617,16 @@
           }
         })
         .catch(() => {});
+    } else if (event === "dynamic_validate_progress") {
+      setBusy(true, `校验动态资源… ${payload.done || 0}/${payload.total || "?"}`);
+    } else if (event === "dynamic_validate_done") {
+      setBusy(false);
+      if (payload.error) {
+        toast(payload.error, true);
+      } else {
+        toast(`动态资源校验完成：有效 ${payload.valid || 0}/${payload.total || 0}，已隐藏 ${payload.invalid || 0} 个无效资源`);
+      }
+      if (state.page === "browse") refreshBrowse();
     }
   };
 
@@ -1192,7 +1681,7 @@
   let eventCursor = 0;
   async function pollEvents() {
     try {
-      const resp = await fetch("/poll?since=" + eventCursor);
+      const resp = await fetch("/poll?since=" + eventCursor, { headers: API_HEADERS });
       const data = await resp.json();
       eventCursor = data.cursor ?? eventCursor;
       (data.events || []).forEach((e) => window.handleBackendEvent(e));
@@ -1204,7 +1693,7 @@
     // 本地服务先于页面就绪；这里轻探几次，失败也继续（bootstrap 自带重试）
     for (let i = 0; i < 40; i++) {
       try {
-        const r = await fetch("/poll?since=0");
+        const r = await fetch("/poll?since=0", { headers: API_HEADERS });
         if (r.ok) return;
       } catch (_) {}
       await sleep(100);

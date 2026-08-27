@@ -19,6 +19,7 @@ ASSET_TYPES: list[tuple[str, str]] = [
     ("text", "文本"),
     ("mesh", "3D模型"),
     ("anim", "动画"),
+    ("dynamic", "动态图像"),
 ]
 
 ASSET_TYPE_LABEL = {tid: label for tid, label in ASSET_TYPES}

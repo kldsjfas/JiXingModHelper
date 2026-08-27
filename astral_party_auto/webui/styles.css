@@ -682,6 +682,27 @@ input {
   min-width: 120px;
 }
 
+.search-row select {
+  flex: 0 0 130px;
+  min-width: 110px;
+}
+
+.character-label-box {
+  display: grid;
+  gap: 7px;
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel-soft);
+}
+
+.character-label-box label {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
 .list-meta {
   display: flex;
   gap: 12px;
@@ -723,10 +744,66 @@ input {
   text-overflow: ellipsis;
 }
 
+.resource-item .resource-main {
+  display: grid;
+  min-width: 0;
+}
+
+.resource-item .resource-bundle {
+  display: block;
+  color: var(--soft);
+  font-size: 9px;
+  line-height: 1.2;
+}
+
+.resource-item .resource-name {
+  display: block;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.resource-item .character-badge {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 2px 7px;
+  border-radius: 999px;
+  color: #fff;
+  background: var(--purple);
+  font-size: 9px;
+}
+
 .resource-item small {
   flex: 0 0 auto;
   margin-left: auto;
   color: var(--soft);
+}
+
+.resource-item .multi-check {
+  flex: 0 0 auto;
+  margin-left: auto;
+  width: 16px;
+  color: var(--soft);
+  font-weight: 700;
+  text-align: center;
+}
+
+.resource-item.is-selected {
+  color: #fff;
+  background: var(--purple);
+}
+
+.resource-item.is-selected .multi-check {
+  color: #fff;
+}
+
+.multi-select-info {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+#multi-select-toggle.is-active {
+  color: #fff;
+  background: var(--purple);
 }
 
 .resource-item:hover,
@@ -811,6 +888,7 @@ input {
   max-height: 200px;
   object-fit: contain;
   object-position: center;
+  cursor: zoom-in;
 }
 
 .preview-media.tall img {
@@ -1147,6 +1225,102 @@ body.nav-open .sidebar {
   .pack-header { align-items: stretch; flex-direction: column; }
   .pack-header > label { flex-basis: auto; }
   .inline-preview { grid-template-columns: 1fr; }
+}
+
+/* 全屏大图预览 */
+.lightbox-overlay {
+  position: fixed;
+  z-index: 80;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: rgba(8, 6, 12, 0.92);
+  backdrop-filter: blur(3px);
+  user-select: none;
+}
+
+.lightbox-overlay.is-hidden {
+  display: none;
+}
+
+.lightbox-toolbar {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 56px;
+  padding: 0 18px 0 22px;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.lightbox-title {
+  overflow: hidden;
+  font-size: 15px;
+  font-weight: 700;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.lightbox-close {
+  display: grid;
+  flex: 0 0 auto;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  border-radius: 50%;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.12);
+  font-size: 30px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+
+.lightbox-close:hover {
+  background: rgba(255, 77, 148, 0.55);
+}
+
+.lightbox-stage {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  cursor: grab;
+}
+
+.lightbox-stage.dragging {
+  cursor: grabbing;
+}
+
+.lightbox-stage.dragging .lightbox-image {
+  cursor: grabbing;
+}
+
+.lightbox-image {
+  position: absolute;
+  left: 0;
+  top: 0;
+  max-width: none;
+  max-height: none;
+  transform-origin: 0 0;
+  user-select: none;
+  cursor: grab;
+}
+
+.lightbox-hint {
+  position: absolute;
+  right: 50%;
+  bottom: 16px;
+  transform: translateX(50%);
+  padding: 7px 14px;
+  border-radius: 999px;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.14);
+  font-size: 12px;
+  line-height: 1.4;
+  pointer-events: none;
+  white-space: nowrap;
 }
 
 /* 裁剪弹窗 */

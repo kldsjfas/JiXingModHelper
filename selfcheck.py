@@ -55,6 +55,7 @@ def check_categories() -> None:
         "text",
         "mesh",
         "anim",
+        "dynamic",
     ]
     rows = annotate_texture_name_duplicates([
         ("a.bundle", "Same"),
@@ -276,6 +277,19 @@ def check_hot_update_cache() -> None:
         assert (legacy_dir / legacy_only_name).read_bytes() == b"LEGACY_ONLY"
 
 
+def check_taptap_exe_detection() -> None:
+    from astral_party_auto.core.detector import _build_install
+
+    with TemporaryDirectory(prefix="jixing_taptap_") as root_value:
+        root = Path(root_value)
+        exe = root / "吉星派对.exe"
+        exe.write_bytes(b"")
+        install = _build_install("taptap", "吉星派对", root, launcher="taptap")
+        assert install.cn_exe == exe
+        assert install.int_exe is None
+        assert install.launcher == "taptap"
+
+
 def check_mod_layering() -> None:
     from astral_party_auto.modkit.manager import ModManager
 
@@ -421,6 +435,7 @@ def main() -> int:
     check("migration matching", check_migration_matching)
     check("hot-cache draft bundle names", check_hot_draft_bundle_names)
     check("hot-update cache layout", check_hot_update_cache)
+    check("taptap exe detection", check_taptap_exe_detection)
     check("mod layering", check_mod_layering)
     check("draft removal", check_draft_removal)
     check("archive cleanup", check_archive_cleanup)

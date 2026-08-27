@@ -18,7 +18,7 @@
 
 ---
 
-给 Steam 版《**吉星派对**》（ **星引擎 Party / Astral Party**）用的本地换皮工具。
+给 Steam / TapTap 版《**吉星派对**》（ **星引擎 Party / Astral Party**）用的本地换皮工具。
 
 ## 为什么做这个
 
@@ -63,7 +63,7 @@
 
 ## 快速开始
 
-**要什么**：Windows 10/11、装了 Steam 版《吉星派对》。不用装 Python。
+**要什么**：Windows 10/11、装了 Steam 或 TapTap 版《吉星派对》。不用装 Python。
 
 **怎么用**：去 [Releases](https://github.com/kldsjfas/JiXingModHelper/releases) 下最新那个压缩包，解压，双击 `JiXingModHelper.exe`。
 
@@ -120,7 +120,7 @@
 ...\Astral Party\...\StreamingAssets\aa\StandaloneWindows64\*.bundle
 ```
 
-工具会按当前 Addressables catalog 自动合并两种布局，把新版缓存里的 `__data` 映射回原本的 `.bundle` 名称；同名资源优先使用 AppData 热更新版本，其余资源从 Steam 基础包读取。换皮说白了就是：**用改过贴图的同名 bundle 覆盖游戏实际读取的资源文件**。本工具用 [UnityPy](https://github.com/K0lb3/UnityPy) 读写这些 bundle，覆盖前先把原件备份到 `modkit_data/backups/`，所以还原只是把备份拷回去而已。
+工具会按当前 Addressables catalog 自动合并两种布局，把新版缓存里的 `__data` 映射回原本的 `.bundle` 名称；同名资源优先使用 AppData 热更新版本，其余资源从 Steam/TapTap 基础包读取。换皮说白了就是：**用改过贴图的同名 bundle 覆盖游戏实际读取的资源文件**。本工具用 [UnityPy](https://github.com/K0lb3/UnityPy) 读写这些 bundle，覆盖前先把原件备份到 `modkit_data/backups/`，所以还原只是把备份拷回去而已。
 
 ---
 
@@ -145,7 +145,7 @@ powershell -ExecutionPolicy Bypass -File .\build_exe.ps1
 
 | 问题 | 处理 |
 |------|------|
-| 检测不到游戏 | 确认 Steam 里装了游戏，点「刷新检测」 |
+| 检测不到游戏 | 确认 Steam 或 TapTap 里装了游戏，点「刷新检测」 |
 | 浏览/搜索是空的 | 点一次「刷新索引」，第一次扫几千个包要等一会儿 |
 | 新版游戏可浏览的资源较少 | 先在游戏里打开相关角色/界面，让资源下载到本机缓存，再回工具刷新检测和索引 |
 | 同名资源该选哪个 | 列表右侧会显示对应 bundle；逐项预览后选择需要的那一个 |

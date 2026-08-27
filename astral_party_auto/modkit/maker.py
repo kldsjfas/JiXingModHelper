@@ -65,6 +65,72 @@ def replace_bundle_texture(
         gc.collect()
 
 
+def replace_bundle_texture_from_bundle(
+    src_bundle: str | Path,
+    source_bundle: str | Path,
+    target_name: str,
+    source_name: str,
+    out_bundle: str | Path,
+) -> str:
+    """把 source_bundle 中 source_name 的贴图像素复制到 src_bundle 的 target_name。
+
+    用于“_sfw -> 去掉 _sfw”的快捷贴图替换：`_sfw` 与无后缀贴图可能不在同一个
+    资源包里，因此允许从另一个 bundle 取源图。保留 target 的对象名。
+    """
+    source_env = UnityPy.load(str(source_bundle))
+    source_image = None
+    for obj in source_env.objects:
+        if obj.type.name != "Texture2D":
+            continue
+        try:
+            data = obj.read()
+        except Exception:
+            continue
+        name = str(getattr(data, "m_Name", "") or "")
+        if name == source_name:
+            source_image = getattr(data, "image", None)
+            break
+
+    if source_image is None:
+        raise RuntimeError(f"找不到源贴图：{source_name}（来源包 {Path(source_bundle).name}）")
+
+    env = UnityPy.load(str(src_bundle))
+    target_obj = None
+    target_data = None
+    for obj in env.objects:
+        if obj.type.name != "Texture2D":
+            continue
+        try:
+            data = obj.read()
+        except Exception:
+            continue
+        name = str(getattr(data, "m_Name", "") or "")
+        if name == target_name:
+            target_obj = obj
+            target_data = data
+            break
+
+    if target_obj is None or target_data is None:
+        raise RuntimeError(f"找不到目标贴图：{target_name}（目标包 {Path(src_bundle).name}）")
+
+    image = source_image
+    width = int(getattr(target_data, "m_Width", 0) or 0)
+    height = int(getattr(target_data, "m_Height", 0) or 0)
+    if width > 0 and height > 0 and image.size != (width, height):
+        image = image.resize((width, height), Image.LANCZOS)
+
+    try:
+        target_data.image = image
+    except Exception:
+        target_data.set_image(image)
+    target_data.save()
+
+    out = Path(out_bundle)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_bytes(env.file.save())
+    return target_name
+
+
 def _text_asset_raw(data) -> bytes | str:
     raw = getattr(data, "m_Script", None)
     if raw is None:

@@ -3,12 +3,19 @@ from __future__ import annotations
 
 import json
 import re
+import tempfile
 from pathlib import Path
 
 import UnityPy
 from PIL import Image
 
-from .bundles import extract_texture_png
+from .bundles import extract_texture_png, read_bundle_asset_names
+from .dynamic import (
+    find_sequence_preview_texture,
+    sequence_groups_from_names,
+    sorted_sequence_names,
+    text_asset_bytes,
+)
 
 
 def _safe_stem(name: str) -> str:
@@ -202,8 +209,132 @@ def default_export_name(asset_type: str, asset_name: str) -> str:
         "text": ".txt",
         "mesh": ".obj",
         "anim": ".json",
+        "dynamic": ".png",
     }.get(asset_type, ".bin")
     return stem + ext
+
+
+def export_sequence_apng(
+    bundle_path: str | Path,
+    asset_name: str,
+    dest: str | Path,
+    *,
+    fps: int = 30,
+) -> Path:
+    """导出序列帧为无损 APNG 动画（30fps 默认）。"""
+    names_by_type = read_bundle_asset_names(bundle_path)
+    texture_names = names_by_type.get("sequence_frames") or names_by_type.get("texture") or []
+
+    groups = [
+        group for group in sequence_groups_from_names(texture_names)
+        if group.base == asset_name
+    ]
+    if not groups:
+        raise RuntimeError(f"不是序列帧动画组：{asset_name}")
+    frame_names = sorted_sequence_names(groups[0].names)
+    if not frame_names:
+        raise RuntimeError(f"序列帧组没有可用帧：{asset_name}")
+
+    out = Path(dest)
+    if out.suffix.lower() != ".apng":
+        out = out.with_suffix(".apng")
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    duration = max(1, round(1000 / max(1, fps)))
+    with tempfile.TemporaryDirectory(prefix="apng_") as tmp:
+        tmp_dir = Path(tmp)
+        frame_paths: list[Path] = []
+        for index, frame_name in enumerate(frame_names):
+            frame_png = tmp_dir / f"frame_{index:04d}.png"
+            info = extract_texture_png(bundle_path, frame_png, target_name=frame_name)
+            if info is None:
+                raise RuntimeError(f"无法提取帧：{frame_name}")
+            frame_paths.append(frame_png)
+
+        images = [Image.open(p) for p in frame_paths]
+        try:
+            first = images[0].convert("RGBA")
+            rest = [im.convert("RGBA") for im in images[1:]]
+            first.save(
+                out,
+                format="PNG",
+                save_all=True,
+                append_images=rest,
+                duration=duration,
+                loop=0,
+                disposal=2,
+            )
+        finally:
+            for im in images:
+                im.close()
+    return out
+
+
+def export_dynamic(
+    bundle_path: str | Path,
+    asset_name: str,
+    dest: str | Path,
+    *,
+    fmt: str | None = None,
+) -> Path:
+    """导出动态 2D 资源：序列帧优先导出第一帧 PNG，否则导出原始字节。"""
+    names_by_type = read_bundle_asset_names(bundle_path)
+    texture_names = names_by_type.get("sequence_frames") or names_by_type.get("texture") or []
+
+    # 序列帧：按 fmt 导出 APNG 或第一帧 PNG
+    if any(group.base == asset_name for group in sequence_groups_from_names(texture_names)):
+        if (fmt or "").lower() == "apng":
+            return export_sequence_apng(bundle_path, asset_name, dest, fps=30)
+        preview = find_sequence_preview_texture(texture_names, asset_name)
+        if preview:
+            out = Path(dest)
+            if out.suffix.lower() != ".png":
+                out = out.with_suffix(".png")
+            info = extract_texture_png(bundle_path, out, target_name=preview)
+            if info:
+                return out
+
+    # TextAsset / 视频：导出原始字节
+    env = UnityPy.load(str(bundle_path))
+    for obj in env.objects:
+        if obj.type.name == "TextAsset":
+            try:
+                data = obj.read()
+            except Exception:
+                continue
+            name = str(getattr(data, "m_Name", "") or "")
+            # FairyGUI 包内组件名使用“包名/组件名”，导出时仍导出整个 fui 包
+            if name != asset_name and not asset_name.startswith(name + "/"):
+                continue
+            raw = text_asset_bytes(data)
+            out = Path(dest)
+            if out.suffix.lower() not in (".bin", ".bytes", ".json", ".txt", ".fui"):
+                out = out.with_suffix(".bin")
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(raw)
+            return out
+        if obj.type.name in ("VideoClip", "VideoPlayer", "MovieTexture"):
+            try:
+                data = obj.read()
+            except Exception:
+                continue
+            name = str(getattr(data, "m_Name", "") or "")
+            if name != asset_name:
+                continue
+            out = Path(dest)
+            if out.suffix.lower() not in (".bin", ".bytes"):
+                out = out.with_suffix(".bin")
+            out.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                raw = obj.get_raw_data() or b""
+            except Exception:
+                raw = b""
+            if not raw:
+                raise RuntimeError(f"无法读取视频原始字节：{asset_name}")
+            out.write_bytes(raw)
+            return out
+
+    raise RuntimeError(f"找不到可导出的动态资源：{asset_name}")
 
 
 def export_by_type(
@@ -222,4 +353,6 @@ def export_by_type(
         return export_mesh(bundle_path, asset_name, dest)
     if asset_type == "anim":
         return export_animation(bundle_path, asset_name, dest)
+    if asset_type == "dynamic":
+        return export_dynamic(bundle_path, asset_name, dest, fmt=fmt)
     raise RuntimeError(f"不支持导出类型：{asset_type}")

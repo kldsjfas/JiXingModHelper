@@ -17,6 +17,7 @@ datas = [
     (str(ROOT / "assets"), "assets"),
     (str(ROOT / "icon.ico"), "."),
     (str(ROOT / "icon.png"), "."),
+    (str(ROOT / "角色表.csv"), "."),
     (str(ROOT / "native_host" / "publish"), "native_host"),
 ]
 binaries = []

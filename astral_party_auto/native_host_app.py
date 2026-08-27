@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import secrets
 import subprocess
 import threading
 from pathlib import Path
@@ -44,10 +45,11 @@ def main() -> None:
         daemon_threads = True
 
     port = web_app._free_port()
+    api_token = secrets.token_urlsafe(32)
     server = make_server(
         "127.0.0.1",
         port,
-        web_app._build_server(api),
+        web_app._build_server(api, api_token),
         server_class=ThreadingServer,
     )
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -58,7 +60,7 @@ def main() -> None:
     host_args = [
         str(_host_executable()),
         "--url",
-        f"http://127.0.0.1:{port}/",
+        f"http://127.0.0.1:{port}/#token={api_token}",
         "--profile",
         str(profile_dir),
     ]

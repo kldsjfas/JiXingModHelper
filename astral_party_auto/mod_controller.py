@@ -13,20 +13,25 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
+from .core.characters import load_character_list
 from .core.config import APP_ROOT
 from .core.detector import find_game_install, launch_direct, launch_with_steam
 from .modkit import (
+    DYNAMIC_KIND_LABELS,
     BundleMigrationPlan,
     ModManager,
     all_categories,
     bundle_dirs_for_exe,
     bundle_source_key,
     build_asset_index,
+    classify_text_asset,
     default_export_name,
     export_by_type,
     export_mod_pack,
     extract_texture_png,
     find_anim_preview_texture,
+    find_fairygui_atlas_texture,
+    find_sequence_preview_texture,
     list_text_assets,
     load_asset_index,
     logical_bundle_name,
@@ -35,7 +40,12 @@ from .modkit import (
     replace_bundle_animation_raw,
     replace_bundle_text,
     replace_bundle_texture,
+    replace_bundle_texture_from_bundle,
+    sequence_groups_from_names,
+    sorted_sequence_names,
+    text_asset_bytes,
 )
+from .modkit.bundles import TextureInfo, iter_bundle_entries, read_bundle_asset_names
 from .modkit.categories import (
     ASSET_TYPES,
     category_desc,
@@ -50,6 +60,8 @@ INDEX_CACHE = DATA_DIR / "texture_index.json"
 PREVIEW_DIR = DATA_DIR / "previews"
 MADE_DIR = APP_ROOT / "made_mods"
 DRAFT_META = DATA_DIR / "draft_pack.json"
+CHARACTER_LABELS_PATH = DATA_DIR / "character_labels.json"
+DYNAMIC_VALID_PATH = DATA_DIR / "dynamic_validation.json"
 
 SEVENZIP_CANDIDATES = [
     Path(r"C:\Program Files\7-Zip\7z.exe"),
@@ -67,12 +79,13 @@ class ModController:
         self.manager: ModManager | None = None
         self._pending_extract_dir: Path | None = None
         self._pending_extract_source: Path | None = None
-        # 多类型索引：texture/text/mesh/anim → {bundle: [names]}
+        # 多类型索引：texture/text/mesh/anim/dynamic → {bundle: [names]}
         self.typed_index: dict[str, dict[str, list[str]]] = {
             "texture": {},
             "text": {},
             "mesh": {},
             "anim": {},
+            "dynamic": {},
         }
         self._index_source_key = ""
         self._category_cache_lock = threading.Lock()
@@ -85,7 +98,16 @@ class ModController:
         self.draft_name: str = "我的Mod套装"
         # 当前在「浏览」里选中的资源，供「制作」页使用
         self.selection: dict | None = None
+        # 角色标注：bundle 级 + 资源级覆盖
+        self._bundle_labels: dict[str, str] = {}
+        self._resource_labels: dict[str, dict[str, str]] = {}
+        # 动态资源校验结果：bundle -> 有效资源名集合
+        self._valid_dynamic: dict[str, set[str]] = {}
+        self._dynamic_validating = False
+        self._dynamic_sequence_bases: dict[str, set[str]] | None = None
         DATA_DIR.mkdir(parents=True, exist_ok=True)
+        self._load_character_labels()
+        self._prune_character_labels()
         PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
         MADE_DIR.mkdir(parents=True, exist_ok=True)
         self._load_draft()
@@ -179,11 +201,12 @@ class ModController:
             if self.aa_dirs:
                 self.typed_index = load_asset_index(INDEX_CACHE, self.aa_dirs)
             else:
-                self.typed_index = {"texture": {}, "text": {}, "mesh": {}, "anim": {}}
+                self.typed_index = {"texture": {}, "text": {}, "mesh": {}, "anim": {}, "dynamic": {}}
             self._category_cache_source = None
             self._category_rows = {}
             self._category_counts = {}
             self._index_source_key = source_key
+            self._load_dynamic_validation(source_key)
 
     @property
     def has_game(self) -> bool:
@@ -281,7 +304,7 @@ class ModController:
 
     # ---------- 启动游戏 ----------
     def launch_game(self, region: str = "CN") -> None:
-        """启动吉星派对：优先直启本地 exe，失败再走 Steam。"""
+        """启动吉星派对：优先直启本地 exe，失败再尝试 Steam。"""
         self.refresh_detection()
         if self.game_install:
             exe = self.game_install.executable_for_region(region)
@@ -300,8 +323,8 @@ class ModController:
             self.log("未找到本地 exe，已尝试通过 Steam 启动（AppID 2622000）。")
         except Exception as exc:
             raise RuntimeError(
-                "找不到游戏。请确认 Steam 已安装《吉星派对》，"
-                r"常见路径：D:\Steam\steamapps\common\Astral Party\8vJXn6CN\AstralParty_CN.exe"
+                "找不到游戏。请确认已安装 Steam 或 TapTap 版《吉星派对》，"
+                r"常见路径：D:\Steam\steamapps\common\Astral Party\8vJXn6CN\AstralParty_CN.exe 或 C:\TapTap\PC Games\..."
                 f"\n详情：{exc}"
             ) from exc
 
@@ -320,6 +343,27 @@ class ModController:
         include_advanced: bool = False,
         asset_type: str = "texture",
     ) -> list[tuple[str, str, int]]:
+        if asset_type == "dynamic":
+            block = self.typed_index.get("dynamic") or {}
+            total = 0
+            sequence_count = 0
+            fairygui_count = 0
+            for bundle, names in block.items():
+                for name in names:
+                    if not self._is_dynamic_valid(bundle, name):
+                        continue
+                    total += 1
+                    kind = self._dynamic_kind(bundle, name)
+                    if kind == "sequence":
+                        sequence_count += 1
+                    elif kind == "fairygui":
+                        fairygui_count += 1
+            return [
+                ("all", "全部", total),
+                ("sequence", "序列帧动画组", sequence_count),
+                ("fairygui", "FairyGUI", fairygui_count),
+            ]
+
         if asset_type != "texture":
             # 非贴图：只有「全部」一类，避免硬套贴图分类
             block = self.typed_index.get(asset_type) or {}
@@ -390,19 +434,173 @@ class ModController:
         out.sort(key=lambda x: x[1].lower())
         return out
 
+    def _iter_browse_rows(
+        self,
+        asset_type: str,
+        cat_id: str,
+        query: str,
+    ):
+        """按 bundle -> 资源名排序地产生 (bundle, name)。"""
+        q = (query or "").strip().lower()
+        if asset_type == "texture" and cat_id not in ("all", ""):
+            rows = self._ensure_texture_category_cache().get(cat_id, ())
+            for bundle, name in sorted(rows, key=lambda x: (x[0].lower(), x[1].lower())):
+                if q and q not in name.lower() and q not in bundle.lower():
+                    continue
+                yield bundle, name
+            return
+
+        block = self.typed_index.get(asset_type) or {}
+
+        if asset_type == "dynamic":
+            for bundle in sorted(block.keys(), key=str.lower):
+                names = block[bundle]
+                for name in sorted(names, key=str.lower):
+                    if not self._is_dynamic_valid(bundle, name):
+                        continue
+                    kind = self._dynamic_kind(bundle, name)
+                    if cat_id == "sequence" and kind != "sequence":
+                        continue
+                    if cat_id == "fairygui" and kind != "fairygui":
+                        continue
+                    if q and q not in name.lower() and q not in bundle.lower():
+                        continue
+                    yield bundle, name
+            return
+
+        for bundle in sorted(block.keys(), key=str.lower):
+            names = block[bundle]
+            for name in sorted(names, key=str.lower):
+                if asset_type == "text" and (
+                    name.endswith("_fui") or name.endswith("fui") or name.startswith("FGUI")
+                ):
+                    continue
+                if q and q not in name.lower() and q not in bundle.lower():
+                    continue
+                yield bundle, name
+
+    def _iter_labelled_rows(
+        self,
+        cat_id: str,
+        query: str,
+        *,
+        asset_type: str,
+        character: str = "",
+    ):
+        """按前端排序产出 (bundle, name, character)：未标注在前、已标注在后。"""
+        char_filter = (character or "").strip()
+
+        def matches(eff: str) -> bool:
+            if char_filter == "__unmarked":
+                return not eff
+            if char_filter:
+                return eff == char_filter
+            return True
+
+        # 第一遍：未标注角色
+        for bundle, name in self._iter_browse_rows(asset_type, cat_id, query):
+            eff = self.effective_character(bundle, name)
+            if eff:
+                continue
+            if not matches(eff):
+                continue
+            yield bundle, name, eff
+
+        # 第二遍：已标注角色
+        for bundle, name in self._iter_browse_rows(asset_type, cat_id, query):
+            eff = self.effective_character(bundle, name)
+            if not eff:
+                continue
+            if not matches(eff):
+                continue
+            yield bundle, name, eff
+
+    def browse_labelled(
+        self,
+        cat_id: str = "all",
+        query: str = "",
+        limit: int = 500,
+        offset: int = 0,
+        *,
+        asset_type: str = "texture",
+        character: str = "",
+    ) -> list[tuple[str, str, str]]:
+        """返回 (bundle, name, character)，未标注在前、已标注在后，均按 bundle/name 排序。"""
+        out: list[tuple[str, str, str]] = []
+        seen = 0
+        for row in self._iter_labelled_rows(
+            cat_id,
+            query,
+            asset_type=asset_type,
+            character=character,
+        ):
+            if seen < offset:
+                seen += 1
+                continue
+            out.append(row)
+            if len(out) >= limit:
+                break
+        return out
+
+    def count_labelled(
+        self,
+        cat_id: str = "all",
+        query: str = "",
+        *,
+        asset_type: str = "texture",
+        character: str = "",
+    ) -> int:
+        char_filter = (character or "").strip()
+
+        def matches(eff: str) -> bool:
+            if char_filter == "__unmarked":
+                return not eff
+            if char_filter:
+                return eff == char_filter
+            return True
+
+        total = 0
+        for bundle, name in self._iter_browse_rows(asset_type, cat_id, query):
+            eff = self.effective_character(bundle, name)
+            if matches(eff):
+                total += 1
+        return total
+
     def preview_bundle(
         self,
         bundle_path: str | Path,
         texture_name: str | None = None,
         *,
         tag: str = "browse",
+        force: bool = False,
     ):
-        """导出预览 PNG。tag 必须区分来源，避免 game/draft 同 stem 互相覆盖。"""
+        """导出预览 PNG；已生成且源文件未变化时直接复用，避免重复解包。
+
+        force=True 时强制重新提取，用于“刷新资源”按钮。
+        tag 必须区分来源，避免 game/draft 同 stem 互相覆盖。
+        """
         bundle_path = Path(bundle_path)
         stem = bundle_path.stem
         safe = re.sub(r"[^\w\-]+", "_", texture_name or "first")[:40]
         tag = re.sub(r"[^\w\-]+", "_", tag or "browse")[:24]
         out = PREVIEW_DIR / f"{tag}_{stem}_{safe}.png"
+
+        if out.exists() and not force:
+            try:
+                if bundle_path.stat().st_mtime_ns <= out.stat().st_mtime_ns:
+                    from PIL import Image
+                    with Image.open(out) as im:
+                        return (
+                            out,
+                            TextureInfo(
+                                name=texture_name or out.stem,
+                                width=im.width,
+                                height=im.height,
+                            ),
+                        )
+            except OSError:
+                pass
+
         info = extract_texture_png(bundle_path, out, target_name=texture_name)
         return (out, info) if info else (None, None)
 
@@ -419,6 +617,7 @@ class ModController:
         asset_name: str,
         *,
         asset_type: str = "texture",
+        force: bool = False,
     ) -> dict:
         """浏览页选中资源，供制作页读取。预览优先备份原皮。"""
         path = self.original_bundle_path(bundle_name)
@@ -427,7 +626,7 @@ class ModController:
         game_path = self.bundle_path(bundle_name)
 
         if asset_type == "texture":
-            png, info = self.preview_bundle(path, asset_name, tag="orig")
+            png, info = self.preview_bundle(path, asset_name, tag="orig", force=force)
             if not png or not info:
                 raise RuntimeError("无法预览该贴图。")
             cat = categorize(info.name, info.width, info.height)
@@ -511,7 +710,7 @@ class ModController:
             png = None
             width = height = 0
             if preview_tex:
-                png, info = self.preview_bundle(path, preview_tex, tag="animprev")
+                png, info = self.preview_bundle(path, preview_tex, tag="animprev", force=force)
                 if info:
                     width, height = info.width, info.height
             self.selection = {
@@ -536,6 +735,147 @@ class ModController:
                     f"AnimationClip · 预览 {preview_tex}" if preview_tex else "AnimationClip · 无预览贴图"
                 ),
                 "caption": f"动画 · {asset_name}" + (f" · 预览 {preview_tex}" if preview_tex else ""),
+            }
+            return self.selection
+
+        if asset_type == "dynamic":
+            # 用与索引一致的贴图名集合，但排除被 Sprite 引用的 Texture2D 图集。
+            names_by_type = read_bundle_asset_names(path)
+            texture_names = names_by_type.get("sequence_frames") or names_by_type.get("texture") or []
+            groups = [
+                group for group in sequence_groups_from_names(texture_names)
+                if group.base == asset_name
+            ]
+            if groups:
+                group = groups[0]
+                preview_tex = find_sequence_preview_texture(texture_names, asset_name)
+                png = info = None
+                if preview_tex:
+                    png, info = self.preview_bundle(path, preview_tex, tag="dynseq", force=force)
+                frame_names = sorted_sequence_names(group.names)
+                self.selection = {
+                    "kind": "dynamic",
+                    "asset_type": "dynamic",
+                    "bundle": bundle_name,
+                    "bundle_path": str(game_path or path),
+                    "original_path": str(path),
+                    "name": asset_name,
+                    "preview_texture": preview_tex or "",
+                    "frame_names": frame_names,
+                    "fps": 30,
+                    "width": info.width if info else 0,
+                    "height": info.height if info else 0,
+                    "preview": str(png) if png else "",
+                    "text_preview": (
+                        f"序列帧动画组：{asset_name}\n"
+                        f"帧数：{group.frame_count}（{group.min_index}~{group.max_index}）\n"
+                        f"示例帧：{', '.join(group.examples)}\n"
+                        "游戏内表现为连续播放的 2D 动态图片，预览按 30fps 播放。"
+                    ),
+                    "category": "all",
+                    "category_label": "动态图像",
+                    "category_desc": "序列帧动画组 · 一张张连续播放的 2D 动态图片",
+                    "caption": f"动态图像 · {asset_name}（{group.frame_count}帧 · 30fps）",
+                }
+                return self.selection
+
+            # 非序列帧：可能是视频 / Live2D / Spine / GIF / FairyGUI
+            import UnityPy
+
+            env = UnityPy.load(str(path))
+            kind_label = "动态图像"
+            kind_desc = "动态 2D 资源"
+            text_preview = f"动态资源：{asset_name}\n未找到对应对象的具体类型，可尝试刷新索引。"
+            for obj in env.objects:
+                if obj.type.name in ("VideoClip", "VideoPlayer", "MovieTexture"):
+                    try:
+                        data = obj.read()
+                    except Exception:
+                        continue
+                    name = str(getattr(data, "m_Name", "") or "")
+                    if name == asset_name:
+                        kind_label = "视频"
+                        kind_desc = "VideoClip / VideoPlayer · 动态视频资源"
+                        text_preview = f"视频资源：{asset_name}\n可通过导出原始资源进一步查看。"
+                        break
+                elif obj.type.name == "TextAsset":
+                    try:
+                        data = obj.read()
+                    except Exception:
+                        continue
+                    name = str(getattr(data, "m_Name", "") or "")
+                    is_fgui_item = asset_name.startswith(name + "/")
+                    if name != asset_name and not is_fgui_item:
+                        continue
+                    raw = text_asset_bytes(data)
+                    dyn_kind = classify_text_asset(name, raw)
+                    if dyn_kind:
+                        kind_label = DYNAMIC_KIND_LABELS.get(dyn_kind, dyn_kind)
+                        kind_desc = f"{kind_label} · TextAsset 动态资源"
+                        if is_fgui_item and dyn_kind == "fairygui":
+                            item_name = asset_name.split("/", 1)[1]
+                            kind_label = "FairyGUI 动效"
+                            kind_desc = "FairyGUI 包内动态组件/动效 · 随资源包一起加载"
+                            text_preview = (
+                                f"FairyGUI 动效/组件：{item_name}\n"
+                                f"所属资源包：{name}\n"
+                                "游戏内表现为卡牌、横幅等 UI 的动态效果。"
+                            )
+                        else:
+                            text_preview = (
+                                f"动态资源类型：{kind_label}\n"
+                                f"资源名：{asset_name}\n"
+                                f"原始大小：{len(raw)} 字节"
+                            )
+                            if dyn_kind == "fairygui":
+                                text_preview += "\n这是 FairyGUI 界面包，游戏内动态 UI 图通常由它引用序列帧贴图实现。"
+                        break
+
+            # FairyGUI 动效：优先映射到对应 atlas 贴图，便于直接预览/替换
+            if kind_label == "FairyGUI 动效":
+                fui_name = asset_name.split("/", 1)[0]
+                atlas = find_fairygui_atlas_texture(self.typed_index.get("texture") or {}, fui_name)
+                if atlas:
+                    atlas_bundle, atlas_name = atlas
+                    atlas_path = self.original_bundle_path(atlas_bundle)
+                    if atlas_path:
+                        png, info = self.preview_bundle(atlas_path, atlas_name, tag="fgui", force=force)
+                        if png and info:
+                            cat = categorize(atlas_name, info.width, info.height)
+                            self.selection = {
+                                "kind": "texture",
+                                "asset_type": "texture",
+                                "bundle": atlas_bundle,
+                                "bundle_path": str(self.bundle_path(atlas_bundle) or atlas_path),
+                                "original_path": str(atlas_path),
+                                "name": atlas_name,
+                                "width": info.width,
+                                "height": info.height,
+                                "preview": str(png),
+                                "text_preview": text_preview,
+                                "category": cat,
+                                "category_label": category_label(cat),
+                                "category_desc": f"{kind_desc}\n当前替换目标：{atlas_bundle} [{atlas_name}]",
+                                "caption": f"{kind_label} · {asset_name}（替换 {atlas_name}）",
+                            }
+                            return self.selection
+
+            self.selection = {
+                "kind": "dynamic",
+                "asset_type": "dynamic",
+                "bundle": bundle_name,
+                "bundle_path": str(game_path or path),
+                "original_path": str(path),
+                "name": asset_name,
+                "preview_texture": "",
+                "width": 0,
+                "height": 0,
+                "preview": "",
+                "text_preview": text_preview,
+                "category": "all",
+                "category_label": kind_label,
+                "category_desc": kind_desc,
+                "caption": f"{kind_label} · {asset_name}",
             }
             return self.selection
 
@@ -679,6 +1019,101 @@ class ModController:
         pack = self._draft_dir()
         export_mod_pack(pack, None, pack_name=self.draft_name, items=self.draft_items)
         self.install(pack, name=self.draft_name)
+
+
+    def quick_create_sfw_texture_mod(self) -> dict:
+        """一键把 *_sfw 贴图替换为无 _sfw 版本，生成标准 mod 并自动安装。
+
+        `_sfw` 与无后缀贴图可能不在同一个 bundle 里，因此会跨资源包查找源贴图。
+        """
+        self._require_game()
+        texture_index = self.typed_index.get("texture") or {}
+        if not texture_index:
+            # 索引未建立时直接扫包，保证一键按钮不依赖“刷新索引”。
+            texture_index = {}
+            for entry in iter_bundle_entries(self.aa_dirs):
+                try:
+                    names_by_type = read_bundle_asset_names(entry.path)
+                except Exception:
+                    continue
+                texture_names = names_by_type.get("texture") or []
+                if texture_names:
+                    texture_index[entry.name] = texture_names
+
+        # 建立“无 _sfw 贴图名 -> 所在包”的全局索引，支持跨包查找源图。
+        base_sources: dict[str, str] = {}
+        for bundle_name, names in texture_index.items():
+            for name in names:
+                if not name.lower().endswith("_sfw") and name not in base_sources:
+                    base_sources[name] = bundle_name
+
+        # 对每个 *_sfw 贴图，找同名无后缀贴图所在的包。
+        pairs_by_bundle: dict[str, list[tuple[str, str, str]]] = {}
+        for bundle_name, names in texture_index.items():
+            for name in names:
+                if not name.lower().endswith("_sfw"):
+                    continue
+                base = name[: -len("_sfw")]
+                source_bundle_name = base_sources.get(base)
+                if source_bundle_name:
+                    pairs_by_bundle.setdefault(bundle_name, []).append(
+                        (name, base, source_bundle_name)
+                    )
+
+        if not pairs_by_bundle:
+            raise RuntimeError("没有找到可替换的 _sfw 贴图资源。请先刷新索引，或确认当前游戏版本包含这类贴图。")
+
+        mod_name = "SFW贴图替换"
+        items: list[dict] = []
+        with tempfile.TemporaryDirectory(prefix="ap_sfw_") as tmp:
+            pack_dir = Path(tmp)
+            for bundle_name, pairs in pairs_by_bundle.items():
+                game_b = self.bundle_path(bundle_name)
+                if game_b is None:
+                    continue
+                backup = DATA_DIR / "backups" / bundle_name
+                base_bundle = backup if backup.exists() else game_b
+                out_bundle = pack_dir / bundle_name
+                for target_name, source_name, source_bundle_name in pairs:
+                    source_path = self.bundle_path(source_bundle_name)
+                    source_backup = DATA_DIR / "backups" / source_bundle_name
+                    if source_backup.exists():
+                        source_path = source_backup
+                    if source_path is None:
+                        continue
+                    src = out_bundle if out_bundle.exists() else base_bundle
+                    replace_bundle_texture_from_bundle(
+                        src,
+                        source_path,
+                        target_name,
+                        source_name,
+                        out_bundle,
+                    )
+                    items.append({
+                        "kind": "texture",
+                        "bundle": bundle_name,
+                        "name": target_name,
+                        "replace_with": source_name,
+                        "source_bundle": source_bundle_name,
+                        "note": f"{source_name}（{source_bundle_name}） → {target_name}",
+                        "at": datetime.now().isoformat(timespec="seconds"),
+                    })
+
+            if not items:
+                raise RuntimeError("没有找到可替换的 _sfw 贴图资源。")
+            export_mod_pack(pack_dir, None, pack_name=mod_name, items=items)
+            self.install(pack_dir, name=mod_name)
+
+        self.log(
+            f"快捷贴图 Mod 已创建并安装：{mod_name}，"
+            f"涉及 {len(items)} 张贴图 / {len(pairs_by_bundle)} 个资源包（已备份原文件）。"
+        )
+        return {
+            "name": mod_name,
+            "pairs": len(items),
+            "bundle_count": len(pairs_by_bundle),
+            "installed": self.installed_mods(),
+        }
 
     def bundle_path(self, bundle_name: str) -> Path | None:
         if not self.has_game or self.manager is None:
@@ -1173,10 +1608,244 @@ class ModController:
     def index_ready(self) -> bool:
         return any(bool(block) for block in self.typed_index.values())
 
+    # ---------- 角色标注 ----------
+    def character_list(self) -> list[str]:
+        return load_character_list()
+
+    def character_labels(self) -> dict:
+        return {
+            "bundles": dict(self._bundle_labels),
+            "resources": {
+                bundle: dict(names)
+                for bundle, names in self._resource_labels.items()
+            },
+        }
+
+    def _load_character_labels(self) -> None:
+        try:
+            data = json.loads(CHARACTER_LABELS_PATH.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if isinstance(data, dict):
+            bundles = data.get("bundles")
+            resources = data.get("resources")
+            if isinstance(bundles, dict):
+                self._bundle_labels = {
+                    str(k): str(v) for k, v in bundles.items() if str(v).strip()
+                }
+            if isinstance(resources, dict):
+                self._resource_labels = {
+                    str(bundle): {
+                        str(name): str(char)
+                        for name, char in names.items()
+                        if str(char).strip()
+                    }
+                    for bundle, names in resources.items()
+                    if isinstance(names, dict)
+                }
+
+    def _prune_character_labels(self) -> None:
+        """移除已从角色表删除的角色对应的标注，避免下拉里找不到却仍残留。"""
+        valid = set(self.character_list())
+        changed = False
+
+        for bundle in list(self._bundle_labels):
+            if self._bundle_labels[bundle] not in valid:
+                del self._bundle_labels[bundle]
+                changed = True
+
+        for bundle in list(self._resource_labels):
+            resource_map = self._resource_labels[bundle]
+            for name in list(resource_map):
+                if resource_map[name] not in valid:
+                    del resource_map[name]
+                    changed = True
+            if not resource_map:
+                del self._resource_labels[bundle]
+
+        if changed:
+            self._save_character_labels()
+
+    def _save_character_labels(self) -> None:
+        CHARACTER_LABELS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "bundles": self._bundle_labels,
+            "resources": self._resource_labels,
+        }
+        CHARACTER_LABELS_PATH.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    def set_resource_character(self, bundle: str, name: str, character: str) -> dict:
+        character = (character or "").strip()
+        if character:
+            self._resource_labels.setdefault(str(bundle), {})[str(name)] = character
+        else:
+            self._resource_labels.get(str(bundle), {}).pop(str(name), None)
+        self._save_character_labels()
+        return self.character_labels()
+
+    def set_resources_character(self, items: list[dict], character: str) -> dict:
+        character = (character or "").strip()
+        for item in items or []:
+            bundle = str(item.get("bundle", "") or "")
+            name = str(item.get("name", "") or "")
+            if not bundle or not name:
+                continue
+            if character:
+                self._resource_labels.setdefault(bundle, {})[name] = character
+            else:
+                self._resource_labels.get(bundle, {}).pop(name, None)
+        self._save_character_labels()
+        return self.character_labels()
+
+    def set_bundle_character(self, bundle: str, character: str) -> dict:
+        character = (character or "").strip()
+        if character:
+            self._bundle_labels[str(bundle)] = character
+        else:
+            self._bundle_labels.pop(str(bundle), None)
+        self._save_character_labels()
+        return self.character_labels()
+
+    def effective_character(self, bundle: str, name: str) -> str:
+        resource_map = self._resource_labels.get(str(bundle))
+        if resource_map:
+            value = resource_map.get(str(name))
+            if value:
+                return value
+        return self._bundle_labels.get(str(bundle), "")
+
+    # ---------- 动态资源校验 ----------
+    def _load_dynamic_validation(self, source_key: str) -> None:
+        self._valid_dynamic = {}
+        if not source_key:
+            return
+        try:
+            data = json.loads(DYNAMIC_VALID_PATH.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if not isinstance(data, dict) or data.get("source") != source_key:
+            return
+        valid = data.get("valid")
+        if not isinstance(valid, dict):
+            return
+        self._valid_dynamic = {
+            str(bundle): {str(name) for name in names if isinstance(name, str)}
+            for bundle, names in valid.items()
+            if isinstance(names, list)
+        }
+
+    def _save_dynamic_validation(self) -> None:
+        source_key = bundle_source_key(self.aa_dirs) if self.aa_dirs else ""
+        payload = {
+            "source": source_key,
+            "valid": {
+                bundle: sorted(names)
+                for bundle, names in self._valid_dynamic.items()
+            },
+        }
+        DYNAMIC_VALID_PATH.parent.mkdir(parents=True, exist_ok=True)
+        DYNAMIC_VALID_PATH.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    def _dynamic_sequence_bases_map(self) -> dict[str, set[str]]:
+        if self._dynamic_sequence_bases is None:
+            bases: dict[str, set[str]] = {}
+            for bundle, names in (self.typed_index.get("texture") or {}).items():
+                for group in sequence_groups_from_names(names):
+                    bases.setdefault(bundle, set()).add(group.base)
+            self._dynamic_sequence_bases = bases
+        return self._dynamic_sequence_bases
+
+    def _dynamic_kind(self, bundle: str, name: str) -> str:
+        """用索引快速判断动态资源子类型：fairygui / sequence / other。"""
+        low = name.lower()
+        if "/" in name or low.endswith("_fui") or low.endswith("fui"):
+            return "fairygui"
+        if name in self._dynamic_sequence_bases_map().get(bundle, set()):
+            return "sequence"
+        return "other"
+
+    def _is_dynamic_valid(self, bundle: str, name: str) -> bool:
+        """未校验时默认全部显示；校验后只显示有效资源。"""
+        if not self._valid_dynamic:
+            return True
+        return name in self._valid_dynamic.get(bundle, set())
+
+    def validate_dynamic_resources(
+        self,
+        progress: Callable[[int, int, str], None] | None = None,
+    ) -> dict:
+        """扫描 dynamic 索引并校验每个资源是否可找到实际资源。"""
+        if self._dynamic_validating:
+            raise RuntimeError("动态资源校验已经在进行中。")
+        self._dynamic_validating = True
+        try:
+            dynamic_index = self.typed_index.get("dynamic") or {}
+            total = sum(len(names) for names in dynamic_index.values())
+            done = 0
+            valid: dict[str, set[str]] = {}
+            for bundle, names in dynamic_index.items():
+                for name in names:
+                    if progress is not None:
+                        progress(done, total, f"{bundle} :: {name}")
+                    if self._is_dynamic_resource_valid(bundle, name):
+                        valid.setdefault(bundle, set()).add(name)
+                    done += 1
+            self._valid_dynamic = valid
+            self._save_dynamic_validation()
+            valid_count = sum(len(v) for v in valid.values())
+            return {
+                "total": total,
+                "valid": valid_count,
+                "invalid": total - valid_count,
+            }
+        finally:
+            self._dynamic_validating = False
+
+    def _is_dynamic_resource_valid(self, bundle: str, name: str) -> bool:
+        path = self.original_bundle_path(bundle)
+        if not path:
+            return False
+        try:
+            names_by_type = read_bundle_asset_names(path)
+        except Exception:
+            return False
+        texture_names = names_by_type.get("sequence_frames") or names_by_type.get("texture") or []
+        low = name.lower()
+
+        # FairyGUI：需要能找到对应 atlas 贴图
+        if "/" in name or low.endswith("_fui") or low.endswith("fui"):
+            fui_name = name.split("/", 1)[0] if "/" in name else name
+            atlas = find_fairygui_atlas_texture(
+                self.typed_index.get("texture") or {},
+                fui_name,
+            )
+            if not atlas:
+                return False
+            atlas_bundle, atlas_name = atlas
+            atlas_path = self.original_bundle_path(atlas_bundle)
+            return atlas_path is not None
+
+        # 序列帧：需要同包内确实存在帧贴图
+        groups = [
+            group for group in sequence_groups_from_names(texture_names)
+            if group.base == name
+        ]
+        if groups:
+            return find_sequence_preview_texture(texture_names, name) is not None
+
+        # 其它动态资源：索引里存在即可
+        return True
+
     # ---------- 内部 ----------
     def _require_game(self) -> None:
         if not self.has_game:
-            raise RuntimeError("没有检测到游戏资源目录，请确认吉星派对已通过 Steam 安装。")
+            raise RuntimeError("没有检测到游戏资源目录，请确认吉星派对已通过 Steam 或 TapTap 安装。")
 
     def _draft_dir(self) -> Path:
         d = MADE_DIR / "_draft"
