@@ -55,6 +55,7 @@ def check_categories() -> None:
         "text",
         "mesh",
         "anim",
+        "dynamic",
     ]
     rows = annotate_texture_name_duplicates([
         ("a.bundle", "Same"),

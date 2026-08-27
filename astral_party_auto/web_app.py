@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import hmac
 import json
 import mimetypes
 import os
@@ -915,12 +916,43 @@ def _free_port() -> int:
     return port
 
 
-def _build_server(api: "DesktopApi"):
+def _build_server(api: "DesktopApi", api_token: str):
     """把 DesktopApi 的 @exposed 方法包成一个本地 HTTP 服务（前端用 fetch 调）。"""
     import bottle
 
+    if not api_token:
+        raise ValueError("本地 API token 不能为空。")
+
     web_root = str(WEB_DIR)
     app = bottle.Bottle()
+
+    @app.hook("after_request")
+    def _security_headers():
+        bottle.response.set_header("Cache-Control", "no-store")
+        bottle.response.set_header("Referrer-Policy", "no-referrer")
+        bottle.response.set_header("X-Content-Type-Options", "nosniff")
+        bottle.response.set_header(
+            "Content-Security-Policy",
+            "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
+            "script-src 'self'; connect-src 'self'; object-src 'none'; "
+            "base-uri 'none'; frame-ancestors 'none'",
+        )
+
+    def _json_error(status: int, message: str) -> str:
+        bottle.response.status = status
+        bottle.response.content_type = "application/json"
+        return json.dumps({"ok": False, "error": message}, ensure_ascii=False)
+
+    def _request_is_authorized() -> bool:
+        supplied_token = bottle.request.get_header("X-JiXing-Token", "")
+        if not hmac.compare_digest(supplied_token, api_token):
+            return False
+
+        origin = bottle.request.get_header("Origin")
+        if not origin:
+            return True
+        expected_origin = f"http://{bottle.request.get_header('Host')}"
+        return hmac.compare_digest(origin.rstrip("/"), expected_origin.rstrip("/"))
 
     @app.get("/")
     def _index():
@@ -928,22 +960,28 @@ def _build_server(api: "DesktopApi"):
 
     @app.get("/poll")
     def _poll():
+        if not _request_is_authorized():
+            return _json_error(403, "请求未授权。")
         bottle.response.content_type = "application/json"
         return json.dumps(api.poll_events(bottle.request.query.get("since", "0")), ensure_ascii=False)
 
     @app.post("/api/<name>")
     def _call(name):
+        if not _request_is_authorized():
+            return _json_error(403, "请求未授权。")
+        if bottle.request.content_type.lower() != "application/json":
+            return _json_error(415, "接口只接受 application/json。")
+
         bottle.response.content_type = "application/json"
         method = getattr(api, name, None)
         if method is None or not getattr(method, "_exposed", False):
-            bottle.response.status = 404
-            return json.dumps({"ok": False, "error": f"未知接口 {name}"}, ensure_ascii=False)
+            return _json_error(404, f"未知接口 {name}")
         try:
             args = bottle.request.json
         except Exception:
-            args = None
+            return _json_error(400, "JSON 请求体无效。")
         if not isinstance(args, list):
-            args = []
+            return _json_error(400, "JSON 请求体必须是参数数组。")
         return json.dumps(method(*args), ensure_ascii=False)
 
     @app.get("/<path:path>")

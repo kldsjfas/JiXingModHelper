@@ -4,7 +4,7 @@ Set-Location $PSScriptRoot
 
 Write-Host "==> deps"
 python -m pip install -q -r requirements.txt
-python -m pip install -q "pyinstaller>=6.0"
+python -m pip install -q "pyinstaller==6.22.2"
 
 Write-Host "==> clean"
 # kill leftover Edge/app locking dist\modkit_data

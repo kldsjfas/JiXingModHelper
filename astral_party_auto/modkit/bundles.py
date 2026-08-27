@@ -343,16 +343,11 @@ def _entries_from_dir(aa: Path, active_names: set[str] | None) -> dict[str, Path
 
 
 def iter_bundle_entries(aa_dirs: BundleDirectories) -> Iterable[BundleEntry]:
-    """合并资源目录；同名包使用靠前目录中的版本。
-
-    每个目录只使用自己目录下的 catalog 过滤：
-    - 热更新缓存目录按自己的 catalog 过滤过期项；
-    - 基础包/旧版目录没有 catalog 时保留全部 bundle，避免漏掉未进热更 catalog 的资源。
-    """
+    """合并资源目录；同名包使用靠前目录中的版本，并按当前 catalog 过滤旧包。"""
     directories = _normalize_bundle_dirs(aa_dirs)
+    active_names = _active_names_for_dirs(directories)
     paths_by_name: dict[str, Path] = {}
     for directory in directories:
-        active_names = _active_catalog_bundle_names(directory)
         for bundle_name, path in _entries_from_dir(directory, active_names).items():
             paths_by_name.setdefault(bundle_name, path)
 

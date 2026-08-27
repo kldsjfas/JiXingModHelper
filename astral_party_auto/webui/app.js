@@ -3,6 +3,8 @@
   "use strict";
 
   const PAGE_SIZE = 25;
+  const API_TOKEN = new URLSearchParams(window.location.hash.slice(1)).get("token") || "";
+  const API_HEADERS = { "X-JiXing-Token": API_TOKEN };
   const PAGE_TITLES = {
     dashboard: "仪表盘",
     manage: "Mod 管理",
@@ -101,7 +103,7 @@
   async function api(name, ...args) {
     const resp = await fetch("/api/" + name, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { ...API_HEADERS, "Content-Type": "application/json" },
       body: JSON.stringify(args),
     });
     const result = await resp.json();
@@ -1679,7 +1681,7 @@ ${row.bundle}`;
   let eventCursor = 0;
   async function pollEvents() {
     try {
-      const resp = await fetch("/poll?since=" + eventCursor);
+      const resp = await fetch("/poll?since=" + eventCursor, { headers: API_HEADERS });
       const data = await resp.json();
       eventCursor = data.cursor ?? eventCursor;
       (data.events || []).forEach((e) => window.handleBackendEvent(e));
@@ -1691,7 +1693,7 @@ ${row.bundle}`;
     // 本地服务先于页面就绪；这里轻探几次，失败也继续（bootstrap 自带重试）
     for (let i = 0; i < 40; i++) {
       try {
-        const r = await fetch("/poll?since=0");
+        const r = await fetch("/poll?since=0", { headers: API_HEADERS });
         if (r.ok) return;
       } catch (_) {}
       await sleep(100);
