@@ -52,6 +52,14 @@ from .maker import (
     replace_bundle_texture_from_bundle,
 )
 from .manager import ModAnalysis, ModManager
+from .migration import (
+    BundleMigrationPlan,
+    MigrationTexture,
+    TextureMigration,
+    logical_bundle_name,
+    plan_bundle_migration,
+    scan_bundle_textures,
+)
 
 __all__ = [
     "AA_SUBPATH",
@@ -98,4 +106,10 @@ __all__ = [
     "replace_bundle_texture_from_bundle",
     "ModAnalysis",
     "ModManager",
+    "BundleMigrationPlan",
+    "MigrationTexture",
+    "TextureMigration",
+    "logical_bundle_name",
+    "plan_bundle_migration",
+    "scan_bundle_textures",
 ]

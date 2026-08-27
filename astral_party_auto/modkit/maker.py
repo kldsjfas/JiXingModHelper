@@ -1,6 +1,7 @@
 """制作 mod：替换贴图/文本、打包成可分享作品集。"""
 from __future__ import annotations
 
+import gc
 import json
 import shutil
 import zipfile
@@ -22,40 +23,46 @@ def replace_bundle_texture(
     """替换贴图。crop_box 为源图 (l,t,r,b) 像素裁剪，先裁再缩放。"""
     env = UnityPy.load(str(src_bundle))
     new_image = Image.open(image_path).convert("RGBA")
-    if crop_box:
-        new_image = new_image.crop(crop_box)
-    replaced: str | None = None
+    obj = data = image = None
+    try:
+        if crop_box:
+            new_image = new_image.crop(crop_box)
+        replaced: str | None = None
 
-    for obj in env.objects:
-        if obj.type.name != "Texture2D":
-            continue
-        data = obj.read()
-        name = str(getattr(data, "m_Name", "") or "")
-        if target_name and name != target_name:
-            continue
+        for obj in env.objects:
+            if obj.type.name != "Texture2D":
+                continue
+            data = obj.read()
+            name = str(getattr(data, "m_Name", "") or "")
+            if target_name and name != target_name:
+                continue
 
-        image = new_image
-        if match_original_size:
-            width = int(getattr(data, "m_Width", 0) or 0)
-            height = int(getattr(data, "m_Height", 0) or 0)
-            if width > 0 and height > 0 and (width, height) != new_image.size:
-                image = new_image.resize((width, height), Image.LANCZOS)
+            image = new_image
+            if match_original_size:
+                width = int(getattr(data, "m_Width", 0) or 0)
+                height = int(getattr(data, "m_Height", 0) or 0)
+                if width > 0 and height > 0 and (width, height) != new_image.size:
+                    image = new_image.resize((width, height), Image.LANCZOS)
 
-        try:
-            data.image = image
-        except Exception:
-            data.set_image(image)
-        data.save()
-        replaced = name
-        break
+            try:
+                data.image = image
+            except Exception:
+                data.set_image(image)
+            data.save()
+            replaced = name
+            break
 
-    if replaced is None:
-        raise RuntimeError("这个资源包里没有可替换的贴图。")
+        if replaced is None:
+            raise RuntimeError("这个资源包里没有可替换的贴图。")
 
-    out = Path(out_bundle)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_bytes(env.file.save())
-    return replaced
+        out = Path(out_bundle)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(env.file.save())
+        return replaced
+    finally:
+        obj = data = image = new_image = None
+        env = None
+        gc.collect()
 
 
 def replace_bundle_texture_from_bundle(

@@ -13,7 +13,7 @@ from typing import Any, Callable
 
 from .core.config import APP_ROOT, RESOURCE_ROOT
 from .mod_controller import DATA_DIR, MADE_DIR, ModController
-from .modkit.categories import ASSET_TYPES, dedupe_by_texture_name
+from .modkit.categories import ASSET_TYPES, annotate_texture_name_duplicates
 
 
 def _web_dir() -> Path:
@@ -87,6 +87,9 @@ class DesktopApi:
         self._replacement_path: Path | None = None
         self._draft_crop_path: Path | None = None
         self._draft_crop_index: int | None = None
+        self._migration_source: Path | None = None
+        self._migration_plans = []
+        self._migration_warnings: list[str] = []
         # Mod 管理预览：{bundle文件名: Path}
         self._mod_preview_files: dict[str, Path] = {}
         self._mod_preview_title: str = ""
@@ -201,11 +204,27 @@ class DesktopApi:
             from tkinter import filedialog
 
             filetypes = _to_tk_filetypes(file_types)
-            if kind == "folder":
-                return filedialog.askdirectory(title="选择文件夹")
-            if kind == "save":
-                return filedialog.asksaveasfilename(title="保存为", initialfile=save_filename or "", filetypes=filetypes)
-            return filedialog.askopenfilename(title="选择文件", filetypes=filetypes)
+            parent = self._tk_root
+            options = {"parent": parent} if parent is not None else {}
+            previous_topmost = False
+            try:
+                if parent is not None:
+                    previous_topmost = bool(parent.attributes("-topmost"))
+                    parent.attributes("-topmost", True)
+                    parent.update_idletasks()
+                if kind == "folder":
+                    return filedialog.askdirectory(title="选择文件夹", **options)
+                if kind == "save":
+                    return filedialog.asksaveasfilename(
+                        title="保存为",
+                        initialfile=save_filename or "",
+                        filetypes=filetypes,
+                        **options,
+                    )
+                return filedialog.askopenfilename(title="选择文件", filetypes=filetypes, **options)
+            finally:
+                if parent is not None:
+                    parent.attributes("-topmost", previous_topmost)
 
         result = self._run_on_ui(_open_dialog)
         return Path(result) if result else None
@@ -296,6 +315,34 @@ class DesktopApi:
             "preview_title": self._mod_preview_title,
             "bundles": bundles,
         }
+
+    @exposed
+    def choose_migration_source(self, mode: str = "file") -> dict | None:
+        if mode == "folder":
+            path = self._pick_path("folder")
+        else:
+            path = self._pick_path(
+                "open",
+                file_types=("旧资源包 (*.bundle;__data)", "所有文件 (*.*)"),
+            )
+        if path is None:
+            return None
+
+        plans, warnings = self.controller.plan_old_mod_migration(path)
+        self._migration_source = path
+        self._migration_plans = plans
+        self._migration_warnings = warnings
+        summary = self.controller.migration_plan_summary(plans, warnings)
+        summary.update({"path": str(path), "name": path.name})
+        return summary
+
+    @exposed
+    def run_migration(self) -> dict:
+        if self._migration_source is None or not self._migration_plans:
+            raise RuntimeError("请先选择旧 Mod 文件或文件夹。")
+        report = self.controller.migrate_old_mod(self._migration_plans)
+        report["warnings"] = list(self._migration_warnings)
+        return {"report": report, "draft": self._draft_state()}
 
     @exposed
     def install_pending_mod(self) -> dict:
@@ -441,9 +488,16 @@ class DesktopApi:
             asset_type=asset_type,
             character=character,
         )
+        names_only = [(bundle, name) for bundle, name, _char in rows]
+        annotated = annotate_texture_name_duplicates(names_only)
         return [
-            {"bundle": bundle, "name": name, "character": char}
-            for bundle, name, char in rows
+            {
+                "bundle": bundle,
+                "name": name,
+                "character": char,
+                "duplicates": duplicates,
+            }
+            for (bundle, name, char), (_b, _n, duplicates) in zip(rows, annotated)
         ]
 
     @exposed
@@ -609,22 +663,38 @@ class DesktopApi:
         asset_type = selection.get("asset_type") or "texture"
         source = selection.get("original_path") or selection.get("bundle_path")
         if asset_type == "text":
-            item = self.controller.add_text_to_draft(source, selection["name"], text_content)
+            item = self.controller.add_text_to_draft(
+                source,
+                selection["name"],
+                text_content,
+                bundle_name=selection["bundle"],
+            )
         else:
             if self._replacement_path is None:
                 raise RuntimeError("请先选择替换文件。")
             replacement = self._replacement_path
             if asset_type == "texture":
-                item = self.controller.add_texture_to_draft(source, replacement, texture_name=selection["name"])
+                item = self.controller.add_texture_to_draft(
+                    source,
+                    replacement,
+                    texture_name=selection["name"],
+                    bundle_name=selection["bundle"],
+                )
             elif asset_type == "anim":
                 if replacement.suffix.lower() in {".animbin", ".bin"}:
-                    item = self.controller.add_anim_to_draft(source, selection["name"], raw_path=replacement)
+                    item = self.controller.add_anim_to_draft(
+                        source,
+                        selection["name"],
+                        raw_path=replacement,
+                        bundle_name=selection["bundle"],
+                    )
                 else:
                     item = self.controller.add_anim_to_draft(
                         source,
                         selection["name"],
                         image_path=replacement,
                         preview_texture=selection.get("preview_texture"),
+                        bundle_name=selection["bundle"],
                     )
             else:
                 raise RuntimeError("3D 模型目前只支持导出。")
