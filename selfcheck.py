@@ -328,6 +328,68 @@ def check_mod_layering() -> None:
         assert (game / "same.bundle").read_bytes() == b"ORIGINAL"
 
 
+def check_mod_enable_sources() -> None:
+    from astral_party_auto.modkit.manager import ModManager
+
+    with TemporaryDirectory(prefix="jixing_enable_") as root_value:
+        root = Path(root_value)
+        game = root / "game"
+        source = root / "source"
+        nested_source = source / "bundles"
+        game.mkdir()
+        nested_source.mkdir(parents=True)
+        originals = {"a.bundle": b"ORIGINAL_A", "b.bundle": b"ORIGINAL_B"}
+        replacements = {"a.bundle": b"MOD_A", "b.bundle": b"MOD_B"}
+        for file_name in originals:
+            (game / file_name).write_bytes(originals[file_name])
+            (nested_source / file_name).write_bytes(replacements[file_name])
+
+        manager = ModManager(game, root / "data")
+        manager.install_mod(source, "双资源包测试")
+        manager.disable_mod("双资源包测试")
+        moved_source = source.rename(root / "moved_source")
+        store = Path(manager.installed_mods()[0]["store"])
+        (store / "b.bundle").unlink()
+        disabled_state = manager.state_path.read_bytes()
+
+        # 路径存在却是目录时也不能读取，不能等改写了前一个包才报错。
+        for cache_problem in ("缺失", "同名目录"):
+            if cache_problem == "同名目录":
+                (store / "b.bundle").mkdir()
+            try:
+                manager.enable_mod("双资源包测试")
+            except RuntimeError as exc:
+                assert "b.bundle" in str(exc), "错误提示应指出无法读取的资源包"
+            else:
+                raise AssertionError(f"缓存{cache_problem}且原始来源已移走时，不应允许启用")
+            assert manager.state_path.read_bytes() == disabled_state
+            assert manager.installed_mods()[0]["disabled"]
+            assert {name: (game / name).read_bytes() for name in originals} == originals
+        (store / "b.bundle").rmdir()
+
+        # 原始来源已移走时，完整缓存仍能独立启用。
+        (store / "b.bundle").write_bytes(replacements["b.bundle"])
+        assert manager.enable_mod("双资源包测试") == 2
+        assert not manager.installed_mods()[0]["disabled"]
+        assert {name: (game / name).read_bytes() for name in replacements} == replacements
+
+        # 缺失的缓存也可以从原始来源的子目录补上。
+        manager.disable_mod("双资源包测试")
+        (store / "b.bundle").unlink()
+        moved_source.rename(source)
+        assert manager.enable_mod("双资源包测试") == 2
+        assert {name: (game / name).read_bytes() for name in replacements} == replacements
+
+        # 游戏更新移除的旧包已不参与替换，不应因它缺少来源而阻止启用。
+        manager.disable_mod("双资源包测试")
+        source.rename(moved_source)
+        (game / "b.bundle").unlink()
+        manager = ModManager(game, root / "data")
+        assert manager.enable_mod("双资源包测试") == 1
+        assert (game / "a.bundle").read_bytes() == replacements["a.bundle"]
+        assert not (game / "b.bundle").exists()
+
+
 def check_draft_removal() -> None:
     import astral_party_auto.mod_controller as module
 
@@ -437,6 +499,7 @@ def main() -> int:
     check("hot-update cache layout", check_hot_update_cache)
     check("taptap exe detection", check_taptap_exe_detection)
     check("mod layering", check_mod_layering)
+    check("mod enable sources", check_mod_enable_sources)
     check("draft removal", check_draft_removal)
     check("archive cleanup", check_archive_cleanup)
     if args.with_game:

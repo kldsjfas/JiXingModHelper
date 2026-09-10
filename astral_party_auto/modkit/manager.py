@@ -194,8 +194,26 @@ class ModManager:
         if not mod.get("disabled"):
             return 0
         files = list(mod.get("files", []))
-        if not any(self._mod_file_source(mod, file_name) for file_name in files):
-            raise RuntimeError("无法启用：找不到该 mod 的缓存文件（安装来源可能已删除）。请重新安装。")
+        unavailable = []
+        for file_name in files:
+            # 当前版本已移除的包不会参与替换，无须再检查它的来源。
+            if self.bundle_path(file_name) is None:
+                continue
+            try:
+                source = self._mod_file_source(mod, file_name)
+                if source is None:
+                    unavailable.append(file_name)
+                    continue
+                with source.open("rb") as bundle_file:
+                    bundle_file.read(1)
+            except OSError:
+                unavailable.append(file_name)
+        if unavailable:
+            raise RuntimeError(
+                "无法启用：以下资源包的文件缺失或无法读取："
+                + "、".join(unavailable)
+                + "。请重新安装该 Mod。"
+            )
         mod["disabled"] = False
         # 再启用等同于最后激活：它应覆盖当前启用 Mod 的同名资源。
         state["mods"].pop(name, None)
