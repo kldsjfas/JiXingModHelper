@@ -12,7 +12,11 @@ permissions:
   contents: read
 
 jobs:
+  selfcheck:
+    uses: ./.github/workflows/selfcheck.yml
+
   build:
+    needs: selfcheck
     runs-on: windows-latest
     steps:
       - name: Checkout

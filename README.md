@@ -11,7 +11,7 @@
 
 <p align="center">
   <img alt="Platform" src="https://img.shields.io/badge/platform-Windows-blue">
-  <img alt="Python" src="https://img.shields.io/badge/Python-3.10%2B-blue">
+  <img alt="Python" src="https://img.shields.io/badge/Python-3.11%2B-blue">
   <img alt="License" src="https://img.shields.io/badge/License-MIT-green">
   <img alt="UI" src="https://img.shields.io/badge/UI-HTML%20%2B%20WebView2-9b6dff">
 </p>
@@ -126,6 +126,8 @@
 
 ## 从源码跑 / 打包
 
+使用 **Python 3.11 或更高版本**；当前固定的 NumPy 版本不支持 Python 3.10。CI 和发布构建使用 Python 3.11。
+
 ```powershell
 # 装依赖
 python -m pip install -r requirements.txt
@@ -138,6 +140,18 @@ powershell -ExecutionPolicy Bypass -File .\build_exe.ps1
 ```
 
 打包产物在 `dist\JiXingModHelper\`，双击 exe 启动。
+
+### 提交改动前自检
+
+装好依赖后，在仓库根目录运行：
+
+```powershell
+python selfcheck.py
+```
+
+默认自检使用临时目录里的模拟资源，检查迁移匹配、热更新缓存、Mod 启停与还原、作品集和解压目录清理，不需要安装游戏，也不会修改真实游戏文件。出现 `ALL CHECKS PASSED` 表示这些检查通过。
+
+每个 PR 都会运行这套自检；主分支和版本标签的构建也会先检查，通过后再打包。
 
 ---
 
