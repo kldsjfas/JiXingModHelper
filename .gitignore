@@ -42,6 +42,7 @@ _fix_shortcut.*
 # Secrets / personal
 .env
 *.local
+qa-evidence/
 
 # PyInstaller leftovers
 *.spec.bak

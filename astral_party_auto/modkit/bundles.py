@@ -34,7 +34,7 @@ _TYPE_MAP = {
 }
 
 ASSET_TYPE_KEYS = ("texture", "text", "mesh", "anim", "dynamic")
-INDEX_VERSION = 7
+INDEX_VERSION = 8
 
 BundleDirectories = str | Path | Iterable[str | Path]
 
@@ -152,7 +152,8 @@ def read_bundle_asset_names(bundle_path: str | Path) -> dict[str, list[str]]:
     texture_path_names: dict[int, str] = {}
     sprite_texture_paths: set[int] = set()
     dynamic_seen: set[str] = set()
-    env = UnityPy.load(str(bundle_path))
+    bundle = Path(bundle_path)
+    env = UnityPy.load(bundle.read_bytes(), path=str(bundle.parent))
     for obj in env.objects:
         tn = obj.type.name
         kind = _TYPE_MAP.get(tn)

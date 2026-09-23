@@ -5,13 +5,14 @@ namespace JiXingModHelperHost;
 
 internal static class Program
 {
-    private const string WindowTitle = "吉星派对 Mod 助手";
+    internal const string WindowTitle = "吉星派对 Mod 助手 · 1.2.0";
 
     [STAThread]
     private static void Main(string[] args)
     {
         ApplicationConfiguration.Initialize();
-        using var instanceMutex = new Mutex(true, @"Local\JiXingModHelper.SingleInstance", out var isFirstInstance);
+        // 不同版本可以并排运行，重复启动当前版本时激活已有窗口。
+        using var instanceMutex = new Mutex(true, @"Local\JiXingModHelper.v1.2.0.SingleInstance", out var isFirstInstance);
         if (!isFirstInstance)
         {
             ActivateExistingWindow();
@@ -84,7 +85,7 @@ internal sealed class MainWindow : Form
     {
         _url = url;
         _profilePath = profilePath;
-        Text = "吉星派对 Mod 助手";
+        Text = Program.WindowTitle;
         // 默认接近用户截图外框 ~1866×1182（含标题栏），客户区略大便于浏览
         ClientSize = new Size(1840, 1120);
         MinimumSize = new Size(1280, 800);

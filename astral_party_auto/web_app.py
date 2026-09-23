@@ -6,6 +6,7 @@ import hmac
 import json
 import mimetypes
 import os
+import tempfile
 import threading
 from collections import deque
 from functools import wraps
@@ -84,6 +85,7 @@ class DesktopApi:
         self._events_lock = threading.Lock()
         self._tk_root = None
         self._image_cache: dict[tuple, str] = {}
+        self._animation_cache: dict[tuple, dict] = {}
         self._pending_mod_path: Path | None = None
         self._replacement_path: Path | None = None
         self._draft_crop_path: Path | None = None
@@ -166,9 +168,12 @@ class DesktopApi:
             return None
         payload = dict(selection)
         payload["preview_data"] = self._image_data(selection.get("preview"))
-        if full_text and selection.get("asset_type") == "text":
+        if full_text and selection.get("asset_type") == "text" and selection.get("editable", True):
             source = selection.get("original_path") or selection.get("bundle_path")
-            payload["full_text"] = self.controller.read_text(source, selection["name"])
+            payload["original_text"] = self.controller.read_text(source, selection["name"])
+            draft_path = self.controller._draft_dir() / selection["bundle"]
+            payload["full_text"] = self.controller.read_text(draft_path, selection["name"]) if draft_path.exists() else payload["original_text"]
+        payload.setdefault("editable", payload.get("asset_type") in ("text", "texture", "anim"))
         return payload
 
     def _dashboard_state(self) -> dict:
@@ -515,48 +520,77 @@ class DesktopApi:
             "total": total,
         }
 
+    def _animation_preview(self, path: Path, name: str, kind: str, fps: float = 30) -> dict:
+        from .modkit.animation import read_animation_preview
+        import math
+
+        fps = float(fps)
+        if not math.isfinite(fps) or not 1 <= fps <= 120:
+            raise RuntimeError("预览帧率应在 1–120 之间。")
+        stat = path.stat()
+        key = (str(path.resolve()), stat.st_mtime_ns, stat.st_size, name, kind, fps)
+        if key not in self._animation_cache:
+            if kind == "sprite_clip":
+                from .modkit.clip_preview import read_clip_preview
+                result = read_clip_preview(path, name)
+            else:
+                result = read_animation_preview(path, name, kind=kind, fps=fps)
+            if len(self._animation_cache) >= 4:
+                self._animation_cache.pop(next(iter(self._animation_cache)))
+            self._animation_cache[key] = result
+        return self._animation_cache[key]
+
+    @exposed
+    def get_animation_preview(self, bundle: str, name: str, source: str = "original", fps: float = 30) -> dict:
+        if source not in ("original", "draft"):
+            raise RuntimeError("预览来源无效。")
+        path = self.controller.original_bundle_path(bundle)
+        if path is None:
+            raise RuntimeError(f"找不到资源包：{bundle}")
+        if source == "draft":
+            draft = self.controller._draft_dir() / Path(bundle).name
+            if not draft.exists():
+                return {"frames": [], "durations": [], "total": 0, "notice": "还没有保存此动画的替换。"}
+            path = draft
+        selection = self.controller.selection or {}
+        if selection.get("bundle") == bundle and selection.get("name") == name:
+            kind = selection.get("animation_kind") or "sequence"
+        else:
+            item = next((x for x in self.controller.draft_items if x.get("bundle") == bundle and x.get("name") == name), {})
+            kind = "sprite_clip" if item.get("kind") == "anim" else item.get("animation_kind", "sequence")
+        return self._animation_preview(path, name, kind, fps)
+
+    def _clip_candidate_preview(self, selection: dict, replacement: Path) -> dict:
+        """预览临时副本中的替换结果；选择文件和裁剪都不写入作品集。"""
+        from .modkit.clip_preview import read_clip_preview
+        from .modkit.clip_edit import replace_clip_checked
+        from .modkit.maker import replace_bundle_texture
+
+        original = Path(selection.get("original_path") or selection["bundle_path"])
+        draft = self.controller._draft_dir() / selection["bundle"]
+        source = draft if draft.exists() else original
+        with tempfile.TemporaryDirectory(prefix="jixing-clip-preview-") as folder:
+            temporary = Path(folder) / "candidate.bundle"
+            if replacement.suffix.lower() in {".animbin", ".bin"}:
+                if replacement.stat().st_size > 32 * 1024 * 1024:
+                    raise RuntimeError("动画数据超过 32 MB。")
+                replace_clip_checked(source, selection["name"], replacement.read_bytes(), temporary, reference_bundle=original)
+            else:
+                texture = selection.get("preview_texture")
+                if not texture:
+                    raise RuntimeError("此动画没有可直接替换的关联图集，请使用同源 .animbin。")
+                replace_bundle_texture(source, replacement, temporary, target_name=texture)
+            try:
+                return read_clip_preview(temporary, selection["name"])
+            except ValueError as exc:
+                return {"frames": [], "durations": [], "total": 0, "notice": f"替换文件可以读取，但无法播放：{exc}"}
+
     @exposed
     def get_sequence_frames(self, bundle: str, name: str) -> dict:
-        from astral_party_auto.modkit.bundles import read_bundle_asset_names
-        from astral_party_auto.modkit.dynamic import (
-            sequence_groups_from_names,
-            sorted_sequence_names,
-        )
-
         path = self.controller.original_bundle_path(bundle)
-        if not path:
+        if path is None:
             raise RuntimeError(f"找不到资源包：{bundle}")
-        names_by_type = read_bundle_asset_names(path)
-        texture_names = names_by_type.get("sequence_frames") or names_by_type.get("texture") or []
-        groups = [
-            group for group in sequence_groups_from_names(texture_names)
-            if group.base == name
-        ]
-        if not groups:
-            raise RuntimeError("该资源不是序列帧动画组。")
-        group = groups[0]
-        frame_names = sorted_sequence_names(group.names)[:120]
-        frames = []
-        width = height = 0
-        for frame_name in frame_names:
-            png, info = self.controller.preview_bundle(
-                path,
-                frame_name,
-                tag=f"seqframe_{bundle[:16]}",
-            )
-            if png:
-                frames.append(self._image_data(png))
-                if info:
-                    width, height = info.width, info.height
-        return {
-            "frames": frames,
-            "names": frame_names,
-            "fps": 30,
-            "width": width,
-            "height": height,
-            "total": group.frame_count,
-            "truncated": group.frame_count > len(frame_names),
-        }
+        return self._animation_preview(path, name, "sequence")
 
     @exposed
     def get_character_list(self) -> list[str]:
@@ -580,6 +614,7 @@ class DesktopApi:
 
     @exposed
     def select_asset(self, asset_type: str, bundle: str, name: str, force: bool = False) -> dict:
+        self._replacement_path = None
         selection = self.controller.set_selection(
             bundle,
             name,
@@ -636,32 +671,57 @@ class DesktopApi:
         return {"path": str(output)}
 
     @exposed
-    def choose_replacement(self) -> dict | None:
+    def choose_replacement(self, sequence_folder: bool = False) -> dict | None:
         selection = self.controller.selection
         if not selection:
             raise RuntimeError("请先选择资源。")
         asset_type = selection.get("asset_type") or "texture"
+        if not selection.get("editable", True):
+            raise RuntimeError(selection.get("reason") or "此资源暂不支持替换。")
         if asset_type in ("texture", "anim"):
             file_types = (
                 "图片或动画字节 (*.png;*.jpg;*.jpeg;*.webp;*.bmp;*.animbin;*.bin)",
                 "所有文件 (*.*)",
             )
+        elif asset_type == "dynamic":
+            file_types = ("动画图片 (*.gif;*.apng;*.png;*.webp)", "所有文件 (*.*)")
+        elif asset_type == "text":
+            file_types = ("文本文件 (*.txt;*.json;*.xml;*.csv;*.bytes)", "所有文件 (*.*)")
         else:
             raise RuntimeError("当前类型不需要选择替换文件。")
-        path = self._pick_path("open", file_types=file_types)
+        if sequence_folder and not (asset_type == "dynamic" and selection.get("animation_kind") == "sequence"):
+            raise RuntimeError("只有序列帧动画可以选择帧图文件夹。")
+        path = self._pick_path("folder" if sequence_folder else "open", file_types=file_types)
         if path is None:
             return None
+        if asset_type == "text":
+            from .modkit.maker import decode_text_asset_raw
+            if path.stat().st_size > 8 * 1024 * 1024:
+                raise RuntimeError("文本超过 8 MB，请先拆分或精简。")
+            text, kind = decode_text_asset_raw(path.read_bytes())
+            if kind != "text" or text is None:
+                raise RuntimeError("选中的文件不是可编辑的纯文本。")
+            return {"path": str(path), "name": path.name, "text_content": text}
+        animation = None
+        if asset_type == "dynamic":
+            from .modkit.animation import read_adapted_replacement
+            source = selection.get("original_path") or selection.get("bundle_path")
+            animation = read_adapted_replacement(source, selection["name"], path, kind=selection["animation_kind"])
+        elif asset_type == "anim" and selection.get("playable"):
+            animation = self._clip_candidate_preview(selection, path)
         self._replacement_path = path
         preview_data = ""
         if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
             preview_data = self._image_data(path)
-        return {"path": str(path), "name": path.name, "size": path.stat().st_size, "preview_data": preview_data}
+        return {"path": str(path), "name": path.name, "size": path.stat().st_size, "preview_data": preview_data, "animation": animation}
 
     @exposed
     def crop_replacement(self, crop_box: list) -> dict:
         """裁剪已选的替换图（浏览器端框选后调用）；裁剪结果覆盖为待提交文件。"""
         if self._replacement_path is None:
             raise RuntimeError("请先选择替换文件。")
+        if (self.controller.selection or {}).get("asset_type") == "dynamic":
+            raise RuntimeError("动画按原帧尺寸适配，不能用静态图片裁剪。")
         if self._replacement_path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
             raise RuntimeError("当前文件不是图片，不能裁剪。")
         from PIL import Image
@@ -671,15 +731,19 @@ class DesktopApi:
         out = DATA_DIR / "crop_preview.png"
         out.parent.mkdir(parents=True, exist_ok=True)
         cropped.save(out)
+        selection = self.controller.selection or {}
+        animation = self._clip_candidate_preview(selection, out) if selection.get("asset_type") == "anim" and selection.get("playable") else None
         self._replacement_path = out
-        return {"path": str(out), "name": out.name, "size": out.stat().st_size, "preview_data": self._image_data(out)}
+        return {"path": str(out), "name": out.name, "size": out.stat().st_size, "preview_data": self._image_data(out), "animation": animation}
 
     @exposed
-    def commit_replacement(self, text_content: str = "") -> dict:
+    def commit_replacement(self, text_content: str = "", fps: float = 30) -> dict:
         selection = self.controller.selection
         if not selection:
             raise RuntimeError("请先选择资源。")
         asset_type = selection.get("asset_type") or "texture"
+        if not selection.get("editable", True):
+            raise RuntimeError(selection.get("reason") or "此资源暂不支持替换。")
         source = selection.get("original_path") or selection.get("bundle_path")
         if asset_type == "text":
             item = self.controller.add_text_to_draft(
@@ -698,6 +762,11 @@ class DesktopApi:
                     replacement,
                     texture_name=selection["name"],
                     bundle_name=selection["bundle"],
+                )
+            elif asset_type == "dynamic":
+                item = self.controller.add_dynamic_to_draft(
+                    source, selection["name"], replacement, bundle_name=selection["bundle"],
+                    animation_kind=selection.get("animation_kind"), fps=fps,
                 )
             elif asset_type == "anim":
                 if replacement.suffix.lower() in {".animbin", ".bin"}:
@@ -734,13 +803,37 @@ class DesktopApi:
         index = int(index)
         if not (0 <= index < len(self.controller.draft_items)):
             raise RuntimeError("作品集项不存在。")
-        original, modified = self.controller.draft_preview_paths(index)
-        return {
-            "index": index,
-            "item": dict(self.controller.draft_items[index]),
-            "original_data": self._image_data(original),
-            "modified_data": self._image_data(modified),
-        }
+        item = dict(self.controller.draft_items[index])
+        result = {"index": index, "item": item, "original_data": "", "modified_data": ""}
+        original = self.controller.original_bundle_path(item["bundle"])
+        modified = self.controller._draft_dir() / item["bundle"]
+        if original is None or not modified.exists():
+            raise RuntimeError("找不到原资源或作品集文件。")
+        if item.get("kind") == "text":
+            result["original_text"] = self.controller.read_text(original, item["name"])
+            result["modified_text"] = self.controller.read_text(modified, item["name"])
+        elif item.get("kind") in ("dynamic", "anim") or item.get("from_anim"):
+            kind = "sprite_clip" if item.get("kind") == "anim" or item.get("from_anim") else item.get("animation_kind", "sequence")
+            fps = item.get("fps", 30)
+            animation_name = item.get("from_anim") or item["name"]
+            for label, path in (("original_animation", original), ("modified_animation", modified)):
+                try:
+                    result[label] = self._animation_preview(path, animation_name, kind, fps)
+                except ValueError as exc:
+                    result[label] = {"frames": [], "notice": str(exc)}
+            if item.get("kind") == "texture" and item.get("from_anim") and any(
+                not result[label].get("frames") for label in ("original_animation", "modified_animation")
+            ):
+                # 旧版动画图集草稿仍可对照像素，不能播放时明确保留为静态参考。
+                original_image, modified_image = self.controller.draft_preview_paths(index)
+                for side, image in (("original", original_image), ("modified", modified_image)):
+                    if not result[f"{side}_animation"].get("frames"):
+                        result[f"{side}_data"] = self._image_data(image)
+        else:
+            original, modified = self.controller.draft_preview_paths(index)
+            result["original_data"] = self._image_data(original)
+            result["modified_data"] = self._image_data(modified)
+        return result
 
     @exposed
     def replace_draft_image(self, index: int) -> dict | None:
@@ -751,9 +844,6 @@ class DesktopApi:
         if path is None:
             return None
         item = self.controller.update_draft_texture(int(index), path)
-        # “我的作品集”里的换图是面向已安装效果的操作：选完新图后
-        # 立即重新安装当前作品集，避免用户还要再猜一次“安装到游戏”。
-        self.controller.install_draft()
         return {
             "item": item,
             "draft": self._draft_state(),
@@ -802,7 +892,6 @@ class DesktopApi:
         item = self.controller.update_draft_texture(self._draft_crop_index, self._draft_crop_path, crop_box=box)
         self._draft_crop_path = None
         self._draft_crop_index = None
-        self.controller.install_draft()
         return {
             "item": item,
             "draft": self._draft_state(),

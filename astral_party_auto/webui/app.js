@@ -15,10 +15,10 @@
   };
   const TYPE_HINTS = {
     texture: "图片资源。走路/攻击一帧帧图在细分类「角色动作帧」。",
-    text: "可读配置/文案。FairyGUI 二进制已过滤。",
+    text: "文案与配置。支持原文对照、查找替换；二进制内容只读。",
     mesh: "3D 三角面模型，只导出不替换。",
-    anim: "Unity 动画片段。预览为同包第一帧/图集，可换图或 .animbin。",
-    dynamic: "动态 2D 图像：序列帧、视频、Live2D/GIF/FairyGUI 等。",
+    anim: "Unity 动画片段。Sprite 动画按真实帧顺序播放；其他片段会说明预览限制。",
+    dynamic: "序列帧、GIF / WebP / APNG 可播放和替换；其他动态类型按资源能力显示。",
   };
 
   const state = {
@@ -41,6 +41,19 @@
     characterList: [],
     characterLabels: { bundles: {}, resources: {} },
     selection: null,
+    selectionRequest: 0,
+    studioRequest: 0,
+    draftDetailRequest: 0,
+    editorKey: "",
+    textEdits: new Map(),
+    textFields: null,
+    textFieldPage: 0,
+    originalAnimation: null,
+    previewAnimation: null,
+    previewLoading: false,
+    previewError: "",
+    previewRequest: 0,
+    animationPlayers: new Map(),
     draftIndex: -1,
     pendingMod: null,
     migrationSource: null,
@@ -129,7 +142,13 @@
 
   function showPage(page) {
     if (!PAGE_TITLES[page]) return;
+    rememberTextEdit();
+    state.studioRequest += 1;
+    state.draftDetailRequest += 1;
+    stopAllAnimations();
+    closeLightbox();
     state.page = page;
+    $("#main-content").scrollTop = 0;
     $$(".page").forEach((el) => el.classList.toggle("is-active", el.id === `page-${page}`));
     $$(".nav-button").forEach((btn) =>
       btn.classList.toggle("is-active", btn.dataset.page === page)
@@ -137,7 +156,7 @@
     const title = $("#page-title");
     if (title) title.textContent = PAGE_TITLES[page];
     document.body.classList.remove("nav-open");
-    if (page === "browse") refreshBrowse();
+    if (page === "browse") { refreshBrowse(); renderPreview(); }
     if (page === "studio") refreshStudio();
     if (page === "pack") refreshPack();
     if (page === "manage") renderInstalled();
@@ -539,17 +558,22 @@ ${row.bundle}`;
   }
 
   async function selectResource(bundle, name) {
+    rememberTextEdit();
+    const request = ++state.selectionRequest;
+    state.studioRequest += 1;
+    stopAllAnimations();
+    closeLightbox();
+    state.replacement = null;
+    state.previewAnimation = null;
+    state.previewLoading = false;
+    state.previewError = "";
+    state.originalAnimation = null;
+    state.sequenceFrames = [];
     try {
       const sel = await call("select_asset", { busy: true, busyText: "加载预览…" }, state.assetType, bundle, name);
+      if (request !== state.selectionRequest) return;
       state.selection = sel;
-      if (sel.asset_type === "dynamic" && sel.frame_names && sel.frame_names.length) {
-        const seq = await call("get_sequence_frames", { quiet: true }, bundle, name);
-        state.sequenceFrames = (seq && seq.frames) || [];
-        state.sequenceFps = (seq && seq.fps) || 30;
-      } else {
-        state.sequenceFrames = [];
-        state.sequenceFps = 30;
-      }
+      state.previewLoading = !!isPlayableAnimation(sel);
       renderPreview();
       renderResources();
       updateExportButtons();
@@ -560,7 +584,33 @@ ${row.bundle}`;
       $("#apply-resource-character").disabled = false;
       $("#apply-bundle-character").disabled = false;
       $("#refresh-resource").disabled = false;
+      if (isPlayableAnimation(sel)) await loadBrowseAnimation(sel, request);
     } catch (_) {}
+  }
+
+  async function loadBrowseAnimation(selection, selectionRequest = state.selectionRequest) {
+    const request = ++state.previewRequest;
+    const key = selectionKey(selection);
+    state.previewLoading = true;
+    state.previewError = "";
+    if (state.page === "browse") renderPreview();
+    try {
+      const animation = await call("get_animation_preview", { quiet: true }, selection.bundle, selection.name, "original", previewFps());
+      if (request !== state.previewRequest || selectionRequest !== state.selectionRequest || key !== selectionKey()) return;
+      if (!animation?.frames?.length) throw new Error(animation?.notice || "没有可播放的帧");
+      state.previewAnimation = animation;
+      state.sequenceFrames = animation.frames;
+      state.sequenceFps = animation.fps || 30;
+    } catch (err) {
+      if (request !== state.previewRequest || selectionRequest !== state.selectionRequest || key !== selectionKey()) return;
+      state.previewAnimation = null;
+      state.previewError = err.message;
+    } finally {
+      if (request === state.previewRequest && selectionRequest === state.selectionRequest && key === selectionKey()) {
+        state.previewLoading = false;
+        if (state.page === "browse") renderPreview();
+      }
+    }
   }
 
   function renderPreview() {
@@ -569,6 +619,7 @@ ${row.bundle}`;
     const desc = $("#preview-description");
     const media = $("#preview-media");
     const go = $("#go-studio");
+    disposeAnimation("preview-media");
     if (!sel) {
       if (title) title.textContent = "还没选资源";
       if (desc) desc.textContent = "点中间列表的一项";
@@ -579,17 +630,20 @@ ${row.bundle}`;
       $("#apply-resource-character").disabled = true;
       $("#apply-bundle-character").disabled = true;
       $("#refresh-resource").disabled = true;
+      updateExportButtons();
       updateMultiSelectUI();
       return;
     }
     if (title) title.textContent = sel.caption || sel.name || "资源";
-    if (desc) desc.textContent = sel.category_desc || "";
+    if (desc) desc.textContent = sel.reason || sel.category_desc || "";
     if (media) {
-      const isSeq = sel.asset_type === "dynamic" && state.sequenceFrames.length;
-      if (isSeq) {
-        media.innerHTML = `<img src="${state.sequenceFrames[0]}" alt="preview">`;
-        const img = media.querySelector("img");
-        startSequencePreview(img, state.sequenceFrames, state.sequenceFps || 30);
+      if (isPlayableAnimation(sel)) {
+        if (state.previewLoading) renderAnimationState(media, "正在加载动画…");
+        else if (state.previewError) renderAnimationState(media, `动画预览未加载：${state.previewError}`, () => loadBrowseAnimation(sel));
+        else if (state.previewAnimation?.frames?.length) renderAnimation(media, state.previewAnimation, isSequenceAnimation(sel));
+        else renderAnimationState(media, "动画尚未加载", () => loadBrowseAnimation(sel));
+      } else if ((sel.asset_type || sel.kind) === "anim") {
+        renderAnimationState(media, sel.reason || "此动画片段暂不支持动作播放；关联图集仅作静态参考。", null, sel.preview_data);
       } else if (sel.preview_data) {
         stopSequencePreview();
         media.innerHTML = `<img src="${sel.preview_data}" alt="preview">`;
@@ -601,7 +655,7 @@ ${row.bundle}`;
         media.innerHTML = "<span>无可视预览</span>";
       }
     }
-    if (go) go.disabled = ["mesh", "dynamic"].includes(sel.asset_type || sel.kind);
+    if (go) go.disabled = (sel.asset_type || sel.kind) === "mesh";
     updateExportButtons();
     updateMultiSelectUI();
   }
@@ -646,74 +700,356 @@ ${row.bundle}`;
     }
   }
 
+  function selectionKey(selection = state.selection) {
+    return selection ? `${selection.asset_type || selection.kind}::${selection.bundle}::${selection.name}` : "";
+  }
+
+  function isPlayableAnimation(selection) {
+    if (!selection || selection.playable === false) return false;
+    const kind = selection.asset_type || selection.kind;
+    if (kind === "anim") return selection.playable === true || selection.animation_kind === "sprite_clip";
+    return kind === "dynamic" &&
+      (["sequence", "gif", "webp", "apng"].includes(selection.animation_kind) || !!selection.frame_names?.length);
+  }
+
+  function isSequenceAnimation(selection) {
+    return selection && (selection.asset_type || selection.kind) === "dynamic" &&
+      selection.animation_kind !== "sprite_clip" &&
+      (selection.animation_kind === "sequence" || !!selection.frame_names?.length);
+  }
+
+  function canEdit(selection) {
+    if (!selection || selection.editable === false) return false;
+    const kind = selection.asset_type || selection.kind;
+    return kind !== "mesh" && (kind !== "dynamic" || isPlayableAnimation(selection));
+  }
+
+  function previewFps() {
+    return Math.max(1, Math.min(120, Number($("#sequence-fps")?.value) || 30));
+  }
+
+  function rememberTextEdit() {
+    if (!state.editorKey || !$("#studio-text")) return;
+    const previous = state.textEdits.get(state.editorKey);
+    if (previous) previous.content = $("#studio-text").value;
+  }
+
+  function updateTextStatus() {
+    const editor = $("#studio-text");
+    const original = $("#studio-original-text").value;
+    const search = $("#text-find").value;
+    const searchable = state.textFields ? Object.values(state.textFields.current) : [editor.value];
+    const count = search ? searchable.reduce((total, text) => total + String(text).split(search).length - 1, 0) : 0;
+    $("#text-match-count").textContent = search ? `当前修改中找到 ${count} 处（按原样匹配）` : "查找只针对当前资源，保留原有格式和占位符。";
+    $("#text-replace-all").disabled = !canEdit(state.selection) || count === 0;
+    $("#text-find-next").disabled = count === 0;
+    $("#text-edit-status").textContent = `${editor.value.length.toLocaleString()} 字符 · ${editor.value.split("\n").length.toLocaleString()} 行 · ${editor.value === original ? "与原文相同" : "包含修改"}；点“保存到作品集”保留修改。`;
+    rememberTextEdit();
+  }
+
+  function configureTextFields(selection) {
+    state.textFields = null;
+    state.textFieldPage = 0;
+    if (selection.text_format === "fairygui") {
+      try {
+        const original = JSON.parse($("#studio-original-text").value);
+        const current = JSON.parse($("#studio-text").value);
+        if (original && current && !Array.isArray(current) && typeof current === "object" &&
+            Object.values(current).every((value) => typeof value === "string")) {
+          state.textFields = { original, current };
+        }
+      } catch (_) {}
+    }
+    $("#plain-text-editor").classList.toggle("is-hidden", !!state.textFields);
+    $("#fairygui-editor").classList.toggle("is-hidden", !state.textFields);
+    if (state.textFields) renderTextFields();
+  }
+
+  function findNextText() {
+    const search = $("#text-find").value;
+    if (!search) return;
+    let editor = $("#studio-text");
+    if (state.textFields) {
+      const fields = $$("#fairygui-rows textarea");
+      const focused = document.activeElement;
+      const start = Math.max(0, fields.indexOf(focused));
+      editor = fields.slice(start).find((input) => input.value.indexOf(search, input === focused ? input.selectionEnd : 0) >= 0)
+        || fields.find((input) => input.value.includes(search));
+      if (!editor) { toast("本页没有匹配的修改文字，可翻页继续查找"); return; }
+    }
+    let index = editor.value.indexOf(search, editor.selectionEnd);
+    if (index < 0) index = editor.value.indexOf(search);
+    if (index < 0) return;
+    editor.focus();
+    editor.setSelectionRange(index, index + search.length);
+  }
+
+  function replaceAllText() {
+    if (!canEdit(state.selection)) return;
+    const search = $("#text-find").value;
+    const replacement = $("#text-replace").value;
+    if (!search) return;
+    let count = 0;
+    const replace = (value) => {
+      const parts = value.split(search);
+      count += parts.length - 1;
+      return parts.join(replacement);
+    };
+    if (state.textFields) {
+      for (const key of Object.keys(state.textFields.current)) state.textFields.current[key] = replace(state.textFields.current[key]);
+      syncTextFields();
+      renderTextFields();
+    } else {
+      $("#studio-text").value = replace($("#studio-text").value);
+      updateTextStatus();
+    }
+    toast(`已替换 ${count} 处，保存后更新作品集`);
+  }
+
+  function syncTextFields() {
+    $("#studio-text").value = JSON.stringify(state.textFields.current, null, 2);
+    updateTextStatus();
+  }
+
+  function renderTextFields() {
+    if (!state.textFields) return;
+    const { original, current } = state.textFields;
+    const search = $("#text-find").value;
+    const keys = Object.keys(current).filter((key) => !search || current[key].includes(search) || String(original[key] ?? "").includes(search));
+    const pageSize = 40;
+    const pages = Math.max(1, Math.ceil(keys.length / pageSize));
+    state.textFieldPage = Math.min(state.textFieldPage, pages - 1);
+    const rows = $("#fairygui-rows");
+    rows.innerHTML = "";
+    keys.slice(state.textFieldPage * pageSize, (state.textFieldPage + 1) * pageSize).forEach((key) => {
+      const row = document.createElement("div");
+      row.className = "fairygui-row";
+      const field = document.createElement("code");
+      field.textContent = key;
+      const before = document.createElement("div");
+      before.className = "fairygui-original";
+      before.textContent = original[key] ?? "";
+      const input = document.createElement("textarea");
+      input.value = current[key];
+      input.rows = Math.min(6, Math.max(2, current[key].split("\n").length));
+      input.readOnly = !canEdit(state.selection);
+      input.dataset.field = key;
+      input.setAttribute("aria-label", `修改文字 ${key}`);
+      input.addEventListener("input", () => { current[key] = input.value; syncTextFields(); });
+      row.append(field, before, input);
+      rows.appendChild(row);
+    });
+    if (!keys.length) rows.textContent = "没有匹配的文字。";
+    $("#fairygui-page").textContent = `${keys.length} 个字段 · 第 ${state.textFieldPage + 1} / ${pages} 页`;
+    $("#fairygui-prev").disabled = state.textFieldPage === 0;
+    $("#fairygui-next").disabled = state.textFieldPage >= pages - 1;
+  }
+
   async function refreshStudio() {
+    rememberTextEdit();
+    const request = ++state.studioRequest;
+    const selectionRequest = state.selectionRequest;
     const empty = $("#studio-empty");
     const content = $("#studio-content");
+    let sel;
     try {
-      const sel = await call("get_studio_state", { quiet: true });
-      state.selection = sel;
-    } catch (_) {
-      state.selection = null;
-    }
-    if (!state.selection) {
-      empty.classList.remove("is-hidden");
-      content.classList.add("is-hidden");
+      sel = await call("get_studio_state", { quiet: true });
+    } catch (err) {
+      if (request === state.studioRequest && state.page === "studio") toast(err.message, true);
       return;
     }
-    empty.classList.add("is-hidden");
-    content.classList.remove("is-hidden");
-    const sel = state.selection;
+    if (request !== state.studioRequest || selectionRequest !== state.selectionRequest || state.page !== "studio") return;
+    state.selection = sel;
+    empty.classList.toggle("is-hidden", !!sel);
+    content.classList.toggle("is-hidden", !sel);
+    if (!sel) return;
+    const key = selectionKey(sel);
     $("#studio-title").textContent = sel.caption || sel.name || "";
-    $("#studio-description").textContent = sel.category_desc || sel.text_preview || "";
+    $("#studio-description").textContent = sel.category_desc || "";
     const kind = sel.asset_type || sel.kind || "texture";
-    const imageMode = $("#studio-image-mode");
-    const textMode = $("#studio-text-mode");
-    const chooseBtn = $("#choose-replacement");
+    const editable = canEdit(sel);
+    const animated = isPlayableAnimation(sel);
+    const sequence = isSequenceAnimation(sel);
+    $("#studio-image-mode").classList.toggle("is-hidden", kind === "text");
+    $("#studio-text-mode").classList.toggle("is-hidden", kind !== "text");
+    $("#choose-replacement").classList.toggle("is-hidden", !editable);
+    $("#choose-frame-folder").classList.toggle("is-hidden", !editable || !sequence);
+    $("#choose-replacement").textContent = kind === "text" ? "导入文本文件…" : kind === "anim" ? "选择动画数据 / 图集…" : animated ? "选择替换动画…" : "选择替换文件";
     const cropBtn = $("#crop-replacement");
+    cropBtn.classList.toggle("is-hidden", !["texture", "anim"].includes(kind) || !editable);
+    cropBtn.disabled = !state.replacement?.preview_data || /\.(animbin|bin)$/i.test(state.replacement?.name || "");
+    $("#commit-replacement").disabled = !editable;
+    $("#animation-settings").classList.toggle("is-hidden", !animated);
+    $("#sequence-fps-label").classList.toggle("is-hidden", !sequence);
+    $("#animation-guidance").textContent = kind === "anim"
+      ? "按动画片段中的 Sprite 引用顺序和时间播放，可暂停、逐帧查看和调节播放倍速。"
+      : !editable ? "当前资源可逐帧查看。替换能力和限制见下方说明。" : sequence
+      ? "导入 GIF、WebP 或 APNG 后按原序列帧数量和尺寸适配。此处帧率用于预览，游戏内速度由游戏控制。"
+      : "保留动画图片的逐帧时长，可逐帧检查替换前后效果。";
+    const animationNotice = kind === "anim" ? ".animbin 仅接受同源兼容动画片段，用于改动作数据；图片只替换关联图集，动作顺序和时间不变。" : "";
+    const notice = [sel.reason, animationNotice].filter(Boolean).join(" ") || (!editable ? "该资源目前仅支持预览和导出，不能直接替换。"
+      : animated ? "先对照预览，再保存到作品集；安装到游戏后需以实际效果为准。"
+      : editable ? "保存只更新作品集，稍后可在作品集中手动安装测试。" : "此类资源暂不支持直接替换。");
+    $("#studio-notice").textContent = notice;
+    $("#studio-notice").classList.toggle("is-hidden", !notice);
+    disposeAnimation("studio-original");
+    disposeAnimation("studio-replacement");
     if (kind === "text") {
-      imageMode.classList.add("is-hidden");
-      textMode.classList.remove("is-hidden");
-      chooseBtn.classList.add("is-hidden");
-      cropBtn?.classList.add("is-hidden");
-      $("#studio-text").value = sel.full_text || sel.text_preview || "";
-    } else if (kind === "mesh") {
-      imageMode.classList.remove("is-hidden");
-      textMode.classList.add("is-hidden");
-      chooseBtn.classList.add("is-hidden");
-      cropBtn?.classList.add("is-hidden");
-      setMedia($("#studio-original"), null, "3D 模型仅导出");
-      setMedia($("#studio-replacement"), null, "不支持替换");
-    } else if (kind === "dynamic") {
-      imageMode.classList.remove("is-hidden");
-      textMode.classList.add("is-hidden");
-      chooseBtn.classList.add("is-hidden");
-      cropBtn?.classList.add("is-hidden");
-      setMedia($("#studio-original"), sel.preview_data, "无预览图");
-      setMedia($("#studio-replacement"), null, "动态资源当前仅支持浏览/导出");
-    } else {
-      imageMode.classList.remove("is-hidden");
-      textMode.classList.add("is-hidden");
-      chooseBtn.classList.remove("is-hidden");
-      cropBtn?.classList.remove("is-hidden");
-      if (cropBtn) cropBtn.disabled = !state.replacement?.preview_data;
-      setMedia($("#studio-original"), sel.preview_data, "无预览图");
-      if (state.replacement?.preview_data) {
-        setMedia($("#studio-replacement"), state.replacement.preview_data, state.replacement.name);
-      } else if (state.replacement) {
-        setMedia($("#studio-replacement"), null, state.replacement.name || "已选文件");
+      const original = sel.original_text ?? sel.full_text ?? sel.text_preview ?? "";
+      const saved = state.textEdits.get(key);
+      const current = saved?.content ?? sel.full_text ?? original;
+      state.editorKey = key;
+      state.textEdits.set(key, { content: current });
+      $("#studio-original-text").value = original;
+      $("#studio-text").value = current;
+      $("#studio-text").readOnly = !editable;
+      $("#text-restore").disabled = !editable;
+      $("#text-replace").disabled = !editable;
+      $("#text-format").textContent = [sel.text_encoding, sel.text_format, editable ? "可编辑" : "只读"].filter(Boolean).join(" · ");
+      configureTextFields(sel);
+      updateTextStatus();
+      return;
+    }
+    state.editorKey = "";
+    if (animated) renderAnimationState($("#studio-original"), "正在加载动画…");
+    else if (kind === "anim") renderAnimationState($("#studio-original"), sel.reason || "此动画片段暂不支持动作播放；关联图集仅作静态参考。", null, sel.preview_data);
+    else setMedia($("#studio-original"), sel.preview_data, "无可视预览");
+    renderReplacement();
+    if (animated) {
+      if (!state.replacement) renderAnimationState($("#studio-replacement"), "正在加载作品集动画…");
+      const [original, draft] = await Promise.allSettled([
+        call("get_animation_preview", { quiet: true }, sel.bundle, sel.name, "original", previewFps()),
+        state.replacement?.animation ? Promise.resolve(state.replacement.animation) :
+          call("get_animation_preview", { quiet: true }, sel.bundle, sel.name, "draft", previewFps()),
+      ]);
+      if (request !== state.studioRequest || key !== selectionKey() || state.page !== "studio") return;
+      if (original.status === "fulfilled") {
+        state.originalAnimation = original.value;
+        renderAnimation($("#studio-original"), original.value, sequence);
       } else {
-        setMedia($("#studio-replacement"), null, "点击下方按钮选择文件");
+        renderAnimationState($("#studio-original"), `动画预览未加载：${original.reason.message}`, refreshStudio);
+      }
+      if (state.replacement) renderReplacement();
+      else if (draft.status === "fulfilled") renderAnimation($("#studio-replacement"), draft.value, sequence);
+      else {
+        renderAnimationState($("#studio-replacement"), `作品集动画未加载：${draft.reason.message}`, refreshStudio);
       }
     }
   }
 
+  function renderReplacement() {
+    const replacement = state.replacement;
+    const media = $("#studio-replacement");
+    if (replacement?.animation) {
+      renderAnimation(media, replacement.animation, isSequenceAnimation(state.selection));
+    } else {
+      setMedia(media, replacement?.preview_data, replacement?.name || "选择文件后可在这里对照预览");
+    }
+  }
+
+  function disposeAnimation(id) {
+    const player = state.animationPlayers.get(id);
+    if (player) { clearTimeout(player.timer); state.animationPlayers.delete(id); }
+    const media = document.getElementById(id);
+    media?.classList.remove("has-animation");
+  }
+
+  function stopAllAnimations() {
+    for (const id of Array.from(state.animationPlayers.keys())) disposeAnimation(id);
+    stopSequencePreview();
+    stopLightboxSequence();
+  }
+
+  function renderAnimation(media, animation, sequence = false) {
+    disposeAnimation(media.id);
+    if (!animation?.frames?.length) { renderAnimationState(media, animation?.notice || "没有可播放的帧"); return; }
+    media.classList.add("has-animation");
+    media.innerHTML = `<div class="animation-stage"><img alt="动画逐帧预览" draggable="false"></div>
+      <div class="animation-controls">
+        <div class="animation-buttons"><button type="button" class="button ghost compact" data-animation="previous" title="上一帧">上一帧</button><button type="button" class="button primary compact" data-animation="play">暂停</button><button type="button" class="button ghost compact" data-animation="next" title="下一帧">下一帧</button><select aria-label="动画播放速度"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select></div>
+        <input type="range" min="0" max="${animation.frames.length - 1}" value="0" step="1" aria-label="动画帧进度">
+        <span class="animation-position" aria-live="off"></span><small class="animation-notice"></small>
+      </div>`;
+    const player = { animation, index: 0, speed: 1, playing: true, timer: null, sequence };
+    const img = media.querySelector("img");
+    const progress = media.querySelector('input[type="range"]');
+    const playButton = media.querySelector('[data-animation="play"]');
+    const position = media.querySelector(".animation-position");
+    const notice = media.querySelector(".animation-notice");
+    const frameDurations = animation.frames.map((_, index) => Number(animation.durations?.[index]) || 1000 / (Number(animation.fps) || 30));
+    const durationSeconds = frameDurations.reduce((total, duration) => total + duration, 0) / 1000;
+    notice.textContent = [animation.notice, animation.truncated ? `抽样显示 ${animation.frames.length} / ${animation.total} 帧` : ""].filter(Boolean).join("；");
+    state.animationPlayers.set(media.id, player);
+    const renderFrame = () => {
+      img.src = animation.frames[player.index];
+      progress.value = String(player.index);
+      position.textContent = `${player.index + 1} / ${animation.frames.length} 帧 · ${durationSeconds.toFixed(2)} 秒 · ${animation.width || "?"} × ${animation.height || "?"}`;
+      playButton.textContent = player.playing ? "暂停" : "播放";
+    };
+    const schedule = () => {
+      clearTimeout(player.timer);
+      if (!player.playing || animation.frames.length < 2 || document.hidden) return;
+      const sourceFps = Number(animation.fps) || 30;
+      const frameDuration = frameDurations[player.index];
+      const duration = sequence ? frameDuration * sourceFps / previewFps() : frameDuration;
+      player.timer = setTimeout(() => {
+        if (state.animationPlayers.get(media.id) !== player || !media.isConnected) return;
+        player.index = (player.index + 1) % animation.frames.length;
+        renderFrame(); schedule();
+      }, Math.max(8, duration / player.speed));
+    };
+    player.reschedule = schedule;
+    media.querySelectorAll("[data-animation]").forEach((button) => button.addEventListener("click", () => {
+      if (button.dataset.animation === "play") player.playing = !player.playing;
+      else {
+        player.playing = false;
+        player.index = (player.index + (button.dataset.animation === "next" ? 1 : -1) + animation.frames.length) % animation.frames.length;
+      }
+      renderFrame(); schedule();
+    }));
+    progress.addEventListener("input", () => { player.playing = false; player.index = Number(progress.value); renderFrame(); schedule(); });
+    media.querySelector("select").addEventListener("change", (event) => { player.speed = Number(event.target.value); schedule(); });
+    renderFrame(); schedule();
+  }
+
+  function renderAnimationState(media, message, retry, previewData) {
+    if (!media) return;
+    disposeAnimation(media.id);
+    media.innerHTML = "";
+    const status = document.createElement("div");
+    status.className = "animation-state";
+    status.setAttribute("role", "status");
+    if (previewData) {
+      const img = document.createElement("img");
+      img.src = previewData;
+      img.alt = "关联图集（静态参考）";
+      status.appendChild(img);
+      const caption = document.createElement("small");
+      caption.textContent = "关联图集 · 静态参考";
+      status.appendChild(caption);
+    }
+    const label = document.createElement("span");
+    label.textContent = message;
+    status.appendChild(label);
+    if (retry) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "button ghost compact";
+      button.textContent = "重新加载动画";
+      button.addEventListener("click", retry);
+      status.appendChild(button);
+    }
+    media.appendChild(status);
+  }
+
   function setMedia(el, dataUrl, fallback) {
     if (!el) return;
+    disposeAnimation(el.id);
     if (dataUrl) el.innerHTML = `<img src="${dataUrl}" alt="">`;
     else el.innerHTML = `<span>${escapeHtml(fallback || "—")}</span>`;
   }
 
-  function openLightbox(src, title, frames) {
+  function openLightbox(src, title, frames, durations) {
     const overlay = $("#lightbox-overlay");
     const img = $("#lightbox-image");
     const titleEl = $("#lightbox-title");
@@ -730,7 +1066,7 @@ ${row.bundle}`;
       if (initialized) return;
       initialized = true;
       resetLightboxView();
-      if (frames && frames.length) startLightboxSequence(frames, state.sequenceFps || 30);
+      if (frames && frames.length) startLightboxSequence(frames, state.sequenceFps || 30, durations);
     };
     img.onload = () => {
       img.onload = null;
@@ -848,7 +1184,7 @@ ${row.bundle}`;
 
   function stopLightboxSequence() {
     if (state.lightboxSequenceTimer) {
-      clearInterval(state.lightboxSequenceTimer);
+      clearTimeout(state.lightboxSequenceTimer);
       state.lightboxSequenceTimer = null;
     }
     state.lightboxFrames = [];
@@ -866,18 +1202,22 @@ ${row.bundle}`;
     }, interval);
   }
 
-  function startLightboxSequence(frames, fps) {
+  function startLightboxSequence(frames, fps, durations) {
     stopLightboxSequence();
     const img = $("#lightbox-image");
     if (!img || !frames || !frames.length) return;
     state.lightboxFrames = frames;
     let index = 0;
     img.src = frames[0];
-    const interval = Math.max(33, Math.round(1000 / (fps || 30)));
-    state.lightboxSequenceTimer = setInterval(() => {
-      index = (index + 1) % frames.length;
-      img.src = frames[index];
-    }, interval);
+    const nextFrame = () => {
+      const duration = Number(durations?.[index]) || 1000 / (fps || 30);
+      state.lightboxSequenceTimer = setTimeout(() => {
+        index = (index + 1) % frames.length;
+        img.src = frames[index];
+        nextFrame();
+      }, Math.max(8, duration));
+    };
+    if (frames.length > 1) nextFrame();
   }
 
   function renderDraftList() {
@@ -899,7 +1239,7 @@ ${row.bundle}`;
       const btn = document.createElement("button");
       btn.type = "button";
       btn.className = "draft-item" + (index === state.draftIndex ? " is-active" : "");
-      const kind = item.kind === "texture" ? "图" : item.kind === "text" ? "文" : item.kind === "anim" ? "动" : item.kind || "?";
+      const kind = item.kind === "texture" ? "图" : item.kind === "text" ? "文" : ["anim", "dynamic"].includes(item.kind) ? "动" : item.kind || "?";
       btn.innerHTML = `<span>[${kind}] ${escapeHtml(item.name || "")}</span><small>${escapeHtml(item.note || "")}</small>`;
       btn.addEventListener("click", () => showDraftDetail(index));
       list.appendChild(btn);
@@ -925,20 +1265,48 @@ ${row.bundle}`;
   }
 
   async function showDraftDetail(index) {
+    const request = ++state.draftDetailRequest;
+    setMedia($("#draft-original"), null, "正在加载原内容…");
+    setMedia($("#draft-modified"), null, "正在加载修改内容…");
     state.draftIndex = index;
     renderDraftList();
     try {
       const data = await call("get_draft_detail", { quiet: true }, index);
+      if (request !== state.draftDetailRequest || state.page !== "pack") return;
       const item = data.item || {};
-      $("#draft-detail-title").textContent = `${item.kind || ""} · ${item.name || ""}`;
+      const kindLabel = { texture: "图片", text: "文字", anim: "动画片段", dynamic: "动画" }[item.kind] || "资源";
+      $("#draft-detail-title").textContent = `${kindLabel} · ${item.name || ""}`;
       setMedia($("#draft-original"), data.original_data, "无预览");
       setMedia($("#draft-modified"), data.modified_data, "无预览");
+      if (data.original_text != null || data.modified_text != null) {
+        setTextMedia($("#draft-original"), data.original_text ?? "无原文");
+        setTextMedia($("#draft-modified"), data.modified_text ?? "无修改文本");
+      }
+      for (const side of ["original", "modified"]) {
+        const animation = data[`${side}_animation`];
+        if (!animation) continue;
+        const media = $(`#draft-${side}`);
+        if (animation.frames?.length) renderAnimation(media, animation);
+        else renderAnimationState(media, animation.notice || "此动画暂不支持播放。", null, data[`${side}_data`]);
+      }
       $("#draft-replace").disabled = item.kind !== "texture";
       $("#draft-crop").disabled = item.kind !== "texture";
       $("#draft-remove").disabled = false;
     } catch (err) {
-      toast(err.message, true);
+      if (request === state.draftDetailRequest && state.page === "pack") {
+        renderAnimationState($("#draft-original"), `预览未加载：${err.message}`, () => showDraftDetail(index));
+        setMedia($("#draft-modified"), null, "预览未加载，点击左侧按钮重试。");
+        toast(err.message, true);
+      }
     }
+  }
+
+  function setTextMedia(media, text) {
+    disposeAnimation(media.id);
+    media.innerHTML = "";
+    const pre = document.createElement("pre");
+    pre.textContent = text;
+    media.appendChild(pre);
   }
 
   async function refreshLogs() {
@@ -993,8 +1361,9 @@ ${row.bundle}`;
       const img = e.target.closest(".preview-media img");
       if (img && img.src) {
         const isBrowsePreview = img.closest("#preview-media") !== null;
-        const frames = isBrowsePreview && state.sequenceFrames.length ? state.sequenceFrames : null;
-        openLightbox(img.src, img.alt || "图片预览", frames);
+        const player = state.animationPlayers.get(img.closest(".preview-media")?.id);
+        const animation = player?.animation || (isBrowsePreview ? state.previewAnimation : null);
+        openLightbox(img.src, img.alt || "图片预览", animation?.frames, animation?.durations);
       }
     });
 
@@ -1021,6 +1390,12 @@ ${row.bundle}`;
     $("#run-migration")?.addEventListener("click", runMigration);
 
     $("#asset-type")?.addEventListener("change", (e) => {
+      rememberTextEdit();
+      state.selectionRequest += 1;
+      state.studioRequest += 1;
+      stopAllAnimations();
+      state.previewAnimation = null;
+      state.replacement = null;
       state.assetType = e.target.value;
       state.categoryId = state.assetType === "texture" ? "hand_card" : "all";
       state.resourcePage = 0;
@@ -1108,16 +1483,41 @@ ${row.bundle}`;
         toast("3D 模型只支持导出，不替换", true);
         return;
       }
-      state.replacement = null;
       showPage("studio");
     });
     $("#export-primary")?.addEventListener("click", () => exportSelection("primary"));
     $("#export-secondary")?.addEventListener("click", () => exportSelection("secondary"));
     $("#refresh-resource")?.addEventListener("click", refreshResource);
 
-    $("#choose-replacement")?.addEventListener("click", chooseReplacement);
+    $("#choose-replacement")?.addEventListener("click", () => chooseReplacement(false));
+    $("#choose-frame-folder")?.addEventListener("click", () => chooseReplacement(true));
     $("#crop-replacement")?.addEventListener("click", cropReplacement);
     $("#commit-replacement")?.addEventListener("click", commitReplacement);
+    $("#studio-text")?.addEventListener("input", updateTextStatus);
+    $("#text-find")?.addEventListener("input", () => { state.textFieldPage = 0; updateTextStatus(); renderTextFields(); });
+    $("#text-find-next")?.addEventListener("click", findNextText);
+    $("#text-replace-all")?.addEventListener("click", replaceAllText);
+    $("#text-restore")?.addEventListener("click", () => {
+      if (!canEdit(state.selection)) return;
+      $("#studio-text").value = $("#studio-original-text").value;
+      configureTextFields(state.selection);
+      updateTextStatus();
+      toast("已恢复原文，保存后更新作品集");
+    });
+    $("#fairygui-prev")?.addEventListener("click", () => { state.textFieldPage = Math.max(0, state.textFieldPage - 1); renderTextFields(); });
+    $("#fairygui-next")?.addEventListener("click", () => { state.textFieldPage += 1; renderTextFields(); });
+    $("#sequence-fps")?.addEventListener("change", () => {
+      $("#sequence-fps").value = String(previewFps());
+      for (const player of state.animationPlayers.values()) player.reschedule();
+    });
+    document.addEventListener("visibilitychange", () => {
+      for (const player of state.animationPlayers.values()) {
+        if (document.hidden) clearTimeout(player.timer);
+        else player.reschedule();
+      }
+      if (document.hidden) stopLightboxSequence();
+    });
+    window.addEventListener("beforeunload", stopAllAnimations);
 
     $("#crop-smart")?.addEventListener("click", smartCropBox);
     $("#crop-reset")?.addEventListener("click", resetCropFull);
@@ -1151,14 +1551,14 @@ ${row.bundle}`;
     $("#draft-replace")?.addEventListener("click", async () => {
       if (state.draftIndex < 0) return;
       try {
-        const data = await call("replace_draft_image", { busy: true, busyText: "换图并安装中…" }, state.draftIndex);
+        const data = await call("replace_draft_image", { busy: true, busyText: "换图并保存中…" }, state.draftIndex);
         if (!data) return;
         state.draft = data.draft;
         state.installed = data.installed || state.installed;
         state.dashboard = data.dashboard || state.dashboard;
         renderInstalled();
         renderDashboard();
-        toast("换图完成，已写入游戏");
+        toast("换图已保存到作品集");
         await showDraftDetail(state.draftIndex);
       } catch (_) {}
     });
@@ -1348,35 +1748,33 @@ ${row.bundle}`;
 
   async function refreshResource() {
     if (!state.selection) return;
+    const key = selectionKey();
     try {
       const sel = await call("refresh_selection", { busy: true, busyText: "刷新资源…" });
-      state.selection = sel;
-      if (sel && sel.asset_type === "dynamic" && sel.frame_names && sel.frame_names.length) {
-        const seq = await call("get_sequence_frames", { quiet: true }, sel.bundle, sel.name);
-        state.sequenceFrames = (seq && seq.frames) || [];
-        state.sequenceFps = (seq && seq.fps) || 30;
-      } else {
-        state.sequenceFrames = [];
-      }
-      renderPreview();
-      updateExportButtons();
-      fillResourceCharacterSelect();
-      const eff = effectiveCharacter(sel.bundle, sel.name);
-      const charSel = $("#resource-character");
-      if (charSel) charSel.value = eff || "";
+      if (key !== selectionKey() || !sel) return;
+      await selectResource(sel.bundle, sel.name);
       toast("资源已刷新");
     } catch (_) {}
   }
 
-  async function chooseReplacement() {
+  async function chooseReplacement(sequenceFolder = false) {
+    const key = selectionKey();
+    if (!canEdit(state.selection)) return;
     try {
-      const data = await call("choose_replacement", { busy: false });
-      if (!data) return;
+      const data = await call("choose_replacement", { busy: true, busyText: "读取替换文件…" }, sequenceFolder);
+      if (!data || key !== selectionKey()) return;
       state.replacement = data;
-      setMedia($("#studio-replacement"), data.preview_data, data.name);
+      if (data.text_content != null) {
+        $("#studio-text").value = data.text_content;
+        configureTextFields(state.selection);
+        updateTextStatus();
+      } else if (state.page === "studio") {
+        renderReplacement();
+      }
       const cropBtn = $("#crop-replacement");
-      if (cropBtn) cropBtn.disabled = !data.preview_data;
-      toast(`已选择：${data.name}`);
+      if (cropBtn) cropBtn.disabled = !data.preview_data || /\.(animbin|bin)$/i.test(data.name || "") ||
+        (!!data.animation && (state.selection?.asset_type || state.selection?.kind) !== "anim");
+      toast(`已选择：${data.name}${data.encoding ? `（${data.encoding}）` : ""}`);
     } catch (_) {}
   }
 
@@ -1547,7 +1945,7 @@ ${row.bundle}`;
       onConfirm: async (box) => {
         const data = await call("crop_replacement", { busy: true, busyText: "裁剪中…" }, box);
         state.replacement = { ...state.replacement, ...data };
-        setMedia($("#studio-replacement"), data.preview_data, data.name);
+        renderReplacement();
         toast(`已裁剪为 ${box[2] - box[0]}×${box[3] - box[1]}`);
       },
     });
@@ -1563,13 +1961,13 @@ ${row.bundle}`;
         targetW: data.target_width,
         targetH: data.target_height,
         onConfirm: async (box) => {
-          const res = await call("commit_draft_crop", { busy: true, busyText: "裁剪并安装中…" }, box);
+          const res = await call("commit_draft_crop", { busy: true, busyText: "裁剪并保存中…" }, box);
           state.draft = res.draft;
           state.installed = res.installed || state.installed;
           state.dashboard = res.dashboard || state.dashboard;
           renderInstalled();
           renderDashboard();
-          toast("裁剪换图完成，已写入游戏");
+          toast("裁剪换图已保存到作品集");
           await showDraftDetail(state.draftIndex);
         },
       });
@@ -1578,18 +1976,25 @@ ${row.bundle}`;
 
   async function commitReplacement() {
     const kind = state.selection?.asset_type || state.selection?.kind;
-    if (kind === "mesh") {
-      toast("3D 模型不支持替换", true);
+    if (!canEdit(state.selection)) {
+      toast(state.selection?.reason || "此类资源暂不支持替换", true);
       return;
     }
+    if (kind !== "text" && !state.replacement) {
+      toast("请先选择替换文件", true);
+      return;
+    }
+    const key = selectionKey();
     const text = kind === "text" ? $("#studio-text").value : "";
     try {
-      const data = await call("commit_replacement", { busy: true, busyText: "写入作品集…" }, text);
+      const data = await call("commit_replacement", { busy: true, busyText: "写入作品集…" }, text, previewFps());
       state.draft = data.draft;
-      state.replacement = null;
-      const cropBtn = $("#crop-replacement");
-      if (cropBtn) cropBtn.disabled = true;
-      toast("已加入作品集");
+      if (key === selectionKey()) {
+        state.replacement = null;
+        $("#crop-replacement").disabled = true;
+        if (state.page === "studio") await refreshStudio();
+      }
+      toast("已保存到作品集，可继续预览或手动安装测试");
       renderDraftList();
     } catch (_) {}
   }

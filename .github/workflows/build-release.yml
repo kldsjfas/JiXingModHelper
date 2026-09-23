@@ -42,13 +42,19 @@ jobs:
 
       - name: Package ZIP
         shell: pwsh
-        run: Compress-Archive -Path dist/JiXingModHelper -DestinationPath JiXingModHelper.zip -Force
+        run: |
+          Compress-Archive -Path dist/JiXingModHelper -DestinationPath JiXingModHelper.zip
+          $checksum = (Get-FileHash JiXingModHelper.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$checksum  JiXingModHelper.zip" | Set-Content SHA256SUMS.txt -Encoding ascii
 
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: JiXingModHelper-${{ github.sha }}
-          path: JiXingModHelper.zip
+          path: |
+            JiXingModHelper.zip
+            SHA256SUMS.txt
+            RELEASE_NOTES.md
           if-no-files-found: error
 
   release:
@@ -69,6 +75,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          gh release create "${GITHUB_REF_NAME}" release/JiXingModHelper.zip \
+          gh release create "${GITHUB_REF_NAME}" release/JiXingModHelper.zip release/SHA256SUMS.txt \
             --repo "${GITHUB_REPOSITORY}" \
-            --generate-notes
+            --title "吉星派对 Mod 助手 ${GITHUB_REF_NAME}" \
+            --notes-file release/RELEASE_NOTES.md
