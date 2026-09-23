@@ -103,7 +103,7 @@ def export_text(
 
     # 二进制 / FGUI：按原样导出 bytes，不伪装成文本
     if isinstance(raw, str):
-        payload = raw.encode("utf-8", errors="surrogatepass")
+        payload = raw.encode("utf-8", errors="surrogateescape")
     else:
         payload = bytes(raw)
     if dest.suffix.lower() not in (".bytes", ".bin", ".fui"):

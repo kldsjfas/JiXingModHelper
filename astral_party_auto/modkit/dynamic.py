@@ -124,7 +124,9 @@ def text_asset_bytes(data) -> bytes:
     if raw is None:
         raw = getattr(data, "script", b"")
     if isinstance(raw, str):
-        return raw.encode("utf-8", errors="surrogatepass")
+        # UnityPy reads TextAsset strings with surrogateescape. Reuse it here so
+        # non-UTF-8 bytes (images and FGUI packages) round-trip unchanged.
+        return raw.encode("utf-8", errors="surrogateescape")
     return bytes(raw or b"")
 
 

@@ -14,7 +14,7 @@
         <img class="brand-logo" src="app_icon.png" alt="">
         <div class="brand-copy">
           <strong>吉星派对</strong>
-          <span>Mod 助手 · HTML UI</span>
+          <span>Mod 助手 · 1.2.0</span>
         </div>
       </div>
 
@@ -69,7 +69,7 @@
             <h2>怎么用</h2>
             <ul>
               <li>浏览资源：选择贴图、文本、3D 模型或动画。</li>
-              <li>贴图、文本和动画可替换；3D 模型仅导出。</li>
+              <li>可替换贴图、可编辑文本、序列帧和动画图片；3D 模型仅导出。</li>
               <li>替换内容先加入作品集，再导出 ZIP 或直接安装。</li>
               <li>全程只处理本地资源包，不注入进程。</li>
             </ul>
@@ -186,12 +186,38 @@
               <article class="card preview-card"><h3>游戏原内容</h3><div id="studio-original" class="preview-media tall"></div></article>
               <article class="card preview-card"><h3>你的替换文件</h3><div id="studio-replacement" class="preview-media tall"><span>点击下方按钮选择文件</span></div></article>
             </div>
-            <article id="studio-text-mode" class="card is-hidden"><h3>编辑文本</h3><textarea id="studio-text"></textarea></article>
+            <article id="studio-text-mode" class="card is-hidden">
+              <div class="section-heading"><h3>文字对照编辑</h3><span id="text-format" class="count-badge"></span></div>
+              <div class="text-tools">
+                <label>查找<input id="text-find" type="search" placeholder="查找当前资源中的文字"></label>
+                <label>替换为<input id="text-replace" type="text" placeholder="替换文字（可留空）"></label>
+                <button id="text-find-next" class="button ghost compact">下一处</button>
+                <button id="text-replace-all" class="button ghost compact">全部替换</button>
+                <button id="text-restore" class="button ghost compact">恢复原文</button>
+              </div>
+              <p id="text-match-count" class="editor-status" aria-live="polite"></p>
+              <div id="plain-text-editor" class="compare-grid text-compare">
+                <label>游戏原文<textarea id="studio-original-text" readonly spellcheck="false" aria-label="游戏原文"></textarea></label>
+                <label>你的修改<textarea id="studio-text" spellcheck="false" aria-label="你的修改"></textarea></label>
+              </div>
+              <div id="fairygui-editor" class="is-hidden">
+                <p class="editor-status">直接改右侧文字即可，字段编号会自动保留。查找只匹配文字内容。</p>
+                <div class="fairygui-table"><div class="fairygui-table-heading"><span>字段</span><span>原文</span><span>你的修改</span></div><div id="fairygui-rows"></div></div>
+                <div class="pager"><button id="fairygui-prev" class="button ghost compact">上一页</button><span id="fairygui-page"></span><button id="fairygui-next" class="button ghost compact">下一页</button></div>
+              </div>
+              <p id="text-edit-status" class="editor-status" aria-live="polite"></p>
+            </article>
+            <div id="animation-settings" class="notice is-hidden">
+              <label id="sequence-fps-label">预览帧率 <input id="sequence-fps" type="number" min="1" max="120" value="30"> 帧/秒</label>
+              <span id="animation-guidance"></span>
+            </div>
+            <p id="studio-notice" class="notice is-hidden" role="status"></p>
             <div class="action-row studio-actions">
               <button class="button ghost" data-page-link="browse">← 回浏览</button>
               <button id="choose-replacement" class="button ghost">选择替换文件</button>
+              <button id="choose-frame-folder" class="button ghost is-hidden">选择 PNG 帧文件夹…</button>
               <button id="crop-replacement" class="button ghost" disabled>裁剪</button>
-              <button id="commit-replacement" class="button primary">确认替换并加入作品集</button>
+              <button id="commit-replacement" class="button primary">保存到作品集</button>
               <button class="button purple" data-page-link="pack">打开作品集 →</button>
             </div>
           </div>
@@ -199,7 +225,7 @@
 
         <section id="page-pack" class="page">
           <article class="card pack-header">
-            <div><h2>我的作品集 <span id="draft-count">0 项</span></h2><p>点选一项预览；可以导出 ZIP 或安装到游戏。</p></div>
+            <div><h2>我的作品集 <span id="draft-count">0 项</span></h2><p>保存和预览只改作品集；准备好后再手动安装到游戏。</p></div>
             <label>套装名<input id="draft-name" maxlength="60"></label>
           </article>
           <div class="pack-layout">
@@ -207,12 +233,12 @@
             <section class="panel draft-detail">
               <h2 id="draft-detail-title">尚未选择</h2>
               <div class="compare-grid compact-grid">
-                <div><h3>游戏原图</h3><div id="draft-original" class="preview-media tall"></div></div>
+                <div><h3>游戏原内容</h3><div id="draft-original" class="preview-media tall"></div></div>
                 <div><h3>替换后</h3><div id="draft-modified" class="preview-media tall"></div></div>
               </div>
               <div class="action-row">
-                <button id="draft-replace" class="button primary" disabled>换图并安装…</button>
-                <button id="draft-crop" class="button ghost" disabled>裁剪换图并安装…</button>
+                <button id="draft-replace" class="button primary" disabled>换图并保存…</button>
+                <button id="draft-crop" class="button ghost" disabled>裁剪并保存…</button>
                 <button id="draft-remove" class="button danger" disabled>移除这项</button>
               </div>
               <div class="action-row">

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import gc
+import hashlib
 import json
 import re
 import shutil
@@ -37,7 +38,6 @@ from .modkit import (
     logical_bundle_name,
     plan_bundle_migration,
     read_text_asset,
-    replace_bundle_animation_raw,
     replace_bundle_text,
     replace_bundle_texture,
     replace_bundle_texture_from_bundle,
@@ -46,6 +46,7 @@ from .modkit import (
     text_asset_bytes,
 )
 from .modkit.bundles import TextureInfo, iter_bundle_entries, read_bundle_asset_names
+from .modkit.clip_edit import replace_clip_checked as replace_bundle_animation_raw
 from .modkit.categories import (
     ASSET_TYPES,
     category_desc,
@@ -412,11 +413,6 @@ class ModController:
         if asset_type != "texture" or cat_id in ("all", ""):
             for bundle, names in block.items():
                 for name in names:
-                    # 旧索引里 *_fui 是 FairyGUI 二进制，不当文本列
-                    if asset_type == "text" and (
-                        name.endswith("_fui") or name.endswith("fui") or name.startswith("FGUI")
-                    ):
-                        continue
                     if q and q not in name.lower() and q not in bundle.lower():
                         continue
                     out.append((bundle, name))
@@ -471,10 +467,6 @@ class ModController:
         for bundle in sorted(block.keys(), key=str.lower):
             names = block[bundle]
             for name in sorted(names, key=str.lower):
-                if asset_type == "text" and (
-                    name.endswith("_fui") or name.endswith("fui") or name.startswith("FGUI")
-                ):
-                    continue
                 if q and q not in name.lower() and q not in bundle.lower():
                     continue
                 yield bundle, name
@@ -580,10 +572,12 @@ class ModController:
         tag 必须区分来源，避免 game/draft 同 stem 互相覆盖。
         """
         bundle_path = Path(bundle_path)
-        stem = bundle_path.stem
+        stamp = bundle_path.stat()
+        identity = f"{bundle_path.resolve()}|{stamp.st_mtime_ns}|{stamp.st_size}|{texture_name}"
+        fingerprint = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
         safe = re.sub(r"[^\w\-]+", "_", texture_name or "first")[:40]
         tag = re.sub(r"[^\w\-]+", "_", tag or "browse")[:24]
-        out = PREVIEW_DIR / f"{tag}_{stem}_{safe}.png"
+        out = PREVIEW_DIR / f"{tag}_{fingerprint}_{safe}.png"
 
         if out.exists() and not force:
             try:
@@ -649,104 +643,69 @@ class ModController:
             return self.selection
 
         if asset_type == "text":
-            from .modkit.maker import decode_text_asset_raw
-            import UnityPy
+            from .modkit.maker import read_text_asset_info
 
-            text = ""
-            kind = "binary"
-            try:
-                text = read_text_asset(path, asset_name)
-                kind = "text"
-            except Exception as exc:
-                # 尽量给出原因，而不是把乱码塞进预览
-                try:
-                    env = UnityPy.load(str(path))
-                    for obj in env.objects:
-                        if obj.type.name != "TextAsset":
-                            continue
-                        data = obj.read()
-                        if str(getattr(data, "m_Name", "") or "") != asset_name:
-                            continue
-                        raw = getattr(data, "m_Script", None)
-                        if raw is None:
-                            raw = getattr(data, "script", b"")
-                        _t, kind = decode_text_asset_raw(raw)
-                        break
-                except Exception:
-                    pass
-                if kind == "fgui":
-                    text = (
-                        f"「{asset_name}」是 FairyGUI 界面包（*_fui），二进制资源，不是可读文本。\n"
-                        f"刷新索引后这类条目会从「文本」列表里去掉。\n\n{exc}"
-                    )
-                else:
-                    text = f"无法按文本打开「{asset_name}」。\n{exc}"
-            snippet = (text[:800] + "…") if len(text) > 800 else text
+            info = read_text_asset_info(path, asset_name)
+            text = info.get("text") or ""
             self.selection = {
-                "kind": "text",
-                "asset_type": "text",
-                "bundle": bundle_name,
-                "bundle_path": str(game_path or path),
-                "original_path": str(path),
-                "name": asset_name,
-                "width": 0,
-                "height": 0,
-                "preview": "",
-                "text_preview": snippet or "（空）",
-                "category": "all",
-                "category_label": "文本",
-                "category_desc": (
-                    "可读文本（地图 JSON / 词库等）"
-                    if kind == "text"
-                    else "二进制 TextAsset（非可读文本）"
-                ),
+                "kind": "text", "asset_type": "text", "bundle": bundle_name,
+                "bundle_path": str(game_path or path), "original_path": str(path),
+                "name": asset_name, "width": 0, "height": 0, "preview": "",
+                "editable": info["editable"], "reason": info.get("reason", ""),
+                "text_encoding": info.get("encoding", ""),
+                "text_format": info.get("format", ""),
+                "text_preview": (text[:800] + "…") if len(text) > 800 else text,
+                "category": "all", "category_label": "文本",
+                "category_desc": info.get("reason") or "可编辑文本 · 保留原文件编码",
                 "caption": f"文本 · {asset_name}",
             }
             return self.selection
 
         if asset_type == "anim":
-            # 第一帧/图集预览：同包里找 Walk-001 这类贴图
+            from .modkit.clip_preview import inspect_clip_preview
+
+            clip = inspect_clip_preview(path, asset_name)
+            playable = bool(clip.get("playable"))
             preview_tex = find_anim_preview_texture(path, asset_name)
             png = None
-            width = height = 0
-            if preview_tex:
+            width, height = clip.get("width", 0), clip.get("height", 0)
+            if not playable and preview_tex:
                 png, info = self.preview_bundle(path, preview_tex, tag="animprev", force=force)
                 if info:
                     width, height = info.width, info.height
+            reason = clip.get("reason") or "按原动画关键帧播放。"
             self.selection = {
-                "kind": "anim",
-                "asset_type": "anim",
-                "bundle": bundle_name,
-                "bundle_path": str(game_path or path),
-                "original_path": str(path),
-                "name": asset_name,
+                "kind": "anim", "asset_type": "anim", "editable": True,
+                "playable": playable,
+                "animation_kind": "sprite_clip" if playable else "unsupported_clip",
+                "clip_duration": clip.get("duration", 0),
+                "clip_frame_count": clip.get("total", 0),
+                "reason": reason,
+                "bundle": bundle_name, "bundle_path": str(game_path or path),
+                "original_path": str(path), "name": asset_name,
                 "preview_texture": preview_tex or "",
-                "width": width,
-                "height": height,
+                "width": width, "height": height,
                 "preview": str(png) if png else "",
-                "text_preview": (
-                    f"动画片段 {asset_name}\n"
-                    f"预览贴图：{preview_tex or '（同包未找到对应图）'}\n"
-                    "换图 = 替换该预览贴图/图集；也可用 .animbin 替换动画数据。"
-                ),
-                "category": "all",
-                "category_label": "动画",
-                "category_desc": (
-                    f"AnimationClip · 预览 {preview_tex}" if preview_tex else "AnimationClip · 无预览贴图"
-                ),
-                "caption": f"动画 · {asset_name}" + (f" · 预览 {preview_tex}" if preview_tex else ""),
+                "text_preview": reason,
+                "category": "all", "category_label": "动画",
+                "category_desc": f"2D 动画 · {clip.get('total', 0)} 帧 · 按原时序播放" if playable else "动画暂不支持播放；下图仅为静态参考",
+                "caption": f"动画 · {asset_name}",
             }
             return self.selection
 
         if asset_type == "dynamic":
             # 用与索引一致的贴图名集合，但排除被 Sprite 引用的 Texture2D 图集。
             names_by_type = read_bundle_asset_names(path)
-            texture_names = names_by_type.get("sequence_frames") or names_by_type.get("texture") or []
+            if asset_name in names_by_type.get("anim", []):
+                return self.set_selection(bundle_name, asset_name, asset_type="anim", force=force)
+            texture_names = names_by_type.get("sequence_frames", [])
             groups = [
                 group for group in sequence_groups_from_names(texture_names)
                 if group.base == asset_name
             ]
             if groups:
+                from .modkit.animation import inspect_animation
+                animation_info = inspect_animation(path, asset_name, "sequence")
                 group = groups[0]
                 preview_tex = find_sequence_preview_texture(texture_names, asset_name)
                 png = info = None
@@ -756,6 +715,9 @@ class ModController:
                 self.selection = {
                     "kind": "dynamic",
                     "asset_type": "dynamic",
+                    "animation_kind": "sequence",
+                    "editable": animation_info["editable"],
+                    "reason": animation_info.get("reason", ""),
                     "bundle": bundle_name,
                     "bundle_path": str(game_path or path),
                     "original_path": str(path),
@@ -770,7 +732,7 @@ class ModController:
                         f"序列帧动画组：{asset_name}\n"
                         f"帧数：{group.frame_count}（{group.min_index}~{group.max_index}）\n"
                         f"示例帧：{', '.join(group.examples)}\n"
-                        "游戏内表现为连续播放的 2D 动态图片，预览按 30fps 播放。"
+                        "按名称推测的帧组，30fps 为预览值；游戏内时序由原有组件决定。"
                     ),
                     "category": "all",
                     "category_label": "动态图像",
@@ -783,6 +745,7 @@ class ModController:
             import UnityPy
 
             env = UnityPy.load(str(path))
+            dyn_kind = None
             kind_label = "动态图像"
             kind_desc = "动态 2D 资源"
             text_preview = f"动态资源：{asset_name}\n未找到对应对象的具体类型，可尝试刷新索引。"
@@ -855,14 +818,21 @@ class ModController:
                                 "text_preview": text_preview,
                                 "category": cat,
                                 "category_label": category_label(cat),
-                                "category_desc": f"{kind_desc}\n当前替换目标：{atlas_bundle} [{atlas_name}]",
+                                "category_desc": f"图集静态参考，不代表完整动效。\n当前替换目标：{atlas_bundle} [{atlas_name}]",
                                 "caption": f"{kind_label} · {asset_name}（替换 {atlas_name}）",
                             }
                             return self.selection
 
+            animation_info = {"editable": False, "reason": "此资源需要游戏运行时，目前可导出；不能在这里完整播放或替换。"}
+            if dyn_kind in ("gif", "webp", "apng"):
+                from .modkit.animation import inspect_animation
+                animation_info = inspect_animation(path, asset_name, dyn_kind)
             self.selection = {
                 "kind": "dynamic",
                 "asset_type": "dynamic",
+                "animation_kind": dyn_kind or "unsupported",
+                "editable": animation_info["editable"],
+                "reason": animation_info.get("reason") or animation_info.get("notice", ""),
                 "bundle": bundle_name,
                 "bundle_path": str(game_path or path),
                 "original_path": str(path),
@@ -887,6 +857,7 @@ class ModController:
         lab = labels.get(asset_type, asset_type)
         self.selection = {
             "kind": asset_type,
+            "editable": False,
             "asset_type": asset_type,
             "bundle": bundle_name,
             "bundle_path": str(game_path or path),
@@ -996,12 +967,7 @@ class ModController:
         # 用游戏原版（或备份）为底再替换，避免叠改
         backup = DATA_DIR / "backups" / bundle_name
         base = backup if backup.exists() else game_b
-        # 若同包还有其它贴图替换，应基于 draft；单贴图项用 base 更干净
-        others = [
-            x for i, x in enumerate(self.draft_items)
-            if i != index and x.get("bundle") == bundle_name and x.get("kind") == "texture"
-        ]
-        src = out_bundle if (others and out_bundle.exists()) else base
+        src = out_bundle if out_bundle.exists() else base
         replaced = replace_bundle_texture(
             src, image_path, out_bundle, target_name=item.get("name"), crop_box=crop_box
         )
@@ -1168,12 +1134,9 @@ class ModController:
             base = game_b
         else:
             raise RuntimeError(f"找不到资源包：{bundle_name}")
-        # 同包已有其它贴图修改时，在 draft 上继续改
-        others_in_draft = any(
-            x.get("bundle") == bundle_name and x.get("kind") == "texture" and x.get("name") != texture_name
-            for x in self.draft_items
-        )
-        src = out_bundle if (others_in_draft and out_bundle.exists()) else base
+        # 文字、贴图和动画在同一份草稿上累积，重复编辑也保留其它对象。
+        src = out_bundle if out_bundle.exists() else base
+        self._check_sequence_overlap(bundle_name, [texture_name] if texture_name else [], "texture", texture_name)
         replaced = replace_bundle_texture(
             src, image_path, out_bundle, target_name=texture_name, crop_box=crop_box, match_original_size=True
         )
@@ -1209,7 +1172,8 @@ class ModController:
         out_bundle = pack_dir / bundle_name
         # 若作品集里已有同 bundle，基于作品集版本继续改，否则用原版
         src = out_bundle if out_bundle.exists() else bundle_path
-        replaced = replace_bundle_text(src, asset_name, new_text, out_bundle)
+        reference = self.original_bundle_path(bundle_name) or bundle_path
+        replaced = replace_bundle_text(src, asset_name, new_text, out_bundle, reference_bundle=reference)
         item = {
             "kind": "text",
             "bundle": bundle_name,
@@ -1223,6 +1187,52 @@ class ModController:
         self.draft_items.append(item)
         self._save_draft()
         self.log(f"已加入作品集（文本）：{replaced}（共 {len(self.draft_items)} 项）")
+        return item
+
+    def _check_sequence_overlap(self, bundle: str, names: list, kind: str, name: str | None) -> None:
+        """同一张帧图不能同时归属两个草稿项，否则撤销会互相覆盖。"""
+        targets = set(names)
+        for item in self.draft_items:
+            if item.get("bundle") != bundle or (item.get("kind") == kind and item.get("name") == name):
+                continue
+            occupied = set(item.get("frame_names") or [])
+            if item.get("kind") == "texture":
+                occupied.add(item.get("name"))
+            if targets & occupied:
+                raise RuntimeError(f"与作品集中的「{item.get('name')}」共用帧图，请先移除那一项再替换。")
+
+    def add_dynamic_to_draft(self, bundle_path, asset_name, replacement_path, *, bundle_name, animation_kind, fps=30) -> dict:
+        from .modkit.animation import inspect_animation, replace_bundle_sequence, replace_bundle_animated_image
+
+        self._require_game()
+        if Path(bundle_name).name != bundle_name or not bundle_name.lower().endswith(".bundle"):
+            raise RuntimeError("无法确定资源包名称。")
+        source = Path(bundle_path)
+        info = inspect_animation(source, asset_name, animation_kind)
+        if not info.get("editable"):
+            raise RuntimeError(info.get("reason") or "此动画暂不支持替换。")
+        self._check_sequence_overlap(bundle_name, info.get("frame_names", []), "dynamic", asset_name)
+        out = self._draft_dir() / bundle_name
+        source = out if out.exists() else source
+        if animation_kind == "sequence":
+            result = replace_bundle_sequence(source, asset_name, replacement_path, out, fps=float(fps))
+        elif animation_kind in ("gif", "webp", "apng"):
+            result = replace_bundle_animated_image(source, asset_name, replacement_path, out)
+        else:
+            raise RuntimeError("该资源需要游戏运行时，暂不支持动画替换。")
+        item = {
+            "kind": "dynamic", "bundle": bundle_name, "name": asset_name,
+            "animation_kind": animation_kind, "fps": float(fps),
+            "frame_names": info.get("frame_names", []),
+            "note": f"动画 ← {Path(replacement_path).name}",
+            "at": datetime.now().isoformat(timespec="seconds"),
+        }
+        self.draft_items = [old for old in self.draft_items if not (
+            old.get("bundle") == bundle_name and old.get("name") == asset_name and old.get("kind") == "dynamic"
+        )]
+        self.draft_items.append(item)
+        self._save_draft()
+        self.log(f"动画已加入作品集：{asset_name}；尚未安装到游戏。")
         return item
 
     def add_anim_to_draft(
@@ -1258,7 +1268,7 @@ class ModController:
 
         if raw_path:
             raw = Path(raw_path).read_bytes()
-            replaced = replace_bundle_animation_raw(src, anim_name, raw, out_bundle)
+            replaced = replace_bundle_animation_raw(src, anim_name, raw, out_bundle, reference_bundle=base)
             item = {
                 "kind": "anim",
                 "bundle": out_bundle.name,
@@ -1273,6 +1283,7 @@ class ModController:
                     f"动画「{anim_name}」同包没有可替换的预览贴图。可改用 .animbin 替换动画数据，"
                     "或到「贴图 → 角色动作帧」改序列帧。"
                 )
+            self._check_sequence_overlap(bundle_name, [tex], "texture", tex)
             replaced_tex = replace_bundle_texture(
                 src, image_path, out_bundle, target_name=tex, crop_box=crop_box, match_original_size=True
             )
@@ -1280,7 +1291,7 @@ class ModController:
                 "kind": "texture",
                 "bundle": out_bundle.name,
                 "name": replaced_tex,
-                "note": f"动画 {anim_name} 预览图 ← {Path(image_path).name}",
+                "note": f"动画 {anim_name} 关联图集 ← {Path(image_path).name}",
                 "from_anim": anim_name,
                 "at": datetime.now().isoformat(timespec="seconds"),
             }
@@ -1334,8 +1345,9 @@ class ModController:
             return
 
         if kind == "text":
-            original_text = read_text_asset(original_bundle, asset_name)
-            replace_bundle_text(draft_bundle, asset_name, original_text, draft_bundle)
+            from .modkit.maker import restore_bundle_text
+
+            restore_bundle_text(draft_bundle, original_bundle, asset_name)
             return
 
         if kind == "anim":
@@ -1351,7 +1363,13 @@ class ModController:
                     asset_name,
                     raw_path.read_bytes(),
                     draft_bundle,
+                    reference_bundle=original_bundle,
                 )
+            return
+
+        if kind == "dynamic":
+            from .modkit.animation import restore_bundle_animation
+            restore_bundle_animation(draft_bundle, original_bundle, asset_name, item.get("animation_kind", "sequence"))
             return
 
         raise RuntimeError(f"不支持安全移除的作品集类型：{kind}")
@@ -1385,19 +1403,10 @@ class ModController:
         else:
             (draft_dir / "mod_info.json").unlink(missing_ok=True)
 
-        if self.manager and self.manager.is_installed(self.draft_name):
-            if remaining:
-                self.install_draft()
-            else:
-                self.manager.uninstall_mod(self.draft_name)
         self.log(f"已从作品集移除：{item.get('name')}")
 
     def clear_draft(self) -> None:
         """清空作品集元数据 + _draft 目录 + draft 预览缓存，不留残留。"""
-        installed_draft = bool(self.manager and self.manager.is_installed(self.draft_name))
-        if installed_draft and self.manager:
-            self.manager.uninstall_mod(self.draft_name)
-            self.log("已同步卸载清空前安装的作品集。")
         pack = self._draft_dir()
         if pack.exists():
             for f in sorted(pack.rglob("*"), reverse=True):

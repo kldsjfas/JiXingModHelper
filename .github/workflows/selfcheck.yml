@@ -30,3 +30,19 @@ jobs:
 
       - name: Run safe selfcheck
         run: python selfcheck.py
+
+      - name: Check text editing and draft safety
+        run: python -m unittest discover -s tests -p 'test_*.py' -v
+
+      - name: Check animation import and playback
+        shell: pwsh
+        run: |
+          python selfcheck_animation.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python selfcheck_clip.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python selfcheck_clip_preview.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Check frontend syntax
+        run: node --check astral_party_auto/webui/app.js
