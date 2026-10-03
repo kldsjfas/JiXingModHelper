@@ -50,7 +50,7 @@
 
 窗口顶部提供「检查更新」与「GitHub」入口。启动后后台检查最新正式 Release，发现更新后可前往发布页下载；试用版领先正式版时不会提示降级。
 
-顶部「交流群」按钮可打开 [kk星の小窝](https://qm.qq.com/q/QC1pQPUpyM)。入群前可以先看 [入群小约定](https://kk-star-nest-rules.t567888888787.chatgpt.site/)。
+顶部「交流群」按钮可打开 [kk星の小窝](https://qm.qq.com/q/QC1pQPUpyM)。入群前可以先看 [入群小约定](https://kldsjfas.github.io/kk-star-nest-rules/)。
 
 ---
 
