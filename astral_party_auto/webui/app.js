@@ -9,6 +9,7 @@
     dashboard: "仪表盘",
     manage: "Mod 管理",
     browse: "浏览资源",
+    audio: "音频工作台",
     studio: "制作替换",
     pack: "我的作品集",
     logs: "运行日志",
@@ -142,6 +143,7 @@
 
   function showPage(page) {
     if (!PAGE_TITLES[page]) return;
+    if (state.page === "audio") window.AudioWorkbench?.leave();
     rememberTextEdit();
     state.studioRequest += 1;
     state.draftDetailRequest += 1;
@@ -157,6 +159,7 @@
     if (title) title.textContent = PAGE_TITLES[page];
     document.body.classList.remove("nav-open");
     if (page === "browse") { refreshBrowse(); renderPreview(); }
+    if (page === "audio") window.AudioWorkbench?.enter();
     if (page === "studio") refreshStudio();
     if (page === "pack") refreshPack();
     if (page === "manage") renderInstalled();
@@ -1340,6 +1343,17 @@ ${row.bundle}`;
   }
 
   function bindEvents() {
+    window.AudioWorkbench?.init({
+      call,
+      toast,
+      headers: API_HEADERS,
+      onInstall(data) {
+        if (data.dashboard) state.dashboard = data.dashboard;
+        if (data.installed) state.installed = data.installed;
+        renderDashboard();
+        renderInstalled();
+      },
+    });
     $$(".nav-button").forEach((btn) => btn.addEventListener("click", () => showPage(btn.dataset.page)));
     $$("[data-page-link]").forEach((btn) =>
       btn.addEventListener("click", () => showPage(btn.dataset.pageLink))
@@ -2059,6 +2073,7 @@ ${row.bundle}`;
   async function bootstrap() {
     setHeaderStatus("连接后端…");
     const boot = await call("bootstrap", { quiet: false });
+    window.ProjectUpdates?.init({ api, toast, appInfo: boot.app_info || {} });
     state.dashboard = boot.dashboard;
     state.installed = boot.installed || [];
     state.draft = boot.draft || state.draft;

@@ -10,6 +10,7 @@ from socketserver import ThreadingMixIn
 from wsgiref.simple_server import WSGIServer, make_server
 
 from . import web_app
+from . import __version__
 from .core.config import APP_ROOT, ASSETS_DIR, RESOURCE_ROOT
 from .mod_controller import DATA_DIR
 
@@ -59,6 +60,8 @@ def main() -> None:
     profile_dir.mkdir(parents=True, exist_ok=True)
     host_args = [
         str(_host_executable()),
+        "--version",
+        __version__,
         "--url",
         f"http://127.0.0.1:{port}/#token={api_token}",
         "--profile",

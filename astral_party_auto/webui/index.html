@@ -14,7 +14,7 @@
         <img class="brand-logo" src="app_icon.png" alt="">
         <div class="brand-copy">
           <strong>吉星派对</strong>
-          <span>Mod 助手 · 1.2.0</span>
+          <span>Mod 助手 · 1.3.0</span>
         </div>
       </div>
 
@@ -22,6 +22,7 @@
         <button class="nav-button is-active" data-page="dashboard"><span class="nav-icon">⌂</span><span>仪表盘</span></button>
         <button class="nav-button" data-page="manage"><span class="nav-icon">◇</span><span>Mod 管理</span></button>
         <button class="nav-button" data-page="browse"><span class="nav-icon">⌕</span><span>浏览资源</span></button>
+        <button class="nav-button" data-page="audio"><span class="nav-icon">♫</span><span>音频工作台</span><em id="nav-audio-count"></em></button>
         <button class="nav-button" data-page="studio"><span class="nav-icon">✦</span><span>制作替换</span></button>
         <button class="nav-button" data-page="pack"><span class="nav-icon">▣</span><span>我的作品集</span><em id="nav-pack-count"></em></button>
         <button class="nav-button" data-page="logs"><span class="nav-icon">≡</span><span>运行日志</span></button>
@@ -39,6 +40,19 @@
         <button id="mobile-nav-toggle" class="icon-button" aria-label="展开导航">☰</button>
         <h1 id="page-title">仪表盘</h1>
         <div id="header-status" class="status-pill"><i></i><span>正在连接后端…</span></div>
+        <div id="project-tools" class="project-tools">
+          <span id="app-version" class="app-version" title="当前助手版本">版本读取中</span>
+          <button id="check-updates" class="project-button" aria-expanded="false" aria-controls="update-panel" disabled><span aria-hidden="true">↻</span><span id="update-button-label">检查更新</span></button>
+          <button id="open-repository" class="project-button" title="在浏览器中打开项目 GitHub 仓库" disabled>GitHub ↗</button>
+          <button id="open-community" class="project-button" title="加入 QQ 群：kk星の小窝" disabled>交流群 ↗</button>
+          <section id="update-panel" class="update-panel is-hidden" aria-label="助手更新">
+            <div class="update-panel-heading"><strong>助手更新</strong><button id="close-update-panel" class="icon-button" aria-label="关闭更新详情">×</button></div>
+            <p id="update-message" role="status" aria-live="polite">启动后会自动检查新版本。</p>
+            <small id="update-versions"></small>
+            <div class="update-actions"><button id="retry-updates" class="button ghost">重新检查</button><button id="open-release" class="button purple">查看发布页 ↗</button></div>
+            <small class="update-note">仅检查版本；下载和安装由你决定。</small>
+          </section>
+        </div>
       </header>
 
       <main id="main-content" class="main-content">
@@ -57,6 +71,7 @@
               <button class="button primary" data-action="launch-game">启动游戏</button>
               <button class="button purple" data-page-link="manage">去装 Mod</button>
               <button class="button ghost" data-page-link="browse">浏览资源</button>
+              <button class="button ghost" data-page-link="audio">试听与替换音频</button>
               <button class="button ghost" data-page-link="pack">我的作品集</button>
               <button class="button ghost" data-action="refresh-detection">刷新检测</button>
               <button class="button ghost" data-action="open-assets">打开资源目录</button>
@@ -251,6 +266,66 @@
           </div>
         </section>
 
+        <section id="page-audio" class="page">
+          <article class="card audio-intro">
+            <div><h2>音频工作台</h2><p>先试听游戏音频，再对照替换。保存到音频作品集后，可导出或手动安装。</p></div>
+            <button id="audio-refresh" class="button ghost compact">刷新音频目录</button>
+          </article>
+          <p id="audio-status" class="audio-status" role="status" aria-live="polite">正在读取音频目录…</p>
+          <div class="audio-layout">
+            <section class="panel audio-library" aria-label="游戏音频列表">
+              <form id="audio-search-form" class="audio-search-row">
+                <input id="audio-search" type="search" placeholder="搜索名称 / 音频 ID…" aria-label="搜索音频">
+                <button class="button ghost compact" type="submit">搜索</button>
+              </form>
+              <select id="audio-category" aria-label="音频分类"><option value="all">全部音频</option></select>
+              <div class="list-meta"><span id="audio-result-count">—</span><span id="audio-page-label"></span></div>
+              <div id="audio-list" class="audio-list"><div class="notice">正在读取…</div></div>
+              <div class="pager">
+                <button id="audio-prev" class="button ghost compact" disabled>上一页</button>
+                <button id="audio-next" class="button ghost compact" disabled>下一页</button>
+              </div>
+            </section>
+            <section class="panel audio-detail" aria-label="音频对照试听">
+              <div class="audio-detail-heading"><span class="eyebrow">对照试听</span><h2 id="audio-title">选择一条音频</h2><p id="audio-description">点击左侧列表加载试听，播放一侧时会暂停另一侧。</p></div>
+              <div class="audio-compare">
+                <article class="audio-player-card">
+                  <div class="audio-player-heading"><h3>游戏原音</h3><span class="audio-source-badge">原始内容</span></div>
+                  <p id="audio-original-name" class="audio-file-name">尚未选择</p>
+                  <audio id="audio-original-player" controls preload="metadata" aria-label="游戏原音播放器"></audio>
+                  <p id="audio-original-info" class="audio-meta"></p>
+                  <p id="audio-original-status" class="audio-player-status" role="status">选好音频后可试听</p>
+                  <div class="action-row"><button id="audio-original-retry" class="button ghost compact is-hidden">重新加载</button><button id="audio-export-original" class="button ghost compact" disabled>导出 WAV</button><button id="audio-export-wem" class="button ghost compact" disabled>导出原始 WEM</button></div>
+                </article>
+                <article class="audio-player-card">
+                  <div class="audio-player-heading"><h3 id="audio-replacement-heading">你的替换</h3><span id="audio-replacement-badge" class="audio-source-badge">尚未选择</span></div>
+                  <p id="audio-replacement-name" class="audio-file-name">选择文件后，在这里试听</p>
+                  <audio id="audio-replacement-player" controls preload="metadata" aria-label="替换音频播放器"></audio>
+                  <p id="audio-replacement-info" class="audio-meta"></p>
+                  <p id="audio-replacement-status" class="audio-player-status" role="status">先选择兼容的 WEM 文件</p>
+                  <div class="action-row"><button id="audio-replacement-retry" class="button ghost compact is-hidden">重新加载</button><button id="audio-export-draft" class="button ghost compact" disabled>导出草稿 WAV</button></div>
+                </article>
+              </div>
+              <p id="audio-edit-hint" class="audio-edit-hint">当前支持兼容 WEM 替换，可先导出另一条游戏原音尝试互换；WAV / MP3 暂不能直接写回。</p>
+              <div class="action-row audio-edit-actions">
+                <button id="audio-choose" class="button purple" disabled>选择替换 WEM…</button>
+                <button id="audio-save" class="button primary" disabled>保存到音频作品集</button>
+                <button id="audio-discard" class="button ghost is-hidden">取消本次选择</button>
+              </div>
+            </section>
+          </div>
+          <article class="card audio-draft">
+            <div class="section-heading"><div><h2>音频作品集 <span id="audio-draft-count" class="count-badge">0 项</span></h2><p>保存、移除和试听只修改作品集。安装后可在「Mod 管理」禁用、卸载，也可一键全还原。</p></div></div>
+            <div id="audio-draft-list" class="audio-draft-list"><p class="notice">还没有保存的音频替换。</p></div>
+            <div class="action-row"><button id="audio-export-pack" class="button primary" disabled>导出音频 ZIP</button><button id="audio-install" class="button purple" disabled>安装音频到游戏</button><button id="audio-clear" class="button ghost" disabled>清空音频作品集</button></div>
+            <div id="audio-clear-confirm" class="notice is-hidden" role="group" aria-label="确认清空音频作品集">
+              <p>清空所有已保存的音频草稿？已安装的 Mod 仍保留，可前往「Mod 管理」卸载。</p>
+              <div class="action-row"><button id="audio-clear-accept" class="button danger compact">确认清空草稿</button><button id="audio-clear-cancel" class="button ghost compact">取消</button></div>
+            </div>
+            <p id="audio-operation-status" class="audio-status" role="status" aria-live="polite"></p>
+          </article>
+        </section>
+
         <section id="page-logs" class="page">
           <article class="card log-card">
             <div class="section-heading"><div><h2>运行日志</h2><p>资源扫描、替换和安装记录都会显示在这里。</p></div><button id="clear-logs" class="button ghost compact">清空日志</button></div>
@@ -298,6 +373,8 @@
       </div>
     </div>
   </div>
+  <script src="audio.js" defer></script>
+  <script src="updates.js" defer></script>
   <script src="app.js" defer></script>
 </body>
 </html>

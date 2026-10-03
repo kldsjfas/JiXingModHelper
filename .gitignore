@@ -43,6 +43,8 @@ _fix_shortcut.*
 .env
 *.local
 qa-evidence/
+.playwright-cli/
+output/playwright/
 
 # PyInstaller leftovers
 *.spec.bak

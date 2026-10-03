@@ -45,4 +45,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Check frontend syntax
-        run: node --check astral_party_auto/webui/app.js
+        shell: pwsh
+        run: |
+          Get-ChildItem astral_party_auto/webui -Filter *.js | ForEach-Object {
+            node --check $_.FullName
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }

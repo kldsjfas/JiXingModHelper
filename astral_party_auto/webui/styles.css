@@ -234,6 +234,30 @@ textarea:focus-visible {
   color: var(--danger);
 }
 
+.project-tools { position: relative; display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+.app-version { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 11px; }
+.project-button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 34px; padding: 0 10px; border: 1px solid var(--line); border-radius: 9px; color: var(--muted); background: var(--panel); font-size: 12px; white-space: nowrap; cursor: pointer; }
+.project-button:hover { color: var(--text); border-color: var(--purple); }
+.project-button:disabled { opacity: .55; cursor: default; }
+.project-button.has-update { color: var(--good); border-color: var(--good); }
+.project-button.has-error { color: var(--gold); }
+.project-button.is-checking > span:first-child { animation: update-spin 1.2s linear infinite; }
+@keyframes update-spin { to { transform: rotate(360deg); } }
+.update-panel { position: absolute; z-index: 50; top: calc(100% + 12px); right: 0; width: 340px; max-width: calc(100vw - 36px); padding: 16px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); box-shadow: 0 12px 34px #0007; }
+.update-panel-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.update-panel-heading strong { font-size: 15px; }
+.update-panel-heading .icon-button { display: inline-grid; width: 28px; height: 28px; min-height: 28px; margin: -4px; place-items: center; font-size: 20px; }
+.update-panel p { margin: 10px 0; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+.update-panel small { display: block; color: var(--muted); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
+.update-actions { display: flex; gap: 8px; margin: 14px 0 10px; }
+.update-actions .button { min-height: 34px; padding: 5px 11px; font-size: 12px; }
+
+@media (max-width: 1050px) {
+  .topbar { flex-wrap: wrap; flex-basis: auto; min-height: 92px; padding-bottom: 10px; row-gap: 8px; }
+  .project-tools { width: 100%; justify-content: flex-end; }
+}
+@media (prefers-reduced-motion: reduce) { .project-button.is-checking > span:first-child { animation: none; } }
+
 .main-content {
   flex: 1 1 auto;
   min-width: 0;
@@ -1195,6 +1219,62 @@ body.nav-open .sidebar {
 }
 
 .is-hidden { display: none !important; }
+
+/* 音频列表和对照播放器保持在同一工作区，长资源名不会挤压控制按钮。 */
+.audio-intro { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.audio-intro h2 { margin-bottom: 6px; }
+.audio-intro p, .audio-draft p { color: var(--muted); line-height: 1.65; }
+.audio-intro > button { flex-shrink: 0; }
+.audio-status { color: var(--muted); font-size: 12px; line-height: 1.65; overflow-wrap: anywhere; }
+.audio-status:empty { display: none; }
+.audio-status.is-error, .audio-player-status.is-error { color: #ffb0b7; }
+.audio-layout { display: grid; grid-template-columns: minmax(250px, 0.75fr) minmax(360px, 1.4fr); align-items: start; gap: 12px; }
+.audio-library, .audio-detail { min-width: 0; }
+.audio-search-row { display: flex; gap: 7px; margin-bottom: 10px; }
+.audio-search-row input { min-width: 0; }
+.audio-search-row button { flex-shrink: 0; }
+.audio-list { display: grid; align-content: start; gap: 4px; height: 470px; overflow-y: auto; padding-right: 3px; scrollbar-width: thin; }
+.audio-resource { display: grid; gap: 5px; width: 100%; min-width: 0; padding: 11px 10px; border-radius: 9px; color: var(--text); background: var(--panel-soft); text-align: left; cursor: pointer; }
+.audio-resource strong { font-size: 12px; font-weight: 600; overflow-wrap: anywhere; line-height: 1.45; }
+.audio-resource small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; color: var(--muted); }
+.audio-resource:hover { background: #3a2e50; }
+.audio-resource.is-active { background: #68304e; box-shadow: inset 3px 0 var(--accent); }
+.audio-resource.is-active small { color: #ffd5e5; }
+.audio-detail-heading h2 { margin: 5px 0; font-size: 16px; line-height: 1.5; overflow-wrap: anywhere; }
+.audio-detail-heading p { margin: 0 0 15px; color: var(--muted); font-size: 11px; line-height: 1.65; overflow-wrap: anywhere; }
+.audio-compare { display: grid; gap: 12px; }
+.audio-player-card { min-width: 0; padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: #1b1626; }
+.audio-player-heading { display: flex; justify-content: space-between; flex-wrap: wrap; align-items: center; gap: 6px; }
+.audio-player-heading h3 { margin: 0; font-size: 13px; }
+.audio-source-badge { color: var(--muted); font-size: 10px; padding: 4px 7px; border-radius: 6px; background: var(--panel-soft); }
+.audio-file-name { min-height: 16px; margin: 10px 0; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.audio-player-card audio { display: block; width: 100%; height: 42px; color-scheme: dark; }
+.audio-meta { min-height: 16px; margin: 9px 0 5px; color: #e1cbe9; font-size: 11px; }
+.audio-player-status { margin: 5px 0 10px; color: var(--muted); font-size: 11px; line-height: 1.65; overflow-wrap: anywhere; }
+.audio-edit-hint { margin: 13px 0; color: var(--muted); font-size: 11px; line-height: 1.75; }
+.audio-edit-actions .button { padding-inline: 13px; }
+.audio-draft { margin-top: 14px; }
+.audio-draft h2 .count-badge { margin-left: 7px; }
+.audio-draft-list { display: grid; gap: 7px; max-height: 330px; overflow-y: auto; margin-bottom: 14px; }
+.audio-draft-item { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 9px; padding: 9px 10px; border: 1px solid var(--line); border-radius: 9px; }
+.audio-draft-item > span { font-size: 12px; overflow-wrap: anywhere; }
+@media (min-width: 1600px) {
+  .audio-layout { grid-template-columns: minmax(290px, 0.7fr) minmax(600px, 1.5fr); }
+  .audio-compare { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 1000px) {
+  .audio-layout { grid-template-columns: minmax(230px, 0.8fr) minmax(300px, 1fr); }
+  .audio-player-card { padding: 10px; }
+}
+@media (max-width: 740px) {
+  .audio-layout { grid-template-columns: 1fr; }
+  .audio-list { height: 280px; }
+  .audio-intro { align-items: flex-start; flex-direction: column; }
+}
+@media (max-width: 440px) {
+  .audio-draft-item { grid-template-columns: minmax(0, 1fr) auto; }
+  .audio-draft-item > span { grid-column: 1 / -1; }
+}
 
 @media (max-width: 1040px) {
   :root { --sidebar-width: 202px; }
