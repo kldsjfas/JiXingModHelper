@@ -41,8 +41,27 @@ $arch = Join-Path $out "_internal\archspec\json\cpu\microarchitectures.json"
 if (-not (Test-Path $exe)) { throw "missing exe" }
 if (-not (Test-Path $tpk)) { throw "missing UnityPy resources\lzma.tpk - package broken" }
 if (-not (Test-Path $web)) { throw "missing webui" }
+foreach ($name in @('app.js', 'audio.js', 'updates.js', 'styles.css')) {
+  if (-not (Test-Path -LiteralPath (Join-Path $out ('_internal\astral_party_auto\webui\' + $name)))) {
+    throw "missing webui resource: $name"
+  }
+}
 if (-not (Test-Path $nativeHost)) { throw "missing native web host" }
 if (-not (Test-Path $arch)) { throw "missing archspec json - texture preview will break" }
+
+# Ship setup materials only; local vgmstream binaries and download caches are excluded.
+$audioSource = Join-Path $PSScriptRoot 'tools\audio'
+$audioDestination = Join-Path $out 'tools\audio'
+New-Item -ItemType Directory -Path $audioDestination -Force | Out-Null
+foreach ($name in @('fetch_vgmstream.ps1', 'source.json', 'README.md', 'licenses')) {
+  Copy-Item -LiteralPath (Join-Path $audioSource $name) -Destination $audioDestination -Recurse
+}
+Copy-Item -LiteralPath (Join-Path $audioSource '获取音频解码组件.cmd') -Destination $out
+$unexpectedAudioFiles = Get-ChildItem -LiteralPath $audioDestination -File -Recurse |
+  Where-Object { $_.Extension -in '.exe', '.dll', '.zip' }
+if ($unexpectedAudioFiles -or (Test-Path -LiteralPath (Join-Path $out '_internal\tools\audio\vgmstream'))) {
+  throw 'Audio runtime binaries must not be included in the release package.'
+}
 
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'PREVIEW_GUIDE.md') -Destination (Join-Path $out '使用说明.md')
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'LICENSE') -Destination (Join-Path $out 'LICENSE')

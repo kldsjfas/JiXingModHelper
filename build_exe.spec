@@ -21,6 +21,8 @@ datas = [
     (str(ROOT / "native_host" / "publish"), "native_host"),
 ]
 binaries = []
+# Optional audio decoders are installed directly from upstream by the user.
+# The packaging scripts copy only our setup script, manifest and notices.
 hiddenimports = [
     "astral_party_auto",
     "astral_party_auto.app",

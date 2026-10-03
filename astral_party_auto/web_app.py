@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .core.config import APP_ROOT, RESOURCE_ROOT
+from . import __version__
+from .core.updates import REPOSITORY_URL, RELEASES_URL, UpdateChecker
 from .mod_controller import DATA_DIR, MADE_DIR, ModController
 from .modkit.categories import ASSET_TYPES, annotate_texture_name_duplicates
 
@@ -97,6 +99,90 @@ class DesktopApi:
         self._mod_preview_files: dict[str, Path] = {}
         self._mod_preview_title: str = ""
         self.controller = ModController(self._append_log)
+        self._audio_workspace = None
+        self._update_checker = UpdateChecker(__version__)
+
+    @exposed
+    def check_for_updates(self, force: bool = False) -> dict:
+        return self._update_checker.start(bool(force))
+
+    @exposed
+    def get_update_status(self) -> dict:
+        return self._update_checker.snapshot()
+
+    @exposed
+    def open_project_link(self, kind: str = "repository") -> bool:
+        if kind == "repository":
+            url = REPOSITORY_URL
+        elif kind == "release":
+            url = self._update_checker.snapshot().get("release_url") or RELEASES_URL
+        elif kind == "community":
+            url = "https://qm.qq.com/q/QC1pQPUpyM"
+        else:
+            raise ValueError("未知的项目链接。")
+        os.startfile(url)
+        return True
+
+    def _audio(self):
+        if self._audio_workspace is None:
+            from .modkit.audio_workspace import AudioWorkspace
+            self._audio_workspace = AudioWorkspace(self.controller, DATA_DIR, MADE_DIR)
+        return self._audio_workspace
+
+    @exposed
+    def audio_catalog(self, query="", category="all", offset=0, limit=40, refresh=False) -> dict:
+        return self._audio().catalog(query, category, offset, limit, refresh)
+
+    @exposed
+    def audio_preview(self, audio_id: str, source="original") -> dict:
+        return self._audio().preview(audio_id, source)
+
+    @exposed
+    def audio_draft_state(self) -> dict:
+        return self._audio().draft_state()
+
+    @exposed
+    def audio_choose_replacement(self, audio_id: str) -> dict | None:
+        # 显式绑定媒体编号，选文件期间切换条目也不会把音频写到另一项。
+        self._audio().row(audio_id)
+        candidate = self._pick_path("open", file_types=("Wwise 音频 (*.wem)", "所有文件 (*.*)"))
+        if candidate is None:
+            return None
+        return self._audio().prepare(audio_id, candidate)
+
+    @exposed
+    def audio_commit(self, audio_id: str, ticket: str) -> dict:
+        return self._audio().commit(audio_id, ticket)
+
+    @exposed
+    def audio_remove(self, audio_id: str) -> dict:
+        return self._audio().remove(audio_id)
+
+    @exposed
+    def audio_clear_draft(self) -> dict:
+        return self._audio().clear_draft()
+
+    @exposed
+    def audio_export_preview(self, audio_id: str, source="original", format="wav") -> dict | None:
+        if format not in ("wav", "wem"):
+            raise ValueError("只支持 WAV 和 WEM。")
+        row = self._audio().row(audio_id)
+        import re
+        name = re.sub(r'[<>:"/\\|?*]', "_", row["name"])
+        output = self._pick_path("save", save_filename=f"{name}.{format}", file_types=(f"音频 (*.{format})",))
+        if output is None:
+            return None
+        self._audio().export_audio(audio_id, source, format, output)
+        return {"path": str(output)}
+
+    @exposed
+    def audio_export_pack(self) -> dict:
+        return {"path": str(self._audio().export_pack())}
+
+    @exposed
+    def audio_install(self) -> dict:
+        self._audio().install()
+        return {"dashboard": self._dashboard_state(), "installed": self.controller.installed_mods()}
 
     def set_tk_root(self, root) -> None:
         self._tk_root = root
@@ -249,6 +335,7 @@ class DesktopApi:
             self._append_log("未检测到游戏。可点「刷新检测」，或确认已安装 Steam 或 TapTap 版吉星派对。")
         return {
             "dashboard": dash,
+            "app_info": {"version": __version__, "repository_url": REPOSITORY_URL},
             "installed": self.controller.installed_mods(),
             "draft": self._draft_state(),
             "logs": list(self._logs),
@@ -1023,7 +1110,7 @@ def _build_server(api: "DesktopApi", api_token: str):
         bottle.response.set_header(
             "Content-Security-Policy",
             "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
-            "script-src 'self'; connect-src 'self'; object-src 'none'; "
+            "script-src 'self'; connect-src 'self'; media-src 'self' blob:; object-src 'none'; "
             "base-uri 'none'; frame-ancestors 'none'",
         )
 
@@ -1046,6 +1133,16 @@ def _build_server(api: "DesktopApi", api_token: str):
     @app.get("/")
     def _index():
         return bottle.static_file("index.html", root=web_root)
+
+    @app.get("/audio-media/<handle>")
+    def _audio_media(handle):
+        if not _request_is_authorized():
+            return _json_error(403, "请求未授权。")
+        workspace = api._audio_workspace
+        path = workspace.media_path(handle) if workspace else None
+        if path is None or not path.is_file():
+            return _json_error(404, "音频试听已失效，请重新选择资源。")
+        return bottle.static_file(path.name, root=str(path.parent), mimetype="audio/wav")
 
     @app.get("/poll")
     def _poll():

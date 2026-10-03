@@ -5,14 +5,18 @@ namespace JiXingModHelperHost;
 
 internal static class Program
 {
-    internal const string WindowTitle = "吉星派对 Mod 助手 · 1.2.0";
+    internal static string WindowTitle { get; private set; } = "吉星派对 Mod 助手";
 
     [STAThread]
     private static void Main(string[] args)
     {
         ApplicationConfiguration.Initialize();
+        var version = ReadArgument(args, "--version");
+        if (string.IsNullOrWhiteSpace(version)) version = "dev";
+        WindowTitle = $"吉星派对 Mod 助手 · {version}";
+        var instanceVersion = new string(version.Where(character => char.IsLetterOrDigit(character) || character is '.' or '-').ToArray());
         // 不同版本可以并排运行，重复启动当前版本时激活已有窗口。
-        using var instanceMutex = new Mutex(true, @"Local\JiXingModHelper.v1.2.0.SingleInstance", out var isFirstInstance);
+        using var instanceMutex = new Mutex(true, $@"Local\JiXingModHelper.{instanceVersion}.SingleInstance", out var isFirstInstance);
         if (!isFirstInstance)
         {
             ActivateExistingWindow();
