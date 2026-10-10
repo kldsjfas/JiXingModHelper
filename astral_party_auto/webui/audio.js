@@ -406,11 +406,13 @@
       const result = await bridge.call("audio_clear_draft", { busy: true, busyText: "清空音频草稿…" });
       state.draftRevision += 1;
       state.draft = result.items || [];
+      // 后端清空草稿也会收回候选票据，界面不能继续试听并保存旧票据。
+      state.candidate = null;
       $("audio-clear-confirm").classList.add("is-hidden");
       renderDraft();
       renderList();
       updateReplacementLabel();
-      if (!state.candidate) resetPlayer("replacement", "音频作品集已清空，可以重新选择替换文件。");
+      resetPlayer("replacement", "音频作品集已清空，可以重新选择替换文件。");
       message("audio-operation-status", "音频草稿已清空；已安装的 Mod 仍保留，可在“Mod 管理”里卸载。");
     }));
     $("audio-export-pack").addEventListener("click", () => operation("正在打包音频作品集…", async () => {

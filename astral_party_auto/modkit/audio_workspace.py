@@ -42,6 +42,27 @@ def _write_json(path: Path, value) -> None:
     os.replace(temporary, path)
 
 
+def _wave_info(path: Path) -> dict:
+    try:
+        with wave.open(str(path), "rb") as stream:
+            frames = stream.getnframes()
+            sample_rate = stream.getframerate()
+            if sample_rate <= 0:
+                raise RuntimeError("试听音频采样率无效，请重新解码。")
+            if frames == 0:
+                raise RuntimeError("音频没有可播放的采样。")
+            # A readable header can still advertise samples missing from a
+            # truncated file. Check the final frame without loading a long BGM.
+            frame_size = stream.getnchannels() * stream.getsampwidth()
+            stream.setpos(frames - 1)
+            if len(stream.readframes(1)) != frame_size:
+                raise RuntimeError("试听音频数据不完整，请重新解码。")
+            return {"duration": frames / sample_rate,
+                    "sample_rate": sample_rate, "channels": stream.getnchannels()}
+    except (wave.Error, EOFError) as exc:
+        raise RuntimeError("试听音频格式不完整或无效，请重新解码。") from exc
+
+
 def _category(bank: dict) -> str:
     label = str(bank.get("name", "")).lower()
     language = str(bank.get("language", "")).lower()
@@ -264,9 +285,14 @@ class AudioWorkspace:
         key = hashlib.sha256(raw).hexdigest()
         output = self.cache_dir / f"{key}.wav"
         if output.exists():
-            output.touch()
-            self._prune_cache(output)
-            return output
+            try:
+                _wave_info(output)
+            except (RuntimeError, OSError):
+                output.unlink(missing_ok=True)
+            else:
+                output.touch()
+                self._prune_cache(output)
+                return output
         if len(raw) > 96 * 1024 * 1024:
             raise RuntimeError("单段音频超过 96 MB，暂不生成试听。")
         source = self.cache_dir / f"{key}.wem"
@@ -277,9 +303,7 @@ class AudioWorkspace:
                                     capture_output=True, timeout=60, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             if result.returncode != 0 or not temporary.exists():
                 raise RuntimeError("此音频无法解码试听（可能是仅包含开头的流式片段）。")
-            with wave.open(str(temporary), "rb") as stream:
-                if stream.getnframes() == 0:
-                    raise RuntimeError("音频没有可播放的采样。")
+            _wave_info(temporary)
             if temporary.stat().st_size > self.CACHE_LIMIT:
                 raise RuntimeError("解码后的音频超过 512 MB，暂不生成试听。")
             os.replace(temporary, output)
@@ -317,14 +341,13 @@ class AudioWorkspace:
                 self._media = {handle: stored for handle, stored in self._media.items() if stored != path}
 
     def media_info(self, path: Path, name: str) -> dict:
+        info = _wave_info(path)
         handle = secrets.token_urlsafe(24)
         with self._lock:
             self._media[handle] = path
             while len(self._media) > 128:
                 self._media.pop(next(iter(self._media)))
-        with wave.open(str(path), "rb") as stream:
-            return {"url": f"/audio-media/{handle}", "name": name, "duration": stream.getnframes() / stream.getframerate(),
-                    "sample_rate": stream.getframerate(), "channels": stream.getnchannels()}
+        return {"url": f"/audio-media/{handle}", "name": name, **info}
 
     def media_path(self, handle: str) -> Path | None:
         with self._lock:

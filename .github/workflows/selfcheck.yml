@@ -31,7 +31,7 @@ jobs:
       - name: Run safe selfcheck
         run: python selfcheck.py
 
-      - name: Check text editing and draft safety
+      - name: Check Mod, audio and draft safety
         run: python -m unittest discover -s tests -p 'test_*.py' -v
 
       - name: Check animation import and playback
@@ -43,6 +43,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python selfcheck_clip_preview.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python selfcheck_clip_atlas.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Check frontend syntax
         shell: pwsh
@@ -51,3 +53,11 @@ jobs:
             node --check $_.FullName
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
+
+      - name: Check frontend state regressions
+        shell: pwsh
+        run: |
+          node tests/test_animation_import_ui.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tests/test_frontend_regressions.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

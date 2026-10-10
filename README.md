@@ -48,6 +48,8 @@
 
 **1.3.0 新增音频工作台、检查更新和交流群入口。** 音频替换支持已验证的完整内嵌 Wwise Vorbis WEM；普通 WAV/MP3 需要先用 Wwise 转码。下载版第一次试听前，双击程序旁的 `获取音频解码组件.cmd`，从上游官方来源获取并校验组件；源码用户运行 `tools/audio/fetch_vgmstream.ps1`。发布包不捆绑第三方解码器，组件说明见 [tools/audio/README.md](tools/audio/README.md)。
 
+**1.3.1 修复动画图集导入、作品集编辑和安装还原中的问题。** 完整图集须保持原尺寸与原碎片布局，不能用角色单帧或帧目录代替，也不提供图集裁剪；导入失败会清空旧候选。安装异常会回退本次改动，贴图写入失败保留原草稿，音频坏缓存自动重建。
+
 窗口顶部提供「检查更新」与「GitHub」入口。启动后后台检查最新正式 Release，发现更新后可前往发布页下载；试用版领先正式版时不会提示降级。
 
 顶部「交流群」按钮可打开 [kk星の小窝](https://qm.qq.com/q/QC1pQPUpyM)。入群前可以先看 [入群小约定](https://kldsjfas.github.io/kk-star-nest-rules/)。
@@ -74,9 +76,11 @@
 
 **要什么**：Windows 10/11、装了 Steam 或 TapTap 版《吉星派对》。不用装 Python。
 
-**怎么用**：去 [Releases](https://github.com/kldsjfas/JiXingModHelper/releases) 下载 **v1.2.0** 压缩包，解压，双击 `JiXingModHelper.exe`。旧版 v1.1.0 不包含这次的文字编辑和动画预览改进。
+**怎么用**：去 [Releases](https://github.com/kldsjfas/JiXingModHelper/releases) 下载 **v1.3.1** 的 `JiXingModHelper.zip`，完整解压到新目录，双击 `JiXingModHelper.exe`。保留 `_internal` 和 `tools` 文件夹。
 
 > 备份、索引、作品集都写在 exe 同目录（`modkit_data`、`made_mods`），所以**整个文件夹一起拷**，别只拷一个 exe 出来。
+
+升级时保留旧版整个目录、`modkit_data`、`made_mods` 和备份，不要覆盖或删除。旧版已经安装 Mod 的话，先用旧版禁用或还原，再由新版安装。第一次试听音频前需运行 `获取音频解码组件.cmd`。
 
 打开之后：
 
@@ -113,13 +117,13 @@
 ![制作替换](docs/screenshots/05_studio.png)
 ![作品集](docs/screenshots/04_pack.png)
 
-### 文字与动画（1.2.0）
+### 文字与动画
 
 - **文字**：类型选「文本」，可搜索 `Common_fui`、`Fight_fui` 或 `SettingList_fui`。进入「制作替换」后编辑右侧文字，保存到作品集再检查。
 - **角色动作预览**：类型选「动画」，搜索 `Cry`、`Hit` 或 `Walk-back`，选中支持的片段就会播放。当前验证的资源中，`Cry` / `Hit` 为 30 帧、1 秒，`Walk-back` 为 24 帧、0.8 秒；资源名和内容可能随游戏版本变化。
 - **序列帧替换**：类型选「动态图像」→「序列帧动画组」，例如 `lianxutu_blj`。导入动画图片或 PNG 帧目录后，右侧预览会展示按目标帧数和尺寸适配的效果。
 
-保存到作品集只保存草稿；确认后再主动安装到游戏。AnimationClip 导入要求同源 `.animbin`，选图片则只替换关联图集。完整骨骼动画、多轨与位置/旋转/缩放动画、粒子和依赖场景的效果暂不支持完整预览，无法解析的资源会说明原因。工具不是 Unity 编辑器，不能把任意 GIF 直接变成角色骨骼动作。
+保存到作品集只保存草稿；确认后再主动安装到游戏。AnimationClip 导入要求同源 `.animbin`，选图片则只替换关联的完整静态图集，须匹配原尺寸并保留原碎片布局。图集不能裁剪，也不能用单帧、帧目录或多帧动画代替。完整骨骼动画、多轨与位置/旋转/缩放动画、粒子和依赖场景的效果暂不支持完整预览，无法解析的资源会说明原因。工具不是 Unity 编辑器，不能把任意 GIF 直接变成角色骨骼动作。
 
 ---
 
@@ -158,21 +162,24 @@ powershell -ExecutionPolicy Bypass -File .\build_exe.ps1
 
 打包产物在 `dist\JiXingModHelper\`，双击 exe 启动。
 
-已有同名输出目录时，构建会停止并保留旧包。再次打包可指定新目录，例如 `powershell -ExecutionPolicy Bypass -File .\build_exe.ps1 -Destination .\dist\v1.2.0`，产物会放在该目录下的 `JiXingModHelper\` 中。
+已有同名输出目录时，构建会停止并保留旧包。再次打包可指定新目录，例如 `powershell -ExecutionPolicy Bypass -File .\build_exe.ps1 -Destination .\dist\v1.3.1`，产物会放在该目录下的 `JiXingModHelper\` 中。
 
 ### 提交改动前自检
 
-装好依赖后，在仓库根目录运行：
+装好依赖后，在仓库根目录运行；前端回归脚本还需要 Node.js（CI 已预装）：
 
 ```powershell
 python selfcheck.py
 python selfcheck_animation.py
 python selfcheck_clip.py
 python selfcheck_clip_preview.py
+python selfcheck_clip_atlas.py
 python -m unittest discover -s tests -p "test_*.py"
+node tests/test_animation_import_ui.js
+node tests/test_frontend_regressions.js
 ```
 
-默认自检使用临时目录和模拟资源，检查迁移匹配、热更新缓存、Mod 启停与还原、作品集、文字和动画读写，不需要安装游戏，也不会修改真实游戏文件。`selfcheck.py` 出现 `ALL CHECKS PASSED`，其余测试显示通过，表示这些检查通过。使用自己的真实资源副本验证时，参见[功能试用指南](PREVIEW_GUIDE.md)。
+默认自检使用临时目录和模拟资源，检查迁移匹配、热更新缓存、Mod 启停与还原、作品集、文字与动画读写、完整图集导入和前端状态，不需要安装游戏，也不会修改真实游戏文件。`selfcheck.py` 出现 `ALL CHECKS PASSED`，其余测试显示通过，表示这些检查通过。使用自己的真实资源副本验证时，参见[功能试用指南](PREVIEW_GUIDE.md)。
 
 每个 PR 都会运行这套自检；主分支和版本标签的构建也会先检查，通过后再打包。
 
