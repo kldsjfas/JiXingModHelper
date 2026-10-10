@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import gc
 import json
+import os
 import shutil
+import tempfile
 import zipfile
 from datetime import datetime
 from pathlib import Path
@@ -18,6 +20,19 @@ def _load_bundle(bundle_path: str | Path):
     # Windows; retain the parent directory for external resource resolution.
     path = Path(bundle_path)
     return UnityPy.load(path.read_bytes(), path=str(path.parent))
+
+
+def _write_bundle_atomic(out: Path, payload: bytes) -> None:
+    """完整写入临时包后再替换，写入失败时保留已有作品。"""
+    out.parent.mkdir(parents=True, exist_ok=True)
+    handle, temporary_name = tempfile.mkstemp(prefix=f".{out.name}-", suffix=".tmp", dir=out.parent)
+    os.close(handle)
+    temporary = Path(temporary_name)
+    try:
+        temporary.write_bytes(payload)
+        os.replace(temporary, out)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def replace_bundle_texture(
@@ -64,8 +79,7 @@ def replace_bundle_texture(
             raise RuntimeError("这个资源包里没有可替换的贴图。")
 
         out = Path(out_bundle)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_bytes(env.file.save())
+        _write_bundle_atomic(out, env.file.save())
         return replaced
     finally:
         obj = data = image = new_image = None
@@ -134,8 +148,7 @@ def replace_bundle_texture_from_bundle(
     target_data.save()
 
     out = Path(out_bundle)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_bytes(env.file.save())
+    _write_bundle_atomic(out, env.file.save())
     return target_name
 
 

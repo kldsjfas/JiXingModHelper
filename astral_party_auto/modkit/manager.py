@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import json
 import shutil
+import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -50,7 +52,8 @@ class ModManager:
         mod_dir = Path(mod_dir)
         files_map: dict[str, Path] = {}
         for path in sorted(mod_dir.rglob("*.bundle")):
-            files_map.setdefault(path.name, path)
+            if path.is_file():
+                files_map.setdefault(path.name, path)
         matched = [name for name in files_map if self.bundle_path(name) is not None]
         unmatched = [name for name in files_map if self.bundle_path(name) is None]
         return ModAnalysis(
@@ -70,21 +73,41 @@ class ModManager:
     def _store_dir(self, mod_name: str) -> Path:
         return self.data_dir / "mod_store" / self._safe_mod_name(mod_name)
 
+    def _ensure_original_backup(self, file_name: str, target: Path, state: dict) -> None:
+        backup = self.backup_dir / file_name
+        if backup.exists():
+            try:
+                with backup.open("rb") as bundle_file:
+                    bundle_file.read(1)
+            except OSError as exc:
+                raise RuntimeError(f"原始备份无法读取：{file_name}，请先检查备份。") from exc
+            return
+        if any(file_name in mod.get("files", []) for mod in state.get("mods", {}).values()):
+            raise RuntimeError(
+                f"原始备份缺失：{file_name}，不能把已经替换过的游戏文件当成原版备份。"
+                "请先恢复备份或重新校验游戏。"
+            )
+        # 复制失败不能留下半个正式备份，否则下次安装会把它当成可靠的原文件。
+        with tempfile.NamedTemporaryFile(prefix="backup-", dir=self.backup_dir, delete=False) as temporary:
+            pending = Path(temporary.name)
+        try:
+            shutil.copy2(target, pending)
+            pending.replace(backup)
+        finally:
+            pending.unlink(missing_ok=True)
+
     @staticmethod
     def _mod_file_source(mod: dict, file_name: str) -> Path | None:
         store_value = mod.get("store")
         if store_value:
             candidate = Path(store_value) / file_name
-            if candidate.exists():
+            if candidate.is_file():
                 return candidate
         source_value = mod.get("source")
         if source_value:
             source = Path(source_value)
             if source.is_dir():
-                candidate = source / file_name
-                if candidate.exists():
-                    return candidate
-                found = next(source.rglob(file_name), None)
+                found = next((path for path in sorted(source.rglob(file_name)) if path.is_file()), None)
                 if found:
                     return found
         return None
@@ -92,27 +115,105 @@ class ModManager:
     def _apply_effective_files(self, state: dict, file_names) -> int:
         """按安装/启用顺序重算文件；后激活的 Mod 覆盖先激活的。"""
         mods = list(state.get("mods", {}).values())
-        changed = 0
+        copies: list[tuple[Path, Path]] = []
+        unavailable: list[str] = []
         for file_name in sorted(set(file_names)):
-            source = None
-            for mod in reversed(mods):
-                if mod.get("disabled") or file_name not in mod.get("files", []):
-                    continue
-                source = self._mod_file_source(mod, file_name)
-                if source:
-                    break
             target = self.bundle_path(file_name)
             if target is None:
                 continue
-            if source:
-                shutil.copy2(source, target)
-                changed += 1
+            source = None
+            has_active_mod = False
+            for mod in reversed(mods):
+                if mod.get("disabled") or file_name not in mod.get("files", []):
+                    continue
+                has_active_mod = True
+                source = self._mod_file_source(mod, file_name)
+                # 有效层丢失时不能悄悄退回更早的 Mod，让状态与实际文件不一致。
+                break
+            if not has_active_mod:
+                source = self.backup_dir / file_name
+            try:
+                if source is None or not source.is_file():
+                    unavailable.append(file_name)
+                    continue
+                with source.open("rb") as bundle_file:
+                    bundle_file.read(1)
+            except OSError:
+                unavailable.append(file_name)
                 continue
-            backup = self.backup_dir / file_name
-            if backup.exists():
-                shutil.copy2(backup, target)
-                changed += 1
-        return changed
+            copies.append((source, target))
+        if unavailable:
+            raise RuntimeError(
+                "无法更改 Mod 状态：以下资源包的 Mod 来源或原始备份缺失、无法读取："
+                + "、".join(unavailable)
+                + "。请检查备份，或重新安装对应 Mod。"
+            )
+        for source, target in copies:
+            shutil.copy2(source, target)
+        return len(copies)
+
+    @contextmanager
+    def _file_transaction(self, file_names):
+        """复制或保存状态失败时，恢复这次操作前的游戏文件。"""
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        transaction_dir = Path(tempfile.mkdtemp(prefix="mod-change-", dir=self.data_dir))
+        snapshots: list[tuple[Path, Path]] = []
+        keep_recovery = False
+        try:
+            for index, file_name in enumerate(sorted(set(file_names))):
+                target = self.bundle_path(file_name)
+                if target is None:
+                    continue
+                snapshot = transaction_dir / str(index)
+                shutil.copy2(target, snapshot)
+                snapshots.append((snapshot, target))
+            (transaction_dir / "recovery.json").write_text(
+                json.dumps(
+                    [{"copy": snapshot.name, "target": str(target)} for snapshot, target in snapshots],
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            try:
+                yield
+            except Exception as exc:
+                failed: list[str] = []
+                leftover_temporary: list[str] = []
+                for snapshot, target in snapshots:
+                    pending = None
+                    try:
+                        # 数据目录和游戏可能在不同盘，替换必须在游戏文件所在盘暂存。
+                        with tempfile.NamedTemporaryFile(
+                            prefix=".mod-restore-", dir=target.parent, delete=False,
+                        ) as temporary:
+                            pending = Path(temporary.name)
+                        shutil.copy2(snapshot, pending)
+                        pending.replace(target)
+                    except OSError:
+                        failed.append(target.name)
+                    finally:
+                        if pending is not None:
+                            try:
+                                pending.unlink(missing_ok=True)
+                            except OSError:
+                                leftover_temporary.append(str(pending))
+                if failed or leftover_temporary:
+                    keep_recovery = True
+                    temporary_note = (
+                        "。以下恢复临时文件暂时无法清理：" + "、".join(leftover_temporary)
+                        if leftover_temporary else ""
+                    )
+                    raise RuntimeError(
+                        "Mod 操作失败，部分文件暂时无法回退："
+                        + "、".join(failed)
+                        + f"。操作前的副本已保留在：{transaction_dir}"
+                        + temporary_note
+                    ) from exc
+                raise
+        finally:
+            if not keep_recovery:
+                shutil.rmtree(transaction_dir, ignore_errors=True)
 
     # ---- 安装 ----
     def install_mod(self, mod_dir: str | Path, name: str | None = None) -> ModAnalysis:
@@ -125,35 +226,39 @@ class ModManager:
         old_files = set(old_info.get("files", []))
 
         self.backup_dir.mkdir(parents=True, exist_ok=True)
-        store = self._store_dir(mod_name)
-        if store.exists():
+        store_root = self.data_dir / "mod_store"
+        store_root.mkdir(parents=True, exist_ok=True)
+        # 新缓存先完整写入独立目录；同名重装不能先删除正在读取的旧来源。
+        store = Path(tempfile.mkdtemp(prefix=f"{mod_name}-", dir=store_root))
+        try:
+            applied: list[str] = []
+            for fname in analysis.matched:
+                target = self.bundle_path(fname)
+                if target is None:
+                    continue
+                shutil.copy2(analysis.files_map[fname], store / fname)
+                self._ensure_original_backup(fname, target, state)
+                applied.append(fname)
+
+            # 重新安装同名 Mod 也算最后激活，确保覆盖顺序与用户操作一致。
+            state["mods"].pop(mod_name, None)
+            state["mods"][mod_name] = {
+                "installed_at": datetime.now().isoformat(timespec="seconds"),
+                "files": applied,
+                "source": str(Path(mod_dir)),
+                "store": str(store),
+                "disabled": False,
+            }
+            affected = old_files.union(applied)
+            with self._file_transaction(affected):
+                self._apply_effective_files(state, affected)
+                self._save_state(state)
+        except Exception:
             shutil.rmtree(store, ignore_errors=True)
-        store.mkdir(parents=True, exist_ok=True)
-
-        applied: list[str] = []
-        for fname in analysis.matched:
-            target = self.bundle_path(fname)
-            if target is None:
-                continue
-            backup = self.backup_dir / fname
-            if not backup.exists():  # 只在第一次替换时备份最原始的文件
-                shutil.copy2(target, backup)
-            shutil.copy2(analysis.files_map[fname], target)
-            # 缓存一份，禁用后再启用不依赖临时解压目录
-            shutil.copy2(analysis.files_map[fname], store / fname)
-            applied.append(fname)
-
-        # 重新安装同名 Mod 也算最后激活，确保覆盖顺序与用户操作一致。
-        state["mods"].pop(mod_name, None)
-        state["mods"][mod_name] = {
-            "installed_at": datetime.now().isoformat(timespec="seconds"),
-            "files": applied,
-            "source": str(Path(mod_dir)),
-            "store": str(store),
-            "disabled": False,
-        }
-        self._apply_effective_files(state, old_files.difference(applied))
-        self._save_state(state)
+            raise
+        old_store = Path(old_info.get("store") or self._store_dir(mod_name))
+        if old_store != store and old_store.exists():
+            shutil.rmtree(old_store, ignore_errors=True)
         return analysis
 
     # ---- 还原 ----
@@ -164,11 +269,12 @@ class ModManager:
             return 0
         affected = list(mod.get("files", []))
         del state["mods"][name]
-        restored = self._apply_effective_files(state, affected)
+        with self._file_transaction(affected):
+            restored = self._apply_effective_files(state, affected)
+            self._save_state(state)
         store = Path(mod.get("store") or self._store_dir(name))
         if store.exists():
             shutil.rmtree(store, ignore_errors=True)
-        self._save_state(state)
         return restored
 
     def disable_mod(self, name: str) -> int:
@@ -181,8 +287,10 @@ class ModManager:
             return 0
         mod["disabled"] = True
         state["mods"][name] = mod
-        restored = self._apply_effective_files(state, mod.get("files", []))
-        self._save_state(state)
+        files = mod.get("files", [])
+        with self._file_transaction(files):
+            restored = self._apply_effective_files(state, files)
+            self._save_state(state)
         return restored
 
     def enable_mod(self, name: str) -> int:
@@ -218,19 +326,21 @@ class ModManager:
         # 再启用等同于最后激活：它应覆盖当前启用 Mod 的同名资源。
         state["mods"].pop(name, None)
         state["mods"][name] = mod
-        applied = self._apply_effective_files(state, files)
-        self._save_state(state)
+        with self._file_transaction(files):
+            applied = self._apply_effective_files(state, files)
+            self._save_state(state)
         return applied
 
     def restore_all(self) -> int:
         """把所有备份过的原文件全部还原（终极还原按钮）。"""
-        restored = 0
-        for backup in self.backup_dir.glob("*.bundle"):
-            target = self.bundle_path(backup.name)
-            if target is not None:
-                shutil.copy2(backup, target)
-                restored += 1
-        self._save_state({"mods": {}})
+        state = self._load_state()
+        files = {backup.name for backup in self.backup_dir.glob("*.bundle")}
+        for mod in state.get("mods", {}).values():
+            files.update(mod.get("files", []))
+        clean_state = {"mods": {}}
+        with self._file_transaction(files):
+            restored = self._apply_effective_files(clean_state, files)
+            self._save_state(clean_state)
         shutil.rmtree(self.data_dir / "mod_store", ignore_errors=True)
         return restored
 
@@ -253,14 +363,36 @@ class ModManager:
 
     # ---- 状态存取 ----
     def _load_state(self) -> dict:
-        if not self.state_path.exists():
-            return {"mods": {}}
         try:
             data = json.loads(self.state_path.read_text(encoding="utf-8"))
-            data.setdefault("mods", {})
-            return data
-        except (OSError, json.JSONDecodeError):
+        except FileNotFoundError:
             return {"mods": {}}
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError(
+                f"无法读取 Mod 状态文件：{self.state_path}。为保护游戏文件已停止操作，请先检查或恢复该文件。"
+            ) from exc
+        valid = isinstance(data, dict) and isinstance(data.get("mods"), dict)
+        if valid:
+            for name, mod in data["mods"].items():
+                if not isinstance(name, str) or not name or not isinstance(mod, dict):
+                    valid = False
+                    break
+                files = mod.get("files")
+                if (
+                    not isinstance(files, list)
+                    or any(not isinstance(file_name, str) or not file_name
+                           or Path(file_name).name != file_name for file_name in files)
+                    or ("disabled" in mod and not isinstance(mod["disabled"], bool))
+                    or any(mod.get(field) is not None and not isinstance(mod[field], str)
+                           for field in ("store", "source"))
+                ):
+                    valid = False
+                    break
+        if not valid:
+            raise RuntimeError(
+                f"Mod 状态文件结构不正确：{self.state_path}。为保护游戏文件已停止操作，请先检查或恢复该文件。"
+            )
+        return data
 
     def _save_state(self, state: dict) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)

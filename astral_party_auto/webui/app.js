@@ -37,6 +37,7 @@
     multiSelectMode: false,
     selectedResources: [],
     browseRequestSeq: 0,
+    browseRefreshSeq: 0,
     query: "",
     characterFilter: "",
     characterList: [],
@@ -421,13 +422,18 @@
   }
 
   async function refreshBrowse() {
+    const request = ++state.browseRefreshSeq;
+    const assetType = state.assetType;
+    // 分类刷新期间，旧列表响应也不能继续写回当前类型。
+    state.browseRequestSeq += 1;
     fillAssetTypes();
     try {
       const [cats, charList, labels] = await Promise.all([
-        call("get_categories", { quiet: true }, state.assetType),
+        call("get_categories", { quiet: true }, assetType),
         call("get_character_list", { quiet: true }),
         call("get_character_labels", { quiet: true }),
       ]);
+      if (request !== state.browseRefreshSeq || assetType !== state.assetType || state.page !== "browse") return;
       state.categories = cats || [];
       state.characterList = charList || [];
       state.characterLabels = labels || { bundles: {}, resources: {} };
@@ -442,6 +448,7 @@
       renderCategories();
       await loadResources();
     } catch (err) {
+      if (request !== state.browseRefreshSeq || assetType !== state.assetType || state.page !== "browse") return;
       $("#resource-status").textContent = err.message || "加载失败";
     }
   }
@@ -485,7 +492,7 @@
         state.resourcePage,
         PAGE_SIZE
       );
-      if (seq !== state.browseRequestSeq) return;
+      if (seq !== state.browseRequestSeq || state.page !== "browse") return;
       state.resources = (data && data.items) || [];
       state.totalResources = (data && data.total) || 0;
       const pages = Math.max(1, Math.ceil(state.totalResources / PAGE_SIZE));
@@ -500,7 +507,7 @@
       }
       renderResources();
     } catch (err) {
-      if (seq !== state.browseRequestSeq) return;
+      if (seq !== state.browseRequestSeq || state.page !== "browse") return;
       state.resources = [];
       state.totalResources = 0;
       renderResources();
@@ -727,6 +734,28 @@ ${row.bundle}`;
     return kind !== "mesh" && (kind !== "dynamic" || isPlayableAnimation(selection));
   }
 
+  function animationImportNotice(selection) {
+    const dataNotice = "同源 .animbin 用于修改动作数据；替换图集不改变动作顺序和时间。";
+    if (selection.atlas_editable !== true) {
+      return `${selection.atlas_reason || "此动画没有可直接替换的单张原图集。"} 此处只能导入同源 .animbin。`;
+    }
+    const atlas = `${selection.atlas_name} · ${selection.atlas_width} × ${selection.atlas_height} 像素`;
+    return `整张原图集：${atlas}。\n图片尺寸及碎片布局必须与原图集一致，不能用单张角色帧、PNG 帧文件夹或 GIF 替代，也不能裁剪。先到「浏览资源 → 贴图」搜索图集名并导出 PNG，再按原布局修改。\n${dataNotice}`;
+  }
+
+  function syncStudioImportControls() {
+    const selection = state.selection;
+    const kind = selection?.asset_type || selection?.kind;
+    const editable = canEdit(selection);
+    const cropBtn = $("#crop-replacement");
+    if (cropBtn) {
+      cropBtn.classList.toggle("is-hidden", kind !== "texture" || !editable);
+      cropBtn.disabled = kind !== "texture" || !editable || !state.replacement?.preview_data;
+    }
+    const saveBtn = $("#commit-replacement");
+    if (saveBtn) saveBtn.disabled = !editable || (kind === "anim" && !state.replacement);
+  }
+
   function previewFps() {
     return Math.max(1, Math.min(120, Number($("#sequence-fps")?.value) || 30));
   }
@@ -877,11 +906,10 @@ ${row.bundle}`;
     $("#studio-text-mode").classList.toggle("is-hidden", kind !== "text");
     $("#choose-replacement").classList.toggle("is-hidden", !editable);
     $("#choose-frame-folder").classList.toggle("is-hidden", !editable || !sequence);
-    $("#choose-replacement").textContent = kind === "text" ? "导入文本文件…" : kind === "anim" ? "选择动画数据 / 图集…" : animated ? "选择替换动画…" : "选择替换文件";
-    const cropBtn = $("#crop-replacement");
-    cropBtn.classList.toggle("is-hidden", !["texture", "anim"].includes(kind) || !editable);
-    cropBtn.disabled = !state.replacement?.preview_data || /\.(animbin|bin)$/i.test(state.replacement?.name || "");
-    $("#commit-replacement").disabled = !editable;
+    $("#choose-replacement").textContent = kind === "text" ? "导入文本文件…" : kind === "anim"
+      ? sel.atlas_editable === true ? "选择同源动画 / 整张图集…" : "选择同源动画…"
+      : animated ? "选择替换动画…" : "选择替换文件";
+    syncStudioImportControls();
     $("#animation-settings").classList.toggle("is-hidden", !animated);
     $("#sequence-fps-label").classList.toggle("is-hidden", !sequence);
     $("#animation-guidance").textContent = kind === "anim"
@@ -889,7 +917,7 @@ ${row.bundle}`;
       : !editable ? "当前资源可逐帧查看。替换能力和限制见下方说明。" : sequence
       ? "导入 GIF、WebP 或 APNG 后按原序列帧数量和尺寸适配。此处帧率用于预览，游戏内速度由游戏控制。"
       : "保留动画图片的逐帧时长，可逐帧检查替换前后效果。";
-    const animationNotice = kind === "anim" ? ".animbin 仅接受同源兼容动画片段，用于改动作数据；图片只替换关联图集，动作顺序和时间不变。" : "";
+    const animationNotice = kind === "anim" ? animationImportNotice(sel) : "";
     const notice = [sel.reason, animationNotice].filter(Boolean).join(" ") || (!editable ? "该资源目前仅支持预览和导出，不能直接替换。"
       : animated ? "先对照预览，再保存到作品集；安装到游戏后需以实际效果为准。"
       : editable ? "保存只更新作品集，稍后可在作品集中手动安装测试。" : "此类资源暂不支持直接替换。");
@@ -946,7 +974,12 @@ ${row.bundle}`;
     if (replacement?.animation) {
       renderAnimation(media, replacement.animation, isSequenceAnimation(state.selection));
     } else {
-      setMedia(media, replacement?.preview_data, replacement?.name || "选择文件后可在这里对照预览");
+      const clip = (state.selection?.asset_type || state.selection?.kind) === "anim";
+      const empty = clip ? state.selection.atlas_editable === true
+        ? "尚未导入替换。请选择同源 .animbin，或按原布局修改的整张图集。"
+        : "尚未导入替换。请选择同源 .animbin 动画数据。"
+        : "选择文件后可在这里对照预览";
+      setMedia(media, replacement?.preview_data, replacement?.name || empty);
     }
   }
 
@@ -1038,7 +1071,7 @@ ${row.bundle}`;
       const button = document.createElement("button");
       button.type = "button";
       button.className = "button ghost compact";
-      button.textContent = "重新加载动画";
+      button.textContent = "重新加载预览";
       button.addEventListener("click", retry);
       status.appendChild(button);
     }
@@ -1269,6 +1302,11 @@ ${row.bundle}`;
 
   async function showDraftDetail(index) {
     const request = ++state.draftDetailRequest;
+    const name = state.draft.items?.[index]?.name || "资源";
+    $("#draft-detail-title").textContent = `正在加载 · ${name}`;
+    $("#draft-replace").disabled = true;
+    $("#draft-crop").disabled = true;
+    $("#draft-remove").disabled = true;
     setMedia($("#draft-original"), null, "正在加载原内容…");
     setMedia($("#draft-modified"), null, "正在加载修改内容…");
     state.draftIndex = index;
@@ -1277,7 +1315,7 @@ ${row.bundle}`;
       const data = await call("get_draft_detail", { quiet: true }, index);
       if (request !== state.draftDetailRequest || state.page !== "pack") return;
       const item = data.item || {};
-      const kindLabel = { texture: "图片", text: "文字", anim: "动画片段", dynamic: "动画" }[item.kind] || "资源";
+      const kindLabel = item.from_anim ? "动画图集" : { texture: "图片", text: "文字", anim: "动画片段", dynamic: "动画" }[item.kind] || "资源";
       $("#draft-detail-title").textContent = `${kindLabel} · ${item.name || ""}`;
       setMedia($("#draft-original"), data.original_data, "无预览");
       setMedia($("#draft-modified"), data.modified_data, "无预览");
@@ -1293,10 +1331,14 @@ ${row.bundle}`;
         else renderAnimationState(media, animation.notice || "此动画暂不支持播放。", null, data[`${side}_data`]);
       }
       $("#draft-replace").disabled = item.kind !== "texture";
-      $("#draft-crop").disabled = item.kind !== "texture";
+      $("#draft-replace").textContent = item.from_anim ? "替换整张图集并保存…" : "换图并保存…";
+      $("#draft-replace").title = item.from_anim ? "仅接受与原图集尺寸相同、碎片布局一致的完整图片" : "";
+      $("#draft-crop").disabled = item.kind !== "texture" || !!item.from_anim;
+      $("#draft-crop").title = item.from_anim ? "动画图集须保留原碎片布局，不能裁剪" : "";
       $("#draft-remove").disabled = false;
     } catch (err) {
       if (request === state.draftDetailRequest && state.page === "pack") {
+        $("#draft-detail-title").textContent = `预览未加载 · ${name}`;
         renderAnimationState($("#draft-original"), `预览未加载：${err.message}`, () => showDraftDetail(index));
         setMedia($("#draft-modified"), null, "预览未加载，点击左侧按钮重试。");
         toast(err.message, true);
@@ -1774,6 +1816,12 @@ ${row.bundle}`;
   async function chooseReplacement(sequenceFolder = false) {
     const key = selectionKey();
     if (!canEdit(state.selection)) return;
+    const clip = (state.selection.asset_type || state.selection.kind) === "anim";
+    if (clip) {
+      state.replacement = null;
+      syncStudioImportControls();
+      if (state.page === "studio") renderReplacement();
+    }
     try {
       const data = await call("choose_replacement", { busy: true, busyText: "读取替换文件…" }, sequenceFolder);
       if (!data || key !== selectionKey()) return;
@@ -1785,11 +1833,15 @@ ${row.bundle}`;
       } else if (state.page === "studio") {
         renderReplacement();
       }
-      const cropBtn = $("#crop-replacement");
-      if (cropBtn) cropBtn.disabled = !data.preview_data || /\.(animbin|bin)$/i.test(data.name || "") ||
-        (!!data.animation && (state.selection?.asset_type || state.selection?.kind) !== "anim");
+      syncStudioImportControls();
       toast(`已选择：${data.name}${data.encoding ? `（${data.encoding}）` : ""}`);
-    } catch (_) {}
+    } catch (err) {
+      if (clip && key === selectionKey()) {
+        state.replacement = null;
+        syncStudioImportControls();
+        if (state.page === "studio") renderAnimationState($("#studio-replacement"), `未导入替换：${err.message}`);
+      }
+    }
   }
 
   // ---------- 裁剪弹窗 ----------
@@ -1939,6 +1991,10 @@ ${row.bundle}`;
   }
 
   async function cropReplacement() {
+    if ((state.selection?.asset_type || state.selection?.kind) === "anim") {
+      toast("动画图集不能裁剪，否则会破坏原来的碎片位置", true);
+      return;
+    }
     if (!state.replacement) {
       toast("请先选择替换文件", true);
       return;
@@ -1967,6 +2023,10 @@ ${row.bundle}`;
 
   async function cropReplaceDraft() {
     if (state.draftIndex < 0) return;
+    if (state.draft.items?.[state.draftIndex]?.from_anim) {
+      toast("动画图集不能裁剪，否则会破坏原来的碎片位置", true);
+      return;
+    }
     try {
       const data = await call("pick_draft_crop_source", { busy: false }, state.draftIndex);
       if (!data) return;
@@ -2010,7 +2070,13 @@ ${row.bundle}`;
       }
       toast("已保存到作品集，可继续预览或手动安装测试");
       renderDraftList();
-    } catch (_) {}
+    } catch (err) {
+      if (kind === "anim" && key === selectionKey()) {
+        state.replacement = null;
+        syncStudioImportControls();
+        if (state.page === "studio") renderAnimationState($("#studio-replacement"), `保存未通过，请重新选择文件：${err.message}`);
+      }
+    }
   }
 
   // 后端推送事件

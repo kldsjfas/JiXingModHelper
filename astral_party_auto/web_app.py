@@ -9,6 +9,7 @@ import os
 import tempfile
 import threading
 from collections import deque
+from copy import deepcopy
 from functools import wraps
 from pathlib import Path
 from typing import Any, Callable
@@ -92,6 +93,7 @@ class DesktopApi:
         self._replacement_path: Path | None = None
         self._draft_crop_path: Path | None = None
         self._draft_crop_index: int | None = None
+        self._draft_crop_item: dict | None = None
         self._migration_source: Path | None = None
         self._migration_plans = []
         self._migration_warnings: list[str] = []
@@ -445,8 +447,9 @@ class DesktopApi:
         name = source.stem if source.is_file() else source.name
         analysis = self.controller.install(source, name=name)
         self._pending_mod_path = None
-        # 装完后从 mod_store 继续预览
-        store = DATA_DIR / "mod_store" / name
+        installed = self.controller.installed_mods()
+        info = next((item for item in installed if item.get("name") == name), {})
+        store = Path(info.get("store") or (DATA_DIR / "mod_store" / name))
         bundles: list[str] = []
         if store.exists():
             files = {p.name: p for p in sorted(store.glob("*.bundle"))}
@@ -455,7 +458,7 @@ class DesktopApi:
             "name": name,
             "matched": len(analysis.matched),
             "unmatched": len(analysis.unmatched),
-            "installed": self.controller.installed_mods(),
+            "installed": installed,
             "dashboard": self._dashboard_state(),
             "preview_title": self._mod_preview_title,
             "bundles": bundles,
@@ -488,30 +491,18 @@ class DesktopApi:
         file_names = list(info.get("files") or [])
         store = Path(info.get("store") or (DATA_DIR / "mod_store" / name))
         files: dict[str, Path] = {}
-        if store.exists():
-            files = {p.name: p for p in store.glob("*.bundle")}
-        if not files and self.controller.has_game and file_names:
-            store.mkdir(parents=True, exist_ok=True)
-            import shutil
-
-            for fname in file_names:
-                src = self.controller.bundle_path(fname)
-                if src is None:
-                    continue
-                dst = store / fname
-                try:
-                    shutil.copy2(src, dst)
-                    files[fname] = dst
-                except OSError:
-                    files[fname] = src
-            info["store"] = str(store)
-            state["mods"][name] = info
-            manager._save_state(state)
-        if not files and self.controller.has_game and file_names:
-            for fname in file_names:
-                p = self.controller.bundle_path(fname)
-                if p is not None:
-                    files[fname] = p
+        missing: list[str] = []
+        for fname in file_names:
+            path = manager._mod_file_source(info, fname)
+            legacy_path = store / fname
+            if path is None and legacy_path.is_file():
+                path = legacy_path
+            if path is None:
+                missing.append(fname)
+            else:
+                files[fname] = path
+        if missing:
+            raise RuntimeError("该 Mod 的资源文件缺失，请重新安装：" + "、".join(missing))
         if not files:
             raise RuntimeError("没有可预览的文件。请重新安装该 mod。")
         bundles = self._set_mod_preview_files(files, f"已装 · {name}")
@@ -651,7 +642,7 @@ class DesktopApi:
         """预览临时副本中的替换结果；选择文件和裁剪都不写入作品集。"""
         from .modkit.clip_preview import read_clip_preview
         from .modkit.clip_edit import replace_clip_checked
-        from .modkit.maker import replace_bundle_texture
+        from .modkit.clip_atlas import replace_clip_atlas_checked
 
         original = Path(selection.get("original_path") or selection["bundle_path"])
         draft = self.controller._draft_dir() / selection["bundle"]
@@ -663,13 +654,12 @@ class DesktopApi:
                     raise RuntimeError("动画数据超过 32 MB。")
                 replace_clip_checked(source, selection["name"], replacement.read_bytes(), temporary, reference_bundle=original)
             else:
-                texture = selection.get("preview_texture")
-                if not texture:
-                    raise RuntimeError("此动画没有可直接替换的关联图集，请使用同源 .animbin。")
-                replace_bundle_texture(source, replacement, temporary, target_name=texture)
+                replace_clip_atlas_checked(source, selection["name"], replacement, temporary)
             try:
                 return read_clip_preview(temporary, selection["name"])
             except ValueError as exc:
+                if replacement.suffix.lower() not in {".animbin", ".bin"}:
+                    raise
                 return {"frames": [], "durations": [], "total": 0, "notice": f"替换文件可以读取，但无法播放：{exc}"}
 
     @exposed
@@ -763,6 +753,8 @@ class DesktopApi:
         if not selection:
             raise RuntimeError("请先选择资源。")
         asset_type = selection.get("asset_type") or "texture"
+        if asset_type == "anim":
+            self._replacement_path = None
         if not selection.get("editable", True):
             raise RuntimeError(selection.get("reason") or "此资源暂不支持替换。")
         if asset_type in ("texture", "anim"):
@@ -794,12 +786,12 @@ class DesktopApi:
             from .modkit.animation import read_adapted_replacement
             source = selection.get("original_path") or selection.get("bundle_path")
             animation = read_adapted_replacement(source, selection["name"], path, kind=selection["animation_kind"])
-        elif asset_type == "anim" and selection.get("playable"):
+        elif asset_type == "anim":
             animation = self._clip_candidate_preview(selection, path)
-        self._replacement_path = path
         preview_data = ""
         if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
             preview_data = self._image_data(path)
+        self._replacement_path = path
         return {"path": str(path), "name": path.name, "size": path.stat().st_size, "preview_data": preview_data, "animation": animation}
 
     @exposed
@@ -809,6 +801,8 @@ class DesktopApi:
             raise RuntimeError("请先选择替换文件。")
         if (self.controller.selection or {}).get("asset_type") == "dynamic":
             raise RuntimeError("动画按原帧尺寸适配，不能用静态图片裁剪。")
+        if (self.controller.selection or {}).get("asset_type") == "anim":
+            raise RuntimeError("动画完整图集不能裁剪，请保留原图集尺寸和布局。")
         if self._replacement_path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
             raise RuntimeError("当前文件不是图片，不能裁剪。")
         from PIL import Image
@@ -856,21 +850,25 @@ class DesktopApi:
                     animation_kind=selection.get("animation_kind"), fps=fps,
                 )
             elif asset_type == "anim":
-                if replacement.suffix.lower() in {".animbin", ".bin"}:
-                    item = self.controller.add_anim_to_draft(
-                        source,
-                        selection["name"],
-                        raw_path=replacement,
-                        bundle_name=selection["bundle"],
-                    )
-                else:
-                    item = self.controller.add_anim_to_draft(
-                        source,
-                        selection["name"],
-                        image_path=replacement,
-                        preview_texture=selection.get("preview_texture"),
-                        bundle_name=selection["bundle"],
-                    )
+                try:
+                    if replacement.suffix.lower() in {".animbin", ".bin"}:
+                        item = self.controller.add_anim_to_draft(
+                            source,
+                            selection["name"],
+                            raw_path=replacement,
+                            bundle_name=selection["bundle"],
+                        )
+                    else:
+                        item = self.controller.add_anim_to_draft(
+                            source,
+                            selection["name"],
+                            image_path=replacement,
+                            preview_texture=selection.get("preview_texture"),
+                            bundle_name=selection["bundle"],
+                        )
+                except Exception:
+                    self._replacement_path = None
+                    raise
             else:
                 raise RuntimeError("3D 模型目前只支持导出。")
         self._replacement_path = None
@@ -941,17 +939,18 @@ class DesktopApi:
     @exposed
     def pick_draft_crop_source(self, index: int) -> dict | None:
         """裁剪换图第一步：选图并返回预览 + 游戏原尺寸，供浏览器端框选。"""
+        self._clear_draft_crop()
         index = int(index)
         if not (0 <= index < len(self.controller.draft_items)):
             raise RuntimeError("作品集项不存在。")
+        if self.controller.draft_items[index].get("from_anim"):
+            raise RuntimeError("动画完整图集不能裁剪，请保留原图集尺寸和布局。")
         path = self._pick_path(
             "open",
             file_types=("图片 (*.png;*.jpg;*.jpeg;*.webp;*.bmp)", "所有文件 (*.*)"),
         )
         if path is None:
             return None
-        self._draft_crop_path = path
-        self._draft_crop_index = index
         item = self.controller.draft_items[index]
         target_w = target_h = 0
         orig_bundle = self.controller.original_bundle_path(item.get("bundle", ""))
@@ -962,23 +961,44 @@ class DesktopApi:
                     target_w, target_h = info.width, info.height
             except Exception:
                 pass
+        from PIL import Image
+
+        with Image.open(path) as image:
+            image.verify()
+        preview = self._image_data(path)
+        self._draft_crop_path = path
+        self._draft_crop_index = index
+        self._draft_crop_item = deepcopy(item)
         return {
             "path": str(path),
             "name": path.name,
-            "preview_data": self._image_data(path),
+            "preview_data": preview,
             "target_width": target_w,
             "target_height": target_h,
         }
+
+    def _clear_draft_crop(self) -> None:
+        self._draft_crop_path = None
+        self._draft_crop_index = None
+        self._draft_crop_item = None
 
     @exposed
     def commit_draft_crop(self, crop_box: list | None = None) -> dict:
         """裁剪换图第二步：用框选区域写入作品集项。"""
         if self._draft_crop_path is None or self._draft_crop_index is None:
             raise RuntimeError("请先选择要裁剪的图片。")
+        index = self._draft_crop_index
+        path = self._draft_crop_path
+        expected_item = self._draft_crop_item
+        self._clear_draft_crop()
+        if not (0 <= index < len(self.controller.draft_items)):
+            raise RuntimeError("作品集项不存在。")
+        if self.controller.draft_items[index] != expected_item:
+            raise RuntimeError("作品集已变化，请重新选择要裁剪的项目和图片。")
+        if self.controller.draft_items[index].get("from_anim"):
+            raise RuntimeError("动画完整图集不能裁剪，请保留原图集尺寸和布局。")
         box = tuple(int(v) for v in crop_box) if crop_box else None
-        item = self.controller.update_draft_texture(self._draft_crop_index, self._draft_crop_path, crop_box=box)
-        self._draft_crop_path = None
-        self._draft_crop_index = None
+        item = self.controller.update_draft_texture(index, path, crop_box=box)
         return {
             "item": item,
             "draft": self._draft_state(),

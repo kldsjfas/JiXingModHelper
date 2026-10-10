@@ -194,7 +194,8 @@ class StudioSafetyTests(unittest.TestCase):
         self.assertEqual(manager.installed_mods(), installed)
         self.assertEqual(manager.state_path.read_bytes(), state)
         self.assertEqual(self.bundle.read_bytes(), game_bytes)
-        self.assertEqual((manager._store_dir(self.controller.draft_name) / self.bundle.name).read_bytes(), game_bytes)
+        info = next(mod for mod in installed if mod["name"] == self.controller.draft_name)
+        self.assertEqual((Path(info["store"]) / self.bundle.name).read_bytes(), game_bytes)
         self.assertEqual((manager.backup_dir / self.bundle.name).read_text(), '{"original": true}')
         self.assertEqual(saved_mod.read_text(), "keep")
         for call in watched:

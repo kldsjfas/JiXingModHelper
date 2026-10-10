@@ -662,11 +662,13 @@ class ModController:
             return self.selection
 
         if asset_type == "anim":
+            from .modkit.clip_atlas import inspect_clip_atlas
             from .modkit.clip_preview import inspect_clip_preview
 
             clip = inspect_clip_preview(path, asset_name)
+            atlas = inspect_clip_atlas(path, asset_name)
             playable = bool(clip.get("playable"))
-            preview_tex = find_anim_preview_texture(path, asset_name)
+            preview_tex = atlas.get("atlas_name") or find_anim_preview_texture(path, asset_name)
             png = None
             width, height = clip.get("width", 0), clip.get("height", 0)
             if not playable and preview_tex:
@@ -683,7 +685,8 @@ class ModController:
                 "reason": reason,
                 "bundle": bundle_name, "bundle_path": str(game_path or path),
                 "original_path": str(path), "name": asset_name,
-                "preview_texture": preview_tex or "",
+                "preview_texture": atlas.get("atlas_name") or "",
+                **atlas,
                 "width": width, "height": height,
                 "preview": str(png) if png else "",
                 "text_preview": reason,
@@ -968,9 +971,21 @@ class ModController:
         backup = DATA_DIR / "backups" / bundle_name
         base = backup if backup.exists() else game_b
         src = out_bundle if out_bundle.exists() else base
-        replaced = replace_bundle_texture(
-            src, image_path, out_bundle, target_name=item.get("name"), crop_box=crop_box
-        )
+        if item.get("from_anim"):
+            from .modkit.clip_atlas import inspect_clip_atlas, replace_clip_atlas_checked
+
+            if crop_box is not None:
+                raise RuntimeError("动画完整图集不能裁剪，请保留原图集尺寸和布局。")
+            atlas = inspect_clip_atlas(src, item["from_anim"])
+            if not atlas["atlas_editable"]:
+                raise RuntimeError(atlas["atlas_reason"])
+            if atlas["atlas_name"] != item.get("name"):
+                raise RuntimeError("作品集记录的图集与动画引用不一致，请移除此项后重新选择资源。")
+            replaced = replace_clip_atlas_checked(src, item["from_anim"], image_path, out_bundle)
+        else:
+            replaced = replace_bundle_texture(
+                src, image_path, out_bundle, target_name=item.get("name"), crop_box=crop_box
+            )
         item["name"] = replaced
         item["note"] = Path(image_path).name
         item["at"] = datetime.now().isoformat(timespec="seconds")
@@ -1246,7 +1261,7 @@ class ModController:
         crop_box: tuple[int, int, int, int] | None = None,
         bundle_name: str | None = None,
     ) -> dict:
-        """动画替换：给图则换同包预览贴图；给 .animbin 则换 AnimationClip 字节。"""
+        """动画替换：完整静态图集需保留原布局；.animbin 需同源兼容。"""
         self._require_game()
         bundle_path = Path(bundle_path)
         bundle_name = Path(bundle_name).name if bundle_name else logical_bundle_name(bundle_path)
@@ -1277,16 +1292,16 @@ class ModController:
                 "at": datetime.now().isoformat(timespec="seconds"),
             }
         elif image_path:
-            tex = preview_texture or find_anim_preview_texture(src, anim_name)
-            if not tex:
-                raise RuntimeError(
-                    f"动画「{anim_name}」同包没有可替换的预览贴图。可改用 .animbin 替换动画数据，"
-                    "或到「贴图 → 角色动作帧」改序列帧。"
-                )
+            from .modkit.clip_atlas import inspect_clip_atlas, replace_clip_atlas_checked
+
+            atlas = inspect_clip_atlas(src, anim_name)
+            if not atlas["atlas_editable"]:
+                raise RuntimeError(atlas["atlas_reason"])
+            tex = atlas["atlas_name"]
             self._check_sequence_overlap(bundle_name, [tex], "texture", tex)
-            replaced_tex = replace_bundle_texture(
-                src, image_path, out_bundle, target_name=tex, crop_box=crop_box, match_original_size=True
-            )
+            if crop_box:
+                raise RuntimeError("动画完整图集不能裁剪，请保留原图集尺寸和布局。")
+            replaced_tex = replace_clip_atlas_checked(src, anim_name, image_path, out_bundle)
             item = {
                 "kind": "texture",
                 "bundle": out_bundle.name,
