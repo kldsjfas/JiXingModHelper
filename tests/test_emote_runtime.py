@@ -15,7 +15,7 @@ class EmoteRuntimeTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
-        self.root = Path(self.directory.name)
+        self.root = Path(self.directory.name).resolve()
         self.app = self.root / "app"
         self.internal = self.root / "app" / "_internal"
         self.scope = ExitStack()
@@ -42,7 +42,10 @@ class EmoteRuntimeTests(unittest.TestCase):
         outside = self.executable(self.root / "system/ffmpeg.exe")
         with patch.object(emote_media.shutil, "which", return_value=str(outside)):
             self.assertEqual(emote_media.find_ffmpeg(), dedicated)
-        self.assertEqual(self.runner.call_args.args[0], [str(dedicated), "-version"])
+        command = self.runner.call_args.args[0]
+        self.assertEqual(len(command), 2)
+        self.assertTrue(Path(command[0]).samefile(dedicated))
+        self.assertEqual(command[1], "-version")
 
     def test_resource_root_component_is_found_when_app_root_has_none(self):
         dedicated = self.executable(self.internal / "tools/emote/ffmpeg/bin/ffmpeg.exe")
@@ -57,7 +60,7 @@ class EmoteRuntimeTests(unittest.TestCase):
         local = self.executable(self.app / "tools/emote/ffmpeg/bin/ffmpeg.exe")
         outside = self.executable(self.root / "system/ffmpeg.exe")
         def version(command, **options):
-            if Path(command[0]) == local:
+            if Path(command[0]).samefile(local):
                 raise OSError("invalid component")
             return self.run_version(command, **options)
         with patch.object(emote_media.shutil, "which", return_value=str(outside)), \
