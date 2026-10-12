@@ -17,6 +17,7 @@ from pathlib import Path
 
 from PIL import Image, UnidentifiedImageError
 
+from ..core.config import APP_ROOT, RESOURCE_ROOT
 from . import cri_emote
 
 MAX_SOURCE_BYTES = 64 * 1024 * 1024
@@ -41,13 +42,15 @@ def find_ffmpeg(explicit_path: str | Path | None = None) -> Path:
     else:
         executable_dir = Path(sys.executable).resolve().parent
         package_dir = Path(getattr(sys, "_MEIPASS", executable_dir))
+        for folder in (APP_ROOT, RESOURCE_ROOT, executable_dir, package_dir):
+            candidates.append(folder / "tools" / "emote" / "ffmpeg" / "bin" / "ffmpeg.exe")
         for folder in (package_dir, executable_dir):
             candidates.extend((folder / "ffmpeg.exe", folder / "ffmpeg" / "bin" / "ffmpeg.exe"))
         available = shutil.which("ffmpeg")
         if available:
             candidates.append(Path(available))
         candidates.append(Path.home() / ".local" / "bin" / "ffmpeg.exe")
-    for candidate in candidates:
+    for candidate in dict.fromkeys(candidates):
         if not candidate.is_file():
             continue
         try:
@@ -59,7 +62,7 @@ def find_ffmpeg(explicit_path: str | Path | None = None) -> Path:
             continue
         if result.returncode == 0 and result.stdout.startswith(b"ffmpeg version"):
             return candidate.resolve()
-    raise ValueError("找不到可用的 FFmpeg，动态表情预览和动图转换需要它；请安装 FFmpeg 或把 ffmpeg.exe 放到工具旁边。")
+    raise ValueError("找不到可用的表情转换组件（FFmpeg）；请运行程序旁的“获取表情转换组件.cmd”，完成后重新预览或导入。源码运行可执行 tools/emote/fetch_ffmpeg.ps1。")
 
 
 def find_ffprobe(ffmpeg_path: str | Path) -> Path:
@@ -78,7 +81,7 @@ def find_ffprobe(ffmpeg_path: str | Path) -> Path:
             continue
         if result.returncode == 0 and result.stdout.startswith(b"ffprobe version"):
             return candidate.resolve()
-    raise ValueError("视频内容检测需要 FFprobe；请把 ffprobe.exe 与 ffmpeg.exe 放在一起。")
+    raise ValueError("表情转换组件缺少可用的 FFprobe；请运行程序旁的“获取表情转换组件.cmd”重新校验组件，完成后重试。")
 
 
 def detect_emote_media(path: str | Path) -> str:

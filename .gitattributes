@@ -1,2 +1,3 @@
 # Keep upstream license and build notices verbatim, including their whitespace.
 tools/audio/licenses/** whitespace=-blank-at-eol
+tools/emote/licenses/** -text whitespace=-blank-at-eol

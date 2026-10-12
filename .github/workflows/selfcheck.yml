@@ -28,6 +28,18 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
 
+      - name: Set up checked emote conversion components
+        shell: pwsh
+        run: |
+          ./tools/emote/fetch_ffmpeg.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $bin = Join-Path $env:GITHUB_WORKSPACE 'tools/emote/ffmpeg/bin'
+          & (Join-Path $bin 'ffmpeg.exe') -version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & (Join-Path $bin 'ffprobe.exe') -version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $bin | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
       - name: Run safe selfcheck
         run: python selfcheck.py
 

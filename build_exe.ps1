@@ -71,6 +71,20 @@ if ($unexpectedAudioFiles -or (Test-Path -LiteralPath (Join-Path $out '_internal
   throw 'Audio runtime binaries must not be included in the release package.'
 }
 
+# Keep optional FFmpeg setup materials separate from downloaded runtime files.
+$emoteSource = Join-Path $PSScriptRoot 'tools\emote'
+$emoteDestination = Join-Path $out 'tools\emote'
+New-Item -ItemType Directory -Path $emoteDestination -Force | Out-Null
+foreach ($name in @('fetch_ffmpeg.ps1', 'source.json', 'README.md', 'licenses')) {
+  Copy-Item -LiteralPath (Join-Path $emoteSource $name) -Destination $emoteDestination -Recurse
+}
+Copy-Item -LiteralPath (Join-Path $emoteSource '获取表情转换组件.cmd') -Destination $out
+$unexpectedEmoteFiles = Get-ChildItem -LiteralPath $emoteDestination -File -Recurse |
+  Where-Object { $_.Extension -in '.exe', '.dll', '.zip' }
+if ($unexpectedEmoteFiles -or (Test-Path -LiteralPath (Join-Path $out '_internal\tools\emote\ffmpeg'))) {
+  throw 'FFmpeg runtime binaries must not be included in the release package.'
+}
+
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'PREVIEW_GUIDE.md') -Destination (Join-Path $out '使用说明.md')
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'LICENSE') -Destination (Join-Path $out 'LICENSE')
 

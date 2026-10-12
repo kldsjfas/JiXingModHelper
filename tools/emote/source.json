@@ -1,0 +1,85 @@
+{
+  "version": "n8.1.3-9-g29e619e767",
+  "architecture": "windows-x64",
+  "build_variant": "lgpl-shared-8.1",
+  "license": "LGPL-3.0-or-later",
+  "publisher": "BtbN/FFmpeg-Builds",
+  "recommended_by": "https://ffmpeg.org/download.html#build-windows",
+  "release_tag": "autobuild-2026-09-30-13-08",
+  "release_url": "https://github.com/BtbN/FFmpeg-Builds/releases/tag/autobuild-2026-09-30-13-08",
+  "archive_url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-30-13-08/ffmpeg-n8.1.3-9-g29e619e767-win64-lgpl-shared-8.1.zip",
+  "archive_name": "ffmpeg-n8.1.3-9-g29e619e767-win64-lgpl-shared-8.1.zip",
+  "archive_size": 80733362,
+  "archive_sha256": "3e47bda1607740550141e37c0e49d1e5182b34699f15adfd137ee266d346811a",
+  "root_directory": "ffmpeg-n8.1.3-9-g29e619e767-win64-lgpl-shared-8.1",
+  "source_commit": "29e619e767cde9045a75c29bc9a8278ae7b3a98b",
+  "source_url": "https://github.com/FFmpeg/FFmpeg/tree/29e619e767cde9045a75c29bc9a8278ae7b3a98b",
+  "source_archive_url": "https://github.com/FFmpeg/FFmpeg/archive/29e619e767cde9045a75c29bc9a8278ae7b3a98b.tar.gz",
+  "build_commit": "6c9aec5fc9a72ec3abedd1fa84db141fa18cf52b",
+  "build_source_url": "https://github.com/BtbN/FFmpeg-Builds/tree/6c9aec5fc9a72ec3abedd1fa84db141fa18cf52b",
+  "retention": "Upstream month-end builds are retained for two years; this pinned release may be removed after September 2028.",
+  "files": [
+    {
+      "name": "LICENSE.txt",
+      "size": 7651,
+      "sha256": "da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768"
+    },
+    {
+      "name": "bin/swscale-9.dll",
+      "size": 12900864,
+      "sha256": "d217a08bcd92b3a4b7ecb02e841724460a5c94a103d957370cfe75e892ac3dc2"
+    },
+    {
+      "name": "bin/avdevice-62.dll",
+      "size": 4947456,
+      "sha256": "34bc695cfdd3106de29551c6868f1c2cdc0fa36903494506f1708251e6a3075e"
+    },
+    {
+      "name": "bin/ffmpeg.exe",
+      "size": 540672,
+      "sha256": "a3bf949b1262ec9893bd80b681ec6001ba028bc7c8a4885e23c8df5b0ce95b1a"
+    },
+    {
+      "name": "bin/ffprobe.exe",
+      "size": 226816,
+      "sha256": "fe818a56825e31f39791216977c729ccf1223051e3abfb13acbf8ea16e0e94bd"
+    },
+    {
+      "name": "bin/avcodec-62.dll",
+      "size": 90992128,
+      "sha256": "4f817870cfaeaced3e34a083c50a1b4be0389202d7fb821632d47cf9b3f4d82a"
+    },
+    {
+      "name": "bin/avutil-60.dll",
+      "size": 3014144,
+      "sha256": "481620c7b5cd8e831a50762fae55699c821091e96c42226d04fee725a4aae2f5"
+    },
+    {
+      "name": "bin/swresample-6.dll",
+      "size": 734720,
+      "sha256": "3baad8ac0c8f0050cfd5742f5104603a27127397521409bf7d1742e6d02f955b"
+    },
+    {
+      "name": "bin/avfilter-11.dll",
+      "size": 31212544,
+      "sha256": "28e202431dc0643af97c307dc6437da13f8c08aa016fc28d1f9ec8fd0336e172"
+    },
+    {
+      "name": "bin/avformat-62.dll",
+      "size": 22722560,
+      "sha256": "bcf514a394dc5ec43fe64e4f1624ba63b23e9c25967081ea2d03d95b0dc359ef"
+    }
+  ],
+  "licenses": [
+    {
+      "name": "FFmpeg-LGPL-3.0.txt",
+      "sha256": "da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768",
+      "source_url": "https://github.com/BtbN/FFmpeg-Builds/releases/tag/autobuild-2026-09-30-13-08 (LICENSE.txt in pinned archive)"
+    },
+    {
+      "name": "FFmpeg-GPL-3.0.txt",
+      "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903",
+      "source_url": "https://github.com/FFmpeg/FFmpeg/blob/29e619e767cde9045a75c29bc9a8278ae7b3a98b/COPYING.GPLv3"
+    }
+  ]
+}

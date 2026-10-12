@@ -32,7 +32,7 @@ def save_animation(path, *, durations=(100, 300), size=(80, 40), kind="GIF"):
 
 def save_video(folder, kind):
     options = {
-        "mp4": ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-f", "mp4"],
+        "mp4": ["-c:v", "mpeg4", "-pix_fmt", "yuv420p", "-f", "mp4"],
         "webm": ["-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-lossless", "1", "-auto-alt-ref", "0", "-f", "webm"],
         "mov": ["-c:v", "qtrle", "-pix_fmt", "argb", "-f", "mov"],
         "mkv": ["-c:v", "ffv1", "-pix_fmt", "bgra", "-f", "matroska"],
@@ -351,7 +351,7 @@ class EmoteMediaTests(unittest.TestCase):
             source = save_video(folder, "mp4")
             anamorphic = Path(folder) / "wide.mp4"
             subprocess.run([shutil.which("ffmpeg"), "-v", "error", "-nostdin", "-y", "-i", str(source),
-                            "-vf", "setsar=2", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(anamorphic)],
+                            "-vf", "setsar=2", "-c:v", "mpeg4", "-pix_fmt", "yuv420p", str(anamorphic)],
                            capture_output=True, check=True, timeout=20,
                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             frames, info = emote_media.adapt_video_source(anamorphic, self.reference, work_dir=folder)
@@ -371,7 +371,7 @@ class EmoteMediaTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             source = Path(folder) / "single-frame.mp4"
             subprocess.run([shutil.which("ffmpeg"), "-v", "error", "-nostdin", "-y", "-f", "lavfi",
-                            "-i", "color=c=red:s=96x64:r=30", "-frames:v", "1", "-c:v", "libx264",
+                            "-i", "color=c=red:s=96x64:r=30", "-frames:v", "1", "-c:v", "mpeg4",
                             "-pix_fmt", "yuv420p", str(source)], capture_output=True, check=True, timeout=20,
                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             before = source.read_bytes()
