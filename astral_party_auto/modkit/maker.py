@@ -35,6 +35,14 @@ def _write_bundle_atomic(out: Path, payload: bytes) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def read_static_image(image_path: str | Path) -> Image.Image:
+    """普通贴图只接收单帧图片，避免把动画悄悄截成第一帧。"""
+    with Image.open(image_path) as source:
+        if getattr(source, "n_frames", 1) > 1:
+            raise ValueError("普通贴图不会播放多帧图片。请使用动画制作；角色表情请使用动态表情视频功能。")
+        return source.convert("RGBA")
+
+
 def replace_bundle_texture(
     src_bundle: str | Path,
     image_path: str | Path,
@@ -44,8 +52,8 @@ def replace_bundle_texture(
     crop_box: tuple[int, int, int, int] | None = None,
 ) -> str:
     """替换贴图。crop_box 为源图 (l,t,r,b) 像素裁剪，先裁再缩放。"""
+    new_image = read_static_image(image_path)
     env = _load_bundle(src_bundle)
-    new_image = Image.open(image_path).convert("RGBA")
     obj = data = image = None
     try:
         if crop_box:

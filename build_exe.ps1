@@ -1,7 +1,8 @@
 # Build windowed exe without removing previous builds or stopping running apps.
 param(
   [string]$Destination,
-  [switch]$SkipDependencyInstall
+  [switch]$SkipDependencyInstall,
+  [switch]$ReuseNativeHost
 )
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
@@ -25,8 +26,15 @@ if (-not $SkipDependencyInstall) {
 }
 
 Write-Host "==> native web host"
-dotnet publish .\native_host\JiXingModHelperHost.csproj -c Release -r win-x64 --self-contained true --output .\native_host\publish
-if ($LASTEXITCODE -ne 0) { throw "Native web host build failed" }
+if ($ReuseNativeHost) {
+  if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'native_host\publish\JiXingModHelperHost.exe'))) {
+    throw 'No existing native host is available. Build it before using -ReuseNativeHost.'
+  }
+  Write-Host 'Using existing native host. Verify its source and contents before local packaging.'
+} else {
+  dotnet publish .\native_host\JiXingModHelperHost.csproj -c Release -r win-x64 --self-contained true --output .\native_host\publish
+  if ($LASTEXITCODE -ne 0) { throw "Native web host build failed" }
+}
 
 Write-Host "==> pyinstaller"
 python -m PyInstaller --distpath $outputRoot --workpath $buildPath build_exe.spec

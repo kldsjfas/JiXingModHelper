@@ -99,6 +99,7 @@ class ModController:
         self.draft_name: str = "我的Mod套装"
         # 当前在「浏览」里选中的资源，供「制作」页使用
         self.selection: dict | None = None
+        self._emote_workspace = None
         # 角色标注：bundle 级 + 资源级覆盖
         self._bundle_labels: dict[str, str] = {}
         self._resource_labels: dict[str, dict[str, str]] = {}
@@ -199,6 +200,7 @@ class ModController:
 
         source_key = bundle_source_key(self.aa_dirs) if self.aa_dirs else ""
         if source_key != self._index_source_key:
+            self.selection = None
             if self.aa_dirs:
                 self.typed_index = load_asset_index(INDEX_CACHE, self.aa_dirs)
             else:
@@ -605,6 +607,16 @@ class ModController:
             return backup
         return self.bundle_path(bundle_name)
 
+    @property
+    def emote_workspace(self):
+        if self._emote_workspace is None:
+            from .modkit.emote_workspace import EmoteWorkspace
+            self._emote_workspace = EmoteWorkspace(self, DATA_DIR, DRAFT_META)
+        return self._emote_workspace
+
+    def add_emote_to_draft(self, video_name: str, replacement_path: Path | None = None) -> dict:
+        return self.emote_workspace.save(video_name, replacement_path)
+
     def set_selection(
         self,
         bundle_name: str,
@@ -640,6 +652,8 @@ class ModController:
                 "category_desc": category_desc(cat),
                 "caption": describe_selection(info.name, info.width, info.height),
             }
+            if cat == "emoji":
+                self.selection["emote"] = self.emote_workspace.selection(info.name)
             return self.selection
 
         if asset_type == "text":
@@ -1393,9 +1407,13 @@ class ModController:
         if not (0 <= index < len(self.draft_items)):
             raise RuntimeError("作品集项不存在。")
         item = self.draft_items[index]
+        if item.get("kind") == "emote":
+            self.emote_workspace.remove(index)
+            return
         bundle_name = item.get("bundle")
         remaining = [entry for item_index, entry in enumerate(self.draft_items) if item_index != index]
-        same_bundle = [entry for entry in remaining if entry.get("bundle") == bundle_name]
+        from .modkit.emote_workspace import item_bundle_names
+        same_bundle = [entry for entry in remaining if bundle_name in item_bundle_names(entry)]
         draft_dir = self._draft_dir()
         draft_bundle = draft_dir / str(bundle_name)
 
@@ -1408,7 +1426,7 @@ class ModController:
             draft_bundle.unlink(missing_ok=True)
 
         self.draft_items = remaining
-        active_bundles = {str(entry.get("bundle")) for entry in remaining if entry.get("bundle")}
+        active_bundles = set().union(*(item_bundle_names(entry) for entry in remaining)) if remaining else set()
         for bundle_path in draft_dir.glob("*.bundle"):
             if bundle_path.name not in active_bundles:
                 bundle_path.unlink(missing_ok=True)

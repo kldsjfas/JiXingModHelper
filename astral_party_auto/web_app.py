@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import hmac
+import hashlib
 import json
 import mimetypes
 import os
@@ -91,6 +92,7 @@ class DesktopApi:
         self._animation_cache: dict[tuple, dict] = {}
         self._pending_mod_path: Path | None = None
         self._replacement_path: Path | None = None
+        self._emote_replacement: dict | None = None
         self._draft_crop_path: Path | None = None
         self._draft_crop_index: int | None = None
         self._draft_crop_item: dict | None = None
@@ -346,6 +348,8 @@ class DesktopApi:
 
     @exposed
     def refresh_detection(self) -> dict:
+        self._emote_replacement = None
+        self._replacement_path = None
         self.controller.refresh_detection()
         if self.controller.has_game:
             self._append_log(f"已刷新游戏检测：{self.controller.game_exe_display()}")
@@ -692,6 +696,7 @@ class DesktopApi:
     @exposed
     def select_asset(self, asset_type: str, bundle: str, name: str, force: bool = False) -> dict:
         self._replacement_path = None
+        self._emote_replacement = None
         selection = self.controller.set_selection(
             bundle,
             name,
@@ -702,6 +707,7 @@ class DesktopApi:
 
     @exposed
     def refresh_selection(self) -> dict | None:
+        self._emote_replacement = None
         if not self.controller.selection:
             return None
         sel = self.controller.selection
@@ -716,6 +722,59 @@ class DesktopApi:
     @exposed
     def get_studio_state(self) -> dict | None:
         return self._selection_payload(full_text=True)
+
+    def _emote_selection_key(self) -> tuple:
+        selection = self.controller.selection or {}
+        return (getattr(self.controller, "_index_source_key", ""), selection.get("original_path"),
+                selection.get("asset_type"), selection.get("bundle"), selection.get("name"))
+
+    @exposed
+    def choose_emote_file(self, video_name: str) -> dict | None:
+        self._emote_replacement = None
+        self.controller.emote_workspace._selected_id()
+        selection_key = self._emote_selection_key()
+        _, original = self.controller.emote_workspace.video_bundle(video_name)
+        path = self._pick_path("open", file_types=("透明表情视频 (*.usm)", "所有文件 (*.*)"))
+        if path is None:
+            return None
+        from .modkit.cri_emote import validate_usm_file
+        information = validate_usm_file(path, original, video_name)
+        if selection_key != self._emote_selection_key():
+            raise ValueError("表情已经变化，请重新选择 USM 文件。")
+        self._emote_replacement = {"path": path, "video_name": video_name,
+                                   "selection": selection_key, "sha256": information["sha256"]}
+        return {"path": str(path), "name": path.name, "size": information["size"], "video_info": information}
+
+    @exposed
+    def save_emote(self, video_name: str, use_custom: bool = False) -> dict:
+        candidate = self._emote_replacement
+        self._emote_replacement = None
+        if not isinstance(use_custom, bool):
+            raise ValueError("表情导入模式不合法。")
+        replacement = None
+        if use_custom:
+            if not candidate or candidate["selection"] != self._emote_selection_key() or candidate["video_name"] != video_name:
+                raise ValueError("表情或视频槽位已经变化，请重新选择 USM 文件。")
+            replacement = candidate["path"]
+            if not replacement.is_file() or replacement.stat().st_size > 64 * 1024 * 1024:
+                raise ValueError("表情视频不存在或已超过 64 MB，请重新选择。")
+            with replacement.open("rb") as stream:
+                digest = hashlib.file_digest(stream, "sha256").hexdigest()
+            if digest != candidate["sha256"]:
+                raise ValueError("表情视频内容已变化，请重新选择文件。")
+        item = self.controller.add_emote_to_draft(video_name, replacement)
+        return {"item": item, "draft": self._draft_state()}
+
+    @exposed
+    def export_emote_video(self, video_name: str) -> dict | None:
+        self.controller.emote_workspace._selected_id()
+        _, original = self.controller.emote_workspace.video_bundle(video_name)
+        path = self._pick_path("save", file_types=("表情视频 (*.usm)",), save_filename=f"{video_name}.usm")
+        if path is None:
+            return None
+        from .modkit.cri_emote import export_cri_emote_bundle
+        output = export_cri_emote_bundle(original, video_name, path)
+        return {"path": str(output), "name": output.name, "size": output.stat().st_size}
 
     @exposed
     def export_selection(self, variant: str = "primary") -> dict | None:
@@ -788,6 +847,10 @@ class DesktopApi:
             animation = read_adapted_replacement(source, selection["name"], path, kind=selection["animation_kind"])
         elif asset_type == "anim":
             animation = self._clip_candidate_preview(selection, path)
+        elif asset_type == "texture":
+            from .modkit.maker import read_static_image
+            with read_static_image(path):
+                pass
         preview_data = ""
         if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
             preview_data = self._image_data(path)
@@ -808,7 +871,9 @@ class DesktopApi:
         from PIL import Image
 
         box = tuple(int(v) for v in crop_box)
-        cropped = Image.open(self._replacement_path).convert("RGBA").crop(box)
+        from .modkit.maker import read_static_image
+        with read_static_image(self._replacement_path) as source:
+            cropped = source.crop(box)
         out = DATA_DIR / "crop_preview.png"
         out.parent.mkdir(parents=True, exist_ok=True)
         cropped.save(out)
@@ -894,7 +959,15 @@ class DesktopApi:
         modified = self.controller._draft_dir() / item["bundle"]
         if original is None or not modified.exists():
             raise RuntimeError("找不到原资源或作品集文件。")
-        if item.get("kind") == "text":
+        if item.get("kind") == "emote":
+            source_bundle = item.get("source_bundle")
+            source = self.controller.original_bundle_path(source_bundle) if source_bundle else None
+            if source is not None:
+                image, _ = self.controller.preview_bundle(source, item["name"], tag="emote-cover")
+                result["original_data"] = result["modified_data"] = self._image_data(image)
+            result["emote_info"] = {"video_name": item["video_name"], "custom_video": item.get("custom_video", False),
+                                    "preview_notice": "这里只显示原表情封面，不是视频播放预览。安装后由游戏的原生播放器播放。"}
+        elif item.get("kind") == "text":
             result["original_text"] = self.controller.read_text(original, item["name"])
             result["modified_text"] = self.controller.read_text(modified, item["name"])
         elif item.get("kind") in ("dynamic", "anim") or item.get("from_anim"):
@@ -922,6 +995,11 @@ class DesktopApi:
 
     @exposed
     def replace_draft_image(self, index: int) -> dict | None:
+        index = int(index)
+        if not (0 <= index < len(self.controller.draft_items)):
+            raise RuntimeError("作品集项不存在。")
+        if self.controller.draft_items[index].get("kind") == "emote":
+            raise RuntimeError("动态表情请在制作页更换视频，不能通过普通换图修改。")
         path = self._pick_path(
             "open",
             file_types=("图片 (*.png;*.jpg;*.jpeg;*.webp;*.bmp)", "所有文件 (*.*)"),
@@ -943,6 +1021,8 @@ class DesktopApi:
         index = int(index)
         if not (0 <= index < len(self.controller.draft_items)):
             raise RuntimeError("作品集项不存在。")
+        if self.controller.draft_items[index].get("kind") == "emote":
+            raise RuntimeError("动态表情请在制作页更换视频，不能通过普通裁剪修改。")
         if self.controller.draft_items[index].get("from_anim"):
             raise RuntimeError("动画完整图集不能裁剪，请保留原图集尺寸和布局。")
         path = self._pick_path(
@@ -961,10 +1041,9 @@ class DesktopApi:
                     target_w, target_h = info.width, info.height
             except Exception:
                 pass
-        from PIL import Image
-
-        with Image.open(path) as image:
-            image.verify()
+        from .modkit.maker import read_static_image
+        with read_static_image(path):
+            pass
         preview = self._image_data(path)
         self._draft_crop_path = path
         self._draft_crop_index = index
@@ -995,6 +1074,8 @@ class DesktopApi:
             raise RuntimeError("作品集项不存在。")
         if self.controller.draft_items[index] != expected_item:
             raise RuntimeError("作品集已变化，请重新选择要裁剪的项目和图片。")
+        if self.controller.draft_items[index].get("kind") == "emote":
+            raise RuntimeError("动态表情请在制作页更换视频，不能通过普通裁剪修改。")
         if self.controller.draft_items[index].get("from_anim"):
             raise RuntimeError("动画完整图集不能裁剪，请保留原图集尺寸和布局。")
         box = tuple(int(v) for v in crop_box) if crop_box else None

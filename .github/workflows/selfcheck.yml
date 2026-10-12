@@ -61,3 +61,5 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tests/test_frontend_regressions.js
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tests/test_emote_ui.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

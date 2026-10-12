@@ -14,7 +14,7 @@
         <img class="brand-logo" src="app_icon.png" alt="">
         <div class="brand-copy">
           <strong>吉星派对</strong>
-          <span>Mod 助手 · 1.3.0</span>
+          <span>Mod 助手</span>
         </div>
       </div>
 
@@ -226,6 +226,22 @@
               <label id="sequence-fps-label">预览帧率 <input id="sequence-fps" type="number" min="1" max="120" value="30"> 帧/秒</label>
               <span id="animation-guidance"></span>
             </div>
+            <article id="emote-settings" class="card emote-settings is-hidden">
+              <h3>静态表情 → 原生动态表情</h3>
+              <p id="emote-current" class="editor-status"></p>
+              <label for="emote-video">动态视频槽位</label>
+              <select id="emote-video" aria-describedby="emote-guidance emote-shared"><option value="">请选择一个原生动态表情</option></select>
+              <p id="emote-guidance">选现有动态表情：仅修改这个表情的播放地址。导入 USM：会同时替换所选视频原本绑定的表情。</p>
+              <p id="emote-shared" class="notice" role="status"></p>
+              <p id="emote-reason" class="editor-status" role="status"></p>
+              <p id="emote-file-status" class="editor-status" role="status"></p>
+              <p>本页封面不是视频预览。暂不支持在工具内播放 USM，也不能把 GIF 直接转换成游戏动态表情。保存只更新作品集，手动安装后在游戏中查看效果。</p>
+              <div class="action-row">
+                <button id="emote-export" class="button ghost" disabled>导出所选原 USM</button>
+                <button id="emote-import" class="button ghost" disabled>导入兼容 USM…</button>
+                <button id="emote-save" class="button primary" disabled>保存动态表情</button>
+              </div>
+            </article>
             <p id="studio-notice" class="notice is-hidden" role="status"></p>
             <div class="action-row studio-actions">
               <button class="button ghost" data-page-link="browse">← 回浏览</button>
@@ -251,6 +267,7 @@
                 <div><h3>游戏原内容</h3><div id="draft-original" class="preview-media tall"></div></div>
                 <div><h3>替换后</h3><div id="draft-modified" class="preview-media tall"></div></div>
               </div>
+              <p id="draft-mode-notice" class="notice is-hidden" role="status"></p>
               <div class="action-row">
                 <button id="draft-replace" class="button primary" disabled>换图并保存…</button>
                 <button id="draft-crop" class="button ghost" disabled>裁剪并保存…</button>
