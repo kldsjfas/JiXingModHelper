@@ -34,21 +34,14 @@ class EmoteSetupTests(unittest.TestCase):
             }), encoding="utf-8")
             wrapper = root / "run.ps1"
             wrapper.write_text(
-                               "$utilityModule = Join-Path $PSHOME 'Modules\\Microsoft.PowerShell.Utility\\Microsoft.PowerShell.Utility.psd1'\n"
-                               "Import-Module -Name $utilityModule -Force -ErrorAction Stop\n"
-                               "$null = Get-Command Get-FileHash -ErrorAction Stop\n"
-                               + download_function + "\ntry {\n"
-                               "  & (Join-Path $PSScriptRoot 'fetch_ffmpeg.ps1')\n"
-                               "  throw 'Setup unexpectedly succeeded.'\n"
-                               "} catch {\n"
-                               f"  if ($_.Exception.Message -notmatch '{expected_error}') {{ throw }}\n"
-                               "}\n", encoding="utf-8")
-            # pwsh 的模块目录不能继承给 Windows PowerShell；Windows 环境键可能全大写。
-            environment = {key: value for key, value in os.environ.items()
-                           if key.casefold() != "psmodulepath"}
+                download_function + "\ntry {\n"
+                "  & (Join-Path $PSScriptRoot 'fetch_ffmpeg.ps1')\n"
+                "  throw 'Setup unexpectedly succeeded.'\n"
+                "} catch {\n"
+                f"  if ($_.Exception.Message -notmatch '{expected_error}') {{ throw }}\n"
+                "}\n", encoding="utf-8")
             process = subprocess.run([POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(wrapper)],
                                      capture_output=True, timeout=20,
-                                     env=environment,
                                      creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             self.assertEqual(process.returncode, 0, process.stderr.decode("utf-8", errors="replace"))
             self.assertEqual(hashlib.sha256(previous.read_bytes()).hexdigest(), previous_hash)

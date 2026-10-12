@@ -1,6 +1,8 @@
 param([string]$Destination = (Join-Path $PSScriptRoot 'ffmpeg'))
 
 $ErrorActionPreference = 'Stop'
+$utilityModule = Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1'
+Import-Module -Name $utilityModule -Force -ErrorAction Stop
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 Add-Type -AssemblyName System.IO.Compression.FileSystem
