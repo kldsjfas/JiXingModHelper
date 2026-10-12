@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import gc
+import hashlib
 import json
 import os
 from dataclasses import dataclass
@@ -365,7 +366,7 @@ def iter_bundle_files(aa_dirs: BundleDirectories) -> Iterable[Path]:
 
 
 def bundle_source_key(aa_dirs: BundleDirectories) -> str:
-    """生成轻量资源版本标识，用于自动丢弃过期索引。"""
+    """把官方版本标识与实际资源目录内容一起用于索引失效。"""
     parts = []
     for aa in _normalize_bundle_dirs(aa_dirs):
         catalog_path = _latest_catalog_path(aa)
@@ -378,7 +379,12 @@ def bundle_source_key(aa_dirs: BundleDirectories) -> str:
                     catalog_hash = str(catalog_path.stat().st_mtime_ns)
                 except OSError:
                     catalog_hash = "missing"
-            parts.append(f"cache|{aa}|{catalog_path.name}|{catalog_hash}")
+            try:
+                with catalog_path.open("rb") as catalog_file:
+                    content_hash = hashlib.file_digest(catalog_file, "sha256").hexdigest()
+            except OSError:
+                content_hash = "missing"
+            parts.append(f"cache|{aa}|{catalog_path.name}|{catalog_hash}|{content_hash}")
             continue
         try:
             directory_stamp = aa.stat().st_mtime_ns

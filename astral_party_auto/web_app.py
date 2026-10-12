@@ -93,6 +93,8 @@ class DesktopApi:
         self._pending_mod_path: Path | None = None
         self._replacement_path: Path | None = None
         self._emote_replacement: dict | None = None
+        self._emote_candidate_dir = None
+        self._emote_preview_cache: dict[tuple, dict] = {}
         self._draft_crop_path: Path | None = None
         self._draft_crop_index: int | None = None
         self._draft_crop_item: dict | None = None
@@ -348,7 +350,7 @@ class DesktopApi:
 
     @exposed
     def refresh_detection(self) -> dict:
-        self._emote_replacement = None
+        self._clear_emote_candidate()
         self._replacement_path = None
         self.controller.refresh_detection()
         if self.controller.has_game:
@@ -696,7 +698,7 @@ class DesktopApi:
     @exposed
     def select_asset(self, asset_type: str, bundle: str, name: str, force: bool = False) -> dict:
         self._replacement_path = None
-        self._emote_replacement = None
+        self._clear_emote_candidate()
         selection = self.controller.set_selection(
             bundle,
             name,
@@ -707,7 +709,7 @@ class DesktopApi:
 
     @exposed
     def refresh_selection(self) -> dict | None:
-        self._emote_replacement = None
+        self._clear_emote_candidate()
         if not self.controller.selection:
             return None
         sel = self.controller.selection
@@ -728,42 +730,139 @@ class DesktopApi:
         return (getattr(self.controller, "_index_source_key", ""), selection.get("original_path"),
                 selection.get("asset_type"), selection.get("bundle"), selection.get("name"))
 
+    def _clear_emote_candidate(self) -> None:
+        """只清理由本会话创建的转码目录，用户选入的原文件始终保留。"""
+        self._emote_replacement = None
+        folder = getattr(self, "_emote_candidate_dir", None)
+        self._emote_candidate_dir = None
+        if folder is not None:
+            try:
+                folder.cleanup()
+            except OSError as exc:
+                self._append_log(f"转码缓存暂时无法清理：{folder.name}（{exc}）")
+
+    @staticmethod
+    def _emote_file_hash(path: Path, max_bytes: int = 64 * 1024 * 1024) -> str:
+        if not path.is_file() or path.stat().st_size > max_bytes:
+            raise ValueError(f"表情素材不存在或已超过 {max_bytes // (1024 * 1024)} MB，请重新选择。")
+        with path.open("rb") as stream:
+            return hashlib.file_digest(stream, "sha256").hexdigest()
+
+    def _emote_video_preview(self, video_name: str, variant: str = "original") -> dict:
+        if variant not in ("original", "draft"):
+            raise ValueError("请选择原表情或已保存的表情预览。")
+        independent = next((item for item in self.controller.draft_items
+                            if item.get("kind") == "emote" and item.get("independent_video")
+                            and item.get("video_name") == video_name), None)
+        if independent is not None:
+            if variant != "draft":
+                raise ValueError("独立表情只在作品集中存在，请查看已保存效果。")
+            from .modkit.emote_addressables import independent_emote_identity
+            identity = independent_emote_identity(independent["emote_id"])
+            if identity["video_name"] != video_name or independent.get("extra_bundles") != [identity["bundle_name"]]:
+                raise ValueError("独立表情的视频记录不完整，请重新制作。")
+            path = self.controller._draft_dir() / identity["bundle_name"]
+            if not path.is_file():
+                raise ValueError("已保存的独立动态表情视频缺失，请恢复草稿文件后重试。")
+        else:
+            bundle_name, original = self.controller.emote_workspace.video_bundle(video_name)
+            path = original
+        if variant == "draft" and independent is None:
+            draft = self.controller._draft_dir() / bundle_name
+            custom = any(item.get("kind") == "emote" and item.get("custom_video")
+                         and item.get("video_name") == video_name for item in self.controller.draft_items)
+            if custom and not draft.is_file():
+                raise ValueError("已保存的动态表情视频缺失，请恢复草稿文件后重试。")
+            if draft.is_file():
+                path = draft
+        stat = path.stat()
+        key = (getattr(self.controller, "_index_source_key", ""), str(path.resolve()),
+               stat.st_size, stat.st_mtime_ns, video_name, self._emote_file_hash(path, 128 * 1024 * 1024))
+        cache = getattr(self, "_emote_preview_cache", None)
+        if cache is None:
+            self._emote_preview_cache = cache = {}
+        if key not in cache:
+            from .modkit.emote_media import preview_emote_media
+            animation = preview_emote_media(path, video_name, work_dir=DATA_DIR / "emote-preview-work")
+            if not animation.get("frames"):
+                raise ValueError("动态表情没有解码出画面，请重新预览。")
+            if len(cache) >= 4:
+                cache.pop(next(iter(cache)))
+            cache[key] = animation
+        return deepcopy(cache[key])
+
+    @exposed
+    def get_emote_preview(self, video_name: str, variant: str = "original") -> dict:
+        self.controller.emote_workspace._selected_id()
+        return self._emote_video_preview(video_name, variant)
+
     @exposed
     def choose_emote_file(self, video_name: str) -> dict | None:
-        self._emote_replacement = None
+        self._clear_emote_candidate()
         self.controller.emote_workspace._selected_id()
         selection_key = self._emote_selection_key()
         _, original = self.controller.emote_workspace.video_bundle(video_name)
-        path = self._pick_path("open", file_types=("透明表情视频 (*.usm)", "所有文件 (*.*)"))
+        path = self._pick_path("open", file_types=(
+            "动图或视频 (*.gif;*.apng;*.png;*.webp;*.mp4;*.webm;*.mov;*.mkv;*.avi;*.usm)",
+            "所有文件 (*.*)"))
         if path is None:
             return None
-        from .modkit.cri_emote import validate_usm_file
-        information = validate_usm_file(path, original, video_name)
         if selection_key != self._emote_selection_key():
-            raise ValueError("表情已经变化，请重新选择 USM 文件。")
-        self._emote_replacement = {"path": path, "video_name": video_name,
-                                   "selection": selection_key, "sha256": information["sha256"]}
-        return {"path": str(path), "name": path.name, "size": information["size"], "video_info": information}
+            raise ValueError("表情已经变化，请重新选择素材。")
+        path = Path(path)
+        source_hash = self._emote_file_hash(path)
+        reference_hash = self._emote_file_hash(original, 128 * 1024 * 1024)
+        parent = DATA_DIR / "emote-candidates"
+        parent.mkdir(parents=True, exist_ok=True)
+        self._emote_candidate_dir = tempfile.TemporaryDirectory(prefix="import-", dir=parent)
+        folder = Path(self._emote_candidate_dir.name)
+        try:
+            from .modkit.emote_media import prepare_emote_media
+            output = folder / path.with_suffix(".usm").name
+            prepared = prepare_emote_media(path, original, video_name, output, work_dir=folder)
+            if selection_key != self._emote_selection_key():
+                raise ValueError("表情已经变化，请重新选择素材。")
+            if source_hash != self._emote_file_hash(path) or reference_hash != self._emote_file_hash(original, 128 * 1024 * 1024):
+                raise ValueError("转换期间素材或原表情发生变化，请重新选择。")
+            converted = Path(prepared["path"])
+            self._emote_replacement = {"path": converted, "video_name": video_name,
+                                       "independent": True,
+                                       "selection": selection_key, "sha256": self._emote_file_hash(converted),
+                                       "source_path": path, "source_sha256": source_hash,
+                                       "reference_path": original, "reference_sha256": reference_hash}
+            return {**prepared, "name": path.name, "source_name": path.name, "independent": True,
+                    "video_name": video_name}
+        except Exception:
+            self._clear_emote_candidate()
+            raise
 
     @exposed
     def save_emote(self, video_name: str, use_custom: bool = False) -> dict:
         candidate = self._emote_replacement
         self._emote_replacement = None
-        if not isinstance(use_custom, bool):
-            raise ValueError("表情导入模式不合法。")
-        replacement = None
-        if use_custom:
-            if not candidate or candidate["selection"] != self._emote_selection_key() or candidate["video_name"] != video_name:
-                raise ValueError("表情或视频槽位已经变化，请重新选择 USM 文件。")
-            replacement = candidate["path"]
-            if not replacement.is_file() or replacement.stat().st_size > 64 * 1024 * 1024:
-                raise ValueError("表情视频不存在或已超过 64 MB，请重新选择。")
-            with replacement.open("rb") as stream:
-                digest = hashlib.file_digest(stream, "sha256").hexdigest()
-            if digest != candidate["sha256"]:
-                raise ValueError("表情视频内容已变化，请重新选择文件。")
-        item = self.controller.add_emote_to_draft(video_name, replacement)
-        return {"item": item, "draft": self._draft_state()}
+        try:
+            if not isinstance(use_custom, bool):
+                raise ValueError("表情导入模式不合法。")
+            replacement = None
+            if use_custom:
+                if not candidate or candidate["selection"] != self._emote_selection_key() or candidate["video_name"] != video_name:
+                    raise ValueError("表情或所选动图已经变化，请重新选择素材。")
+                replacement = candidate["path"]
+                if self._emote_file_hash(replacement) != candidate["sha256"]:
+                    raise ValueError("转换成品内容已变化，请重新选择素材。")
+                for label in ("source", "reference"):
+                    source_path = candidate.get(f"{label}_path")
+                    max_bytes = (128 if label == "reference" else 64) * 1024 * 1024
+                    if source_path is not None and self._emote_file_hash(source_path, max_bytes) != candidate[f"{label}_sha256"]:
+                        raise ValueError("素材或原表情内容已变化，请重新选择素材。")
+            if use_custom:
+                item = self.controller.add_emote_to_draft(video_name, replacement, independent=True)
+            else:
+                item = self.controller.add_emote_to_draft(video_name, replacement)
+            self._emote_preview_cache = {}
+            return {"item": item, "draft": self._draft_state()}
+        finally:
+            self._clear_emote_candidate()
 
     @exposed
     def export_emote_video(self, video_name: str) -> dict | None:
@@ -965,8 +1064,23 @@ class DesktopApi:
             if source is not None:
                 image, _ = self.controller.preview_bundle(source, item["name"], tag="emote-cover")
                 result["original_data"] = result["modified_data"] = self._image_data(image)
-            result["emote_info"] = {"video_name": item["video_name"], "custom_video": item.get("custom_video", False),
-                                    "preview_notice": "这里只显示原表情封面，不是视频播放预览。安装后由游戏的原生播放器播放。"}
+            from .modkit.emote_labels import video_label, emote_label
+            try:
+                result["emote_animation"] = self._emote_video_preview(item["video_name"], "draft")
+            except (ValueError, OSError) as exc:
+                result["emote_animation"] = {"frames": [], "notice": f"动图预览失败：{exc}；可返回制作页重新预览。"}
+            records = self.controller.emote_workspace.context()["records"]
+            original_name = next((row["video_name"] for row in records if row["emote_id"] == item.get("emote_id")), "")
+            if original_name:
+                try:
+                    result["emote_original_animation"] = self._emote_video_preview(original_name, "original")
+                except (ValueError, OSError) as exc:
+                    result["emote_original_animation"] = {"frames": [], "notice": f"原动图预览失败：{exc}"}
+            label = f"{emote_label(item['emote_id'])} · 自定义动图" if item.get("independent_video") else video_label(item["video_name"])
+            result["emote_info"] = {"video_name": item["video_name"], "video_label": label,
+                                    "independent_video": item.get("independent_video", False),
+                                    "custom_video": item.get("custom_video", False),
+                                    "preview_notice": result["emote_animation"].get("notice", "")}
         elif item.get("kind") == "text":
             result["original_text"] = self.controller.read_text(original, item["name"])
             result["modified_text"] = self.controller.read_text(modified, item["name"])

@@ -197,9 +197,36 @@
           <div id="studio-empty" class="empty-state"><strong>还没选资源</strong><span>先到“浏览资源”选择一项。</span><button class="button ghost" data-page-link="browse">去浏览资源</button></div>
           <div id="studio-content" class="is-hidden">
             <article class="selection-banner"><span class="eyebrow">当前资源</span><h2 id="studio-title"></h2><p id="studio-description"></p></article>
+            <article id="emote-settings" class="card emote-settings is-hidden">
+              <h3>自定义动态表情</h3>
+              <p id="emote-current" class="editor-status"></p>
+              <p id="emote-guidance">直接导入动图或视频，让当前表情动起来。自动识别并转换 GIF、APNG、WebP、MP4、WebM 等；普通视频背景会保留，不会自动抠图。</p>
+              <div class="compare-grid emote-compare">
+                <div><h4>当前表情原版</h4><div id="emote-original" class="preview-media tall"></div></div>
+                <div><h4>你的动态效果</h4><div id="emote-replacement" class="preview-media tall"></div></div>
+              </div>
+              <p id="emote-shared" class="notice" role="status"></p>
+              <p id="emote-reason" class="editor-status" role="status"></p>
+              <p id="emote-file-status" class="editor-status" role="status"></p>
+              <p>替换预览会读取转换后的实际动图，保存后再从作品集重新读取。保存不会直接安装，准备好后再手动安装到游戏。</p>
+              <div class="action-row">
+                <button id="emote-import" class="button ghost" disabled>导入动图或视频…</button>
+                <button id="emote-save" class="button primary" disabled>保存动态表情</button>
+              </div>
+              <details id="emote-native-options" class="emote-native-options">
+                <summary>也可使用游戏已有动图</summary>
+                <div class="emote-native-controls">
+                  <label for="emote-video">选择要使用的游戏动图</label>
+                  <select id="emote-video" aria-describedby="emote-shared"><option value="">可选：使用游戏已有动图</option></select>
+                  <p>保存后只让当前表情使用这个动图。</p>
+                  <button id="emote-export" class="button ghost compact" disabled>导出这个游戏动图</button>
+                  <details id="emote-shared-details" class="emote-details is-hidden"><summary>查看使用这个动图的表情</summary><p id="emote-shared-ids"></p></details>
+                </div>
+              </details>
+            </article>
             <div id="studio-image-mode" class="compare-grid">
-              <article class="card preview-card"><h3>游戏原内容</h3><div id="studio-original" class="preview-media tall"></div></article>
-              <article class="card preview-card"><h3>你的替换文件</h3><div id="studio-replacement" class="preview-media tall"><span>点击下方按钮选择文件</span></div></article>
+              <article class="card preview-card"><h3 id="studio-original-heading">游戏原内容</h3><div id="studio-original" class="preview-media tall"></div></article>
+              <article class="card preview-card"><h3 id="studio-replacement-heading">你的替换文件</h3><div id="studio-replacement" class="preview-media tall"><span>点击下方按钮选择文件</span></div></article>
             </div>
             <article id="studio-text-mode" class="card is-hidden">
               <div class="section-heading"><h3>文字对照编辑</h3><span id="text-format" class="count-badge"></span></div>
@@ -226,22 +253,6 @@
               <label id="sequence-fps-label">预览帧率 <input id="sequence-fps" type="number" min="1" max="120" value="30"> 帧/秒</label>
               <span id="animation-guidance"></span>
             </div>
-            <article id="emote-settings" class="card emote-settings is-hidden">
-              <h3>静态表情 → 原生动态表情</h3>
-              <p id="emote-current" class="editor-status"></p>
-              <label for="emote-video">动态视频槽位</label>
-              <select id="emote-video" aria-describedby="emote-guidance emote-shared"><option value="">请选择一个原生动态表情</option></select>
-              <p id="emote-guidance">选现有动态表情：仅修改这个表情的播放地址。导入 USM：会同时替换所选视频原本绑定的表情。</p>
-              <p id="emote-shared" class="notice" role="status"></p>
-              <p id="emote-reason" class="editor-status" role="status"></p>
-              <p id="emote-file-status" class="editor-status" role="status"></p>
-              <p>本页封面不是视频预览。暂不支持在工具内播放 USM，也不能把 GIF 直接转换成游戏动态表情。保存只更新作品集，手动安装后在游戏中查看效果。</p>
-              <div class="action-row">
-                <button id="emote-export" class="button ghost" disabled>导出所选原 USM</button>
-                <button id="emote-import" class="button ghost" disabled>导入兼容 USM…</button>
-                <button id="emote-save" class="button primary" disabled>保存动态表情</button>
-              </div>
-            </article>
             <p id="studio-notice" class="notice is-hidden" role="status"></p>
             <div class="action-row studio-actions">
               <button class="button ghost" data-page-link="browse">← 回浏览</button>

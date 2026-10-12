@@ -45,6 +45,8 @@ class EmoteApiTests(unittest.TestCase):
         self.api._append_log = Mock()
         self.api._replacement_path = None
         self.api._emote_replacement = None
+        self.api._emote_candidate_dir = None
+        self.api._emote_preview_cache = {}
         self.api._draft_crop_path = None
         self.api._draft_crop_index = None
         self.api._draft_crop_item = None
@@ -56,6 +58,15 @@ class EmoteApiTests(unittest.TestCase):
             "astral_party_auto.modkit.cri_emote.validate_usm_file", side_effect=self.video_info))
         self.exporter = self.enterContext(patch(
             "astral_party_auto.modkit.cri_emote.export_cri_emote_bundle", side_effect=self.export_video))
+        self.enterContext(patch("astral_party_auto.web_app.DATA_DIR", self.root / "data"))
+        self.preparer = self.enterContext(patch(
+            "astral_party_auto.modkit.emote_media.prepare_emote_media", side_effect=self.prepare_media))
+        self.animation = {"frames": ["data:image/png;base64,frame-a", "data:image/png;base64,frame-b"],
+                          "durations": [100, 100], "total": 2, "preview_available": True,
+                          "notice": "从成品双流实际解码。"}
+        self.previewer = self.enterContext(patch(
+            "astral_party_auto.modkit.emote_media.preview_emote_media", return_value=self.animation))
+        self.workspace.context.return_value = {"records": [{"emote_id": 101, "video_name": ""}]}
 
     def video_bundle(self, video_name):
         if not isinstance(video_name, str) or video_name not in ("VEmoji_A", "VEmoji_B"):
@@ -71,6 +82,13 @@ class EmoteApiTests(unittest.TestCase):
     def export_video(self, _source, _name, destination):
         Path(destination).write_bytes(b"isolated exported movie")
         return destination
+
+    def prepare_media(self, source, reference, name, output, **_options):
+        info = self.validator(source, reference, name)
+        Path(output).write_bytes(Path(source).read_bytes())
+        return {"path": str(output), "source_name": Path(source).name, "size": info["size"],
+                "video_info": {**info, "preview_available": True}, "animation": self.animation,
+                "notice": "已自动识别转换。"}
 
     def set_selection(self, bundle, name, *, asset_type, force=False):
         self.controller.selection = {"asset_type": asset_type, "bundle": bundle, "name": name}
@@ -116,10 +134,11 @@ class EmoteApiTests(unittest.TestCase):
 
     def test_import_returns_real_metadata_and_binds_selection_slot_hash(self):
         data = self.choose()
-        self.assertEqual(data["path"], str(self.movie))
+        self.assertNotEqual(data["path"], str(self.movie))
         self.assertEqual(data["name"], self.movie.name)
         self.assertEqual(data["size"], self.movie.stat().st_size)
-        self.assertFalse(data["video_info"]["preview_available"])
+        self.assertTrue(data["video_info"]["preview_available"])
+        self.assertEqual(data["animation"], self.animation)
         self.assertEqual(data["video_info"]["streams"][0]["codec_id"], 1)
         self.validator.assert_called_once_with(self.movie, self.original, "VEmoji_A")
         candidate = self.api._emote_replacement
@@ -188,10 +207,13 @@ class EmoteApiTests(unittest.TestCase):
         self.api._pick_path.assert_not_called()
 
     def test_custom_save_forwards_verified_path_and_consumes_candidate(self):
-        self.choose()
+        chosen = self.choose()
+        converted = Path(chosen["path"])
         result = self.api.save_emote("VEmoji_A", True)
         self.assertTrue(result["ok"], result.get("error"))
-        self.controller.add_emote_to_draft.assert_called_once_with("VEmoji_A", self.movie)
+        self.controller.add_emote_to_draft.assert_called_once_with("VEmoji_A", converted, independent=True)
+        self.assertFalse(converted.exists(), "owned candidate remains after save")
+        self.assertTrue(self.movie.is_file(), "user source was deleted")
         self.assertIsNone(self.api._emote_replacement)
         self.controller.add_emote_to_draft.reset_mock()
         self.assert_rejected_without_write(self.api.save_emote("VEmoji_A", True))
@@ -337,7 +359,7 @@ class EmoteApiTests(unittest.TestCase):
         saved = self.http_request("save_emote", ["VEmoji_A", True])
         self.assertEqual(saved["status"], 200)
         self.assertTrue(saved["data"]["ok"], saved["data"].get("error"))
-        self.controller.add_emote_to_draft.assert_called_once_with("VEmoji_A", self.movie)
+        self.controller.add_emote_to_draft.assert_called_once_with("VEmoji_A", Path(imported["data"]["data"]["path"]), independent=True)
         self.api._pick_path.return_value = self.destination
         exported = self.http_request("export_emote_video", ["VEmoji_A"])
         self.assertEqual(exported["status"], 200)
@@ -361,7 +383,7 @@ class EmoteApiTests(unittest.TestCase):
         self.api._image_data = Mock(return_value="data:image/png;base64,isolated-cover")
         self.api._animation_preview = Mock()
 
-    def test_emote_detail_returns_only_static_cover_and_explicit_preview_limit(self):
+    def test_emote_detail_returns_actual_animation_and_static_original_cover(self):
         self.prepare_detail()
         result = self.api.get_draft_detail(0)
         self.assertTrue(result["ok"], result.get("error"))
@@ -370,7 +392,8 @@ class EmoteApiTests(unittest.TestCase):
         self.assertEqual(data["original_data"], "data:image/png;base64,isolated-cover")
         self.assertEqual(data["emote_info"]["video_name"], "VEmoji_A")
         self.assertFalse(data["emote_info"]["custom_video"])
-        self.assertIn("不是视频播放预览", data["emote_info"]["preview_notice"])
+        self.assertEqual(data["emote_animation"], self.animation)
+        self.assertIn("实际解码", data["emote_info"]["preview_notice"])
         self.assertNotIn("original_animation", data)
         self.assertNotIn("modified_animation", data)
         self.api._animation_preview.assert_not_called()
@@ -378,14 +401,14 @@ class EmoteApiTests(unittest.TestCase):
         self.controller.preview_bundle.assert_called_once_with(
             self.root / "cover.bundle", self.item["name"], tag="emote-cover")
 
-    def test_emote_detail_without_source_cover_keeps_limit_and_no_fake_preview(self):
+    def test_emote_detail_without_source_cover_still_decodes_actual_animation(self):
         self.prepare_detail(source_available=False)
         result = self.api.get_draft_detail(0)
         self.assertTrue(result["ok"], result.get("error"))
         data = result["data"]
         self.assertEqual(data["original_data"], "")
         self.assertEqual(data["modified_data"], "")
-        self.assertIn("不是视频播放预览", data["emote_info"]["preview_notice"])
+        self.assertEqual(data["emote_animation"], self.animation)
         self.controller.preview_bundle.assert_not_called()
         self.api._animation_preview.assert_not_called()
 
@@ -396,6 +419,97 @@ class EmoteApiTests(unittest.TestCase):
         for invalid in (-1, 1):
             with self.subTest(index=invalid):
                 self.assertFalse(self.api.get_draft_detail(invalid)["ok"])
+
+    def test_preview_uses_original_and_saved_bundle_and_caches_separately(self):
+        self.controller._draft_dir.return_value = self.root / "draft"
+        first = self.api.get_emote_preview("VEmoji_A", "original")
+        self.assertTrue(first["ok"], first.get("error"))
+        self.api.get_emote_preview("VEmoji_A", "original")
+        self.previewer.assert_called_once()
+        draft = self.root / "draft" / "native-video.bundle"
+        draft.parent.mkdir()
+        draft.write_bytes(b"saved custom video")
+        self.controller.draft_items = [{**self.item, "custom_video": True}]
+        saved = self.api.get_emote_preview("VEmoji_A", "draft")
+        self.assertTrue(saved["ok"], saved.get("error"))
+        self.assertEqual(self.previewer.call_args.args, (draft, "VEmoji_A"))
+        saved["data"]["frames"].clear()
+        self.assertEqual(len(self.api.get_emote_preview("VEmoji_A", "draft")["data"]["frames"]), 2)
+
+    def test_custom_draft_missing_video_does_not_show_official_video_as_result(self):
+        self.controller._draft_dir.return_value = self.root / "missing-draft"
+        self.controller.draft_items = [{**self.item, "custom_video": True}]
+        result = self.api.get_emote_preview("VEmoji_A", "draft")
+        self.assertFalse(result["ok"])
+        self.assertIn("缺失", result["error"])
+        self.previewer.assert_not_called()
+
+    def test_preview_decode_failure_can_be_retried(self):
+        self.previewer.side_effect = [ValueError("坏视频"), self.animation]
+        self.assertFalse(self.api.get_emote_preview("VEmoji_A")["ok"])
+        self.assertTrue(self.api.get_emote_preview("VEmoji_A")["ok"])
+        self.assertEqual(self.previewer.call_count, 2)
+
+    def test_preview_cache_detects_changed_bytes_even_if_stat_is_unchanged(self):
+        self.previewer.side_effect = [self.animation, {**self.animation, "notice": "new video"}]
+        self.assertTrue(self.api.get_emote_preview("VEmoji_A")["ok"])
+        before = self.original.stat()
+        self.original.write_bytes(b"x" * before.st_size)
+        os.utime(self.original, ns=(before.st_atime_ns, before.st_mtime_ns))
+        result = self.api.get_emote_preview("VEmoji_A")
+        self.assertTrue(result["ok"], result.get("error"))
+        self.assertEqual(result["data"]["notice"], "new video")
+        self.assertEqual(self.previewer.call_count, 2)
+
+    def test_preview_rejects_invalid_choice_variant_or_selection(self):
+        for name, variant in (("unknown", "original"), ("VEmoji_A", "fake")):
+            self.assertFalse(self.api.get_emote_preview(name, variant)["ok"])
+        self.workspace._selected_id.side_effect = ValueError("请选择表情")
+        self.assertFalse(self.api.get_emote_preview("VEmoji_A")["ok"])
+        self.previewer.assert_not_called()
+
+    def test_owned_conversion_is_cleaned_on_cancel_switch_and_failure(self):
+        for action in ("cancel", "switch", "failure"):
+            with self.subTest(action=action):
+                self.controller.add_emote_to_draft.side_effect = None
+                self.api._pick_path.return_value = self.movie
+                chosen = self.choose()
+                output = Path(chosen["path"])
+                self.assertTrue(output.exists())
+                if action == "cancel":
+                    self.api._pick_path.return_value = None
+                    self.api.choose_emote_file("VEmoji_A")
+                elif action == "switch":
+                    self.api.refresh_selection()
+                else:
+                    self.controller.add_emote_to_draft.side_effect = OSError("save failed")
+                    self.api.save_emote("VEmoji_A", True)
+                self.assertFalse(output.parent.exists())
+                self.assertTrue(self.movie.exists())
+
+    def test_custom_save_checks_both_original_source_and_converted_bytes(self):
+        for changed in ("source", "converted", "reference"):
+            with self.subTest(changed=changed):
+                self.controller.add_emote_to_draft.reset_mock()
+                self.movie.write_bytes(b"isolated candidate")
+                self.original.write_bytes(b"fake original resource")
+                chosen = self.choose()
+                target = {"source": self.movie, "converted": Path(chosen["path"]), "reference": self.original}[changed]
+                before = target.stat()
+                target.write_bytes(b"z" * before.st_size)
+                os.utime(target, ns=(before.st_atime_ns, before.st_mtime_ns))
+                self.assert_rejected_without_write(self.api.save_emote("VEmoji_A", True))
+                self.assertFalse(Path(chosen["path"]).parent.exists())
+
+    def test_detail_previews_native_original_and_reports_decode_failure(self):
+        self.prepare_detail()
+        self.workspace.context.return_value = {"records": [{"emote_id": 101, "video_name": "VEmoji_B"}]}
+        self.previewer.side_effect = [ValueError("saved broken"), self.animation]
+        response = self.api.get_draft_detail(0)
+        self.assertTrue(response["ok"], response.get("error"))
+        self.assertEqual(response["data"]["emote_animation"]["frames"], [])
+        self.assertIn("预览失败", response["data"]["emote_info"]["preview_notice"])
+        self.assertEqual(response["data"]["emote_original_animation"], self.animation)
 
     def test_emote_draft_rejects_image_replacement_before_dialog(self):
         self.controller.draft_items = [self.item]

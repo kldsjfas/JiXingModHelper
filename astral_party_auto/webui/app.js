@@ -61,9 +61,20 @@
     migrationSource: null,
     replacement: null,
     emoteVideoName: "",
+    emoteDraftVideoName: "",
     emoteSelectionKey: "",
     emoteReplacement: null,
     emoteRequest: 0,
+    emotePreview: null,
+    emoteDraftPreview: null,
+    emotePreviewLoading: false,
+    emoteDraftLoading: false,
+    emotePreviewError: "",
+    emoteDraftError: "",
+    emoteImportError: "",
+    emotePreviewRequest: 0,
+    emoteOriginalRequest: 0,
+    emoteDraftRequest: 0,
     busy: false,
     modBundles: [],
     modBundleActive: "",
@@ -579,7 +590,9 @@ ${row.bundle}`;
     closeLightbox();
     state.replacement = null;
     resetEmoteReplacement();
+    resetEmotePreview();
     state.emoteVideoName = "";
+    state.emoteDraftVideoName = "";
     state.emoteSelectionKey = "";
     state.previewAnimation = null;
     state.previewLoading = false;
@@ -590,7 +603,7 @@ ${row.bundle}`;
       const sel = await call("select_asset", { busy: true, busyText: "加载预览…" }, state.assetType, bundle, name);
       if (request !== state.selectionRequest) return;
       state.selection = sel;
-      state.previewLoading = !!isPlayableAnimation(sel);
+      state.previewLoading = !!isPlayableAnimation(sel) || !!sel.emote?.video_name;
       renderPreview();
       renderResources();
       updateExportButtons();
@@ -601,7 +614,7 @@ ${row.bundle}`;
       $("#apply-resource-character").disabled = false;
       $("#apply-bundle-character").disabled = false;
       $("#refresh-resource").disabled = false;
-      if (isPlayableAnimation(sel)) await loadBrowseAnimation(sel, request);
+      if (isPlayableAnimation(sel) || sel.emote?.video_name) await loadBrowseAnimation(sel, request);
     } catch (_) {}
   }
 
@@ -612,7 +625,9 @@ ${row.bundle}`;
     state.previewError = "";
     if (state.page === "browse") renderPreview();
     try {
-      const animation = await call("get_animation_preview", { quiet: true }, selection.bundle, selection.name, "original", previewFps());
+      const animation = selection.emote?.video_name
+        ? await call("get_emote_preview", { quiet: true }, selection.emote.video_name, "original")
+        : await call("get_animation_preview", { quiet: true }, selection.bundle, selection.name, "original", previewFps());
       if (request !== state.previewRequest || selectionRequest !== state.selectionRequest || key !== selectionKey()) return;
       if (!animation?.frames?.length) throw new Error(animation?.notice || "没有可播放的帧");
       state.previewAnimation = animation;
@@ -651,10 +666,11 @@ ${row.bundle}`;
       updateMultiSelectUI();
       return;
     }
-    if (title) title.textContent = sel.caption || sel.name || "资源";
+    const emoteLabel = sel.emote?.choices?.find((choice) => choice.name === sel.emote.video_name)?.label;
+    if (title) title.textContent = sel.emote ? emoteLabel || "静态表情" : sel.caption || sel.name || "资源";
     if (desc) desc.textContent = sel.reason || sel.category_desc || "";
     if (media) {
-      if (isPlayableAnimation(sel)) {
+      if (isPlayableAnimation(sel) || sel.emote?.video_name) {
         if (state.previewLoading) renderAnimationState(media, "正在加载动画…");
         else if (state.previewError) renderAnimationState(media, `动画预览未加载：${state.previewError}`, () => loadBrowseAnimation(sel));
         else if (state.previewAnimation?.frames?.length) renderAnimation(media, state.previewAnimation, isSequenceAnimation(sel));
@@ -723,11 +739,34 @@ ${row.bundle}`;
 
   function resetEmoteReplacement() {
     state.emoteReplacement = null;
+    state.emoteImportError = "";
     state.emoteRequest += 1;
+    disposeAnimation("emote-replacement");
+  }
+
+  function resetEmotePreview() {
+    state.emotePreviewRequest += 1;
+    state.emoteOriginalRequest += 1;
+    state.emoteDraftRequest += 1;
+    state.emotePreview = null;
+    state.emoteDraftPreview = null;
+    state.emotePreviewLoading = false;
+    state.emoteDraftLoading = false;
+    state.emotePreviewError = "";
+    state.emoteDraftError = "";
+    disposeAnimation("emote-original");
+    disposeAnimation("emote-replacement");
   }
 
   function selectedEmoteVideo() {
     return state.selection?.emote?.choices?.find((choice) => choice.name === state.emoteVideoName) || null;
+  }
+
+  function emotePreviewName(variant) {
+    const emote = state.selection?.emote;
+    if (!emote) return "";
+    if (variant === "original") return emote.video_name || "";
+    return selectedEmoteVideo()?.name || state.emoteDraftVideoName || emote.video_name || "";
   }
 
   function renderEmoteSettings() {
@@ -739,7 +778,11 @@ ${row.bundle}`;
     const key = selectionKey();
     if (state.emoteSelectionKey !== key) {
       resetEmoteReplacement();
+      resetEmotePreview();
+      // Existing videos are an explicit alternative; the original preview
+      // comes from emote.video_name independently of this optional picker.
       state.emoteVideoName = "";
+      state.emoteDraftVideoName = emote?.draft_video_name || "";
       state.emoteSelectionKey = key;
     }
     if (!emote) return;
@@ -747,75 +790,150 @@ ${row.bundle}`;
     picker.innerHTML = "";
     const placeholder = document.createElement("option");
     placeholder.value = "";
-    placeholder.textContent = "请选择一个原生动态表情";
+    placeholder.textContent = "可选：使用游戏已有动图";
     picker.appendChild(placeholder);
-    for (const choice of emote.choices || []) {
+    for (const [index, choice] of (emote.choices || []).entries()) {
       const option = document.createElement("option");
       option.value = choice.name;
-      option.textContent = choice.label || choice.name;
+      option.textContent = choice.label || `游戏动态表情 ${index + 1}`;
       picker.appendChild(option);
     }
     let choice = selectedEmoteVideo();
     if (!choice && state.emoteVideoName) {
       state.emoteVideoName = "";
-      resetEmoteReplacement();
     }
     picker.value = state.emoteVideoName;
     picker.disabled = emote.editable !== true;
     choice = selectedEmoteVideo();
     const stored = state.emoteReplacement;
-    if (stored && (emote.editable !== true || stored.selectionKey !== key || stored.videoName !== choice?.name)) resetEmoteReplacement();
-    const enabled = emote.editable === true && !!choice;
-    for (const id of ["emote-export", "emote-import", "emote-save"]) $("#" + id).disabled = !enabled;
-    $("#emote-current").textContent = `表情 ID：${emote.emote_id ?? "未知"} · 当前播放：${emote.video_name || "静态图片"}`;
-    $("#emote-reason").textContent = emote.editable === true ? "" : emote.reason || "此表情暂时不能修改播放地址。";
+    if (stored && (emote.editable !== true || stored.sourceKey !== key || !stored.templateName)) resetEmoteReplacement();
+    const editable = emote.editable === true;
+    $("#emote-import").disabled = !editable;
+    $("#emote-export").disabled = !editable || !choice;
+    $("#emote-save").disabled = !editable || (!state.emoteReplacement && !choice);
+    const current = emote.choices?.find((entry) => entry.name === emote.video_name);
+    $("#emote-current").textContent = `原来的表情：${current?.label || (emote.video_name ? "游戏动态表情" : "静态图片")}`;
+    $("#emote-reason").textContent = emote.editable === true ? "" : emote.reason || "这个表情暂时不能替换成动态表情。";
     const ids = choice?.affected_ids || [];
-    $("#emote-shared").textContent = choice
-      ? `所选视频原本绑定的表情 ID：${ids.length ? ids.join("、") : "无"}。选择现有视频只修改当前表情；导入 USM 会同时影响这些表情。`
-      : "先选择一个视频槽位，再导入或保存。";
+    $("#emote-shared").textContent = "仅修改当前表情，其他原生动图保留。";
+    $("#emote-shared-ids").textContent = ids.length ? `同时使用这个动图的表情编号：${ids.join("、")}` : "没有其他表情。";
+    $("#emote-shared-details")?.classList.toggle("is-hidden", !choice || state.emoteReplacement?.independent === true);
     const candidate = state.emoteReplacement;
     if (candidate) {
       const size = Number(candidate.size);
       const fileSize = Number.isFinite(size) && size >= 0 ? `${(size / 1024 / 1024).toFixed(2)} MiB` : "大小未知";
       const info = candidate.video_info || {};
       const dimensions = info.width && info.height ? `${info.width} × ${info.height}` : "";
-      const codecId = info.codec_id ?? info.streams?.find((stream) => stream.stream === "@SFV")?.codec_id;
-      const encoding = [info.codec, codecId == null ? "" : `编码 ID：${codecId}`].filter(Boolean).join(" · ");
-      const summary = [info.summary || info.notice, dimensions, encoding].filter(Boolean).join(" · ");
-      $("#emote-file-status").textContent = `已验证：${candidate.name} · ${fileSize}${summary ? ` · ${summary}` : " · USM 兼容性检查通过"}。`;
+      const animation = candidate.animation || {};
+      const count = animation.total || animation.frames?.length;
+      const summary = [dimensions, count ? `${count} 帧` : ""].filter(Boolean).join(" · ");
+      const notice = (candidate.notice || "请对照下面的实际播放效果，再保存到作品集。")
+        .replace("预览由 USM 颜色流和透明度流实际解码合成", "预览读取转换后的实际动图");
+      $("#emote-file-status").textContent = `已导入：${candidate.source_name || candidate.name} · ${fileSize}${summary ? ` · ${summary}` : ""}。${notice}`;
     } else {
-      $("#emote-file-status").textContent = choice ? "未导入文件：保存后使用所选原生视频。" : "尚未选择动态表情。";
+      $("#emote-file-status").textContent = state.emoteImportError || (choice && choice.name !== state.emoteDraftVideoName
+        ? "未导入自己的文件：保存后使用所选游戏动图。" : state.emoteDraftVideoName
+        ? "已保存到作品集，右侧为保存后的实际效果。"
+        : "直接导入你的动图或视频，预览满意后保存。");
     }
+    renderEmotePreviews();
   }
 
-  function onEmoteVideoChange() {
+  async function onEmoteVideoChange() {
     resetEmoteReplacement();
+    resetEmotePreview();
     state.emoteVideoName = $("#emote-video").value;
+    state.emoteDraftVideoName = "";
     renderEmoteSettings();
+    await loadEmotePreview();
+  }
+
+  function renderEmotePreviews() {
+    const original = $("#emote-original");
+    const modified = $("#emote-replacement");
+    if (!original || !modified) return;
+    const showAnimation = (media, animation) => {
+      if (state.animationPlayers.get(media.id)?.animation !== animation) renderAnimation(media, animation);
+    };
+    if (!emotePreviewName("original")) setMedia(original, state.selection?.preview_data, "当前表情没有静态预览。");
+    else if (state.emotePreviewLoading) renderAnimationState(original, "正在加载当前表情的原动图…");
+    else if (state.emotePreview?.frames?.length) showAnimation(original, state.emotePreview);
+    else renderAnimationState(original, state.emotePreviewError || state.emotePreview?.notice || "原版动图尚未加载。", () => loadEmotePreview("original"));
+    const candidate = state.emoteReplacement;
+    if (candidate?.animation?.frames?.length) showAnimation(modified, candidate.animation);
+    else if (candidate) renderAnimationState(modified, candidate.animation?.notice || candidate.notice || "这个替换文件没有可播放的预览，请先确认后再安装。");
+    else if (state.emoteDraftLoading) renderAnimationState(modified, "正在读取作品集中的实际动图…");
+    else if (state.emoteDraftPreview?.frames?.length) showAnimation(modified, state.emoteDraftPreview);
+    else renderAnimationState(modified, state.emoteDraftError || state.emoteDraftPreview?.notice || "导入你的动图或视频，在这里查看动态效果。", emotePreviewName("draft") ? () => loadEmotePreview("draft") : null);
+  }
+
+  async function loadEmotePreview(variant = "both") {
+    if (!state.selection?.emote) return;
+    const key = selectionKey();
+    const selectionRequest = state.selectionRequest;
+    const request = state.emotePreviewRequest;
+    const variants = (variant === "both" ? ["original", "draft"] : [variant])
+      .filter((source) => emotePreviewName(source));
+    if (!variants.length) {
+      renderEmotePreviews();
+      return;
+    }
+    const videoNames = variants.map((source) => emotePreviewName(source));
+    const variantRequests = variants.map((source) => source === "original"
+      ? ++state.emoteOriginalRequest : ++state.emoteDraftRequest);
+    if (variants.includes("original")) {
+      state.emotePreviewLoading = true;
+      state.emotePreviewError = "";
+    }
+    if (variants.includes("draft")) {
+      state.emoteDraftLoading = true;
+      state.emoteDraftError = "";
+    }
+    renderEmotePreviews();
+    const results = await Promise.allSettled(variants.map((source, index) =>
+      call("get_emote_preview", { quiet: true }, videoNames[index], source)));
+    if (request !== state.emotePreviewRequest || key !== selectionKey() ||
+        selectionRequest !== state.selectionRequest) return;
+    results.forEach((result, index) => {
+      const source = variants[index];
+      const latest = source === "original" ? state.emoteOriginalRequest : state.emoteDraftRequest;
+      if (variantRequests[index] !== latest || videoNames[index] !== emotePreviewName(source)) return;
+      const animationKey = source === "original" ? "emotePreview" : "emoteDraftPreview";
+      const errorKey = source === "original" ? "emotePreviewError" : "emoteDraftError";
+      const loadingKey = source === "original" ? "emotePreviewLoading" : "emoteDraftLoading";
+      if (result.status === "fulfilled") state[animationKey] = result.value;
+      else {
+        state[animationKey] = null;
+        state[errorKey] = `动图预览未加载：${result.reason.message || result.reason}`;
+      }
+      state[loadingKey] = false;
+    });
+    if (state.page === "studio") renderEmotePreviews();
   }
 
   async function chooseEmoteFile() {
-    const choice = selectedEmoteVideo();
-    if (state.selection?.emote?.editable !== true || !choice) return;
+    const emote = state.selection?.emote;
+    if (emote?.editable !== true) return;
     const key = selectionKey();
     const selectionRequest = state.selectionRequest;
-    const videoName = choice.name;
+    const templateName = emote.default_video_name || emote.video_name || "";
     resetEmoteReplacement();
     const request = state.emoteRequest;
     renderEmoteSettings();
     const current = () => request === state.emoteRequest && selectionRequest === state.selectionRequest &&
-      key === selectionKey() && videoName === state.emoteVideoName;
+      key === selectionKey();
     try {
-      const data = await call("choose_emote_file", { busy: true, busyText: "验证 USM 动态表情…" }, videoName);
+      const data = await call("choose_emote_file", { busy: true, busyText: "自动识别并转换…" }, templateName);
       if (!current()) return;
       if (data) {
-        state.emoteReplacement = { ...data, selectionKey: key, videoName };
-        toast(`已导入：${data.name}。这里的静态封面不是视频预览。`);
+        state.emoteReplacement = { ...data, sourceKey: key, templateName: data.video_name || templateName };
+        toast(`已导入：${data.source_name || data.name}，可以播放并逐帧检查效果`);
       }
       renderEmoteSettings();
-    } catch (_) {
+    } catch (err) {
       if (current()) {
         resetEmoteReplacement();
+        state.emoteImportError = `导入没有通过：${err.message || err}。请重新选择动图或视频。`;
         renderEmoteSettings();
       }
     }
@@ -832,19 +950,32 @@ ${row.bundle}`;
 
   async function saveEmote() {
     const choice = selectedEmoteVideo();
-    if (state.selection?.emote?.editable !== true || !choice) return;
+    if (state.selection?.emote?.editable !== true) return;
     const key = selectionKey();
     const selectionRequest = state.selectionRequest;
     const request = state.emoteRequest;
     const candidate = state.emoteReplacement;
-    const useCustom = !!candidate && candidate.selectionKey === key && candidate.videoName === choice.name;
+    const useCustom = !!candidate && candidate.sourceKey === key && !!candidate.templateName;
+    const videoName = useCustom ? candidate.templateName : choice?.name;
+    if (!videoName) return;
     try {
-      const data = await call("save_emote", { busy: true, busyText: "保存动态表情到作品集…" }, choice.name, useCustom);
+      const data = await call("save_emote", { busy: true, busyText: "保存动态表情到作品集…" }, videoName, useCustom);
       state.draft = data.draft || state.draft;
       renderDraftList();
-      toast("动态表情已保存到作品集，手动安装后在游戏中查看播放效果");
-    } catch (_) {
-      // 后端拒绝保存后，下一次须重新导入，不能继续使用旧候选。
+      toast("动态表情已保存到作品集，正在读取保存后的实际效果");
+      if (request === state.emoteRequest && selectionRequest === state.selectionRequest && key === selectionKey()) {
+        resetEmoteReplacement();
+        if (useCustom && candidate.independent === true) state.emoteVideoName = "";
+        state.emoteDraftVideoName = data.item?.video_name || (candidate?.independent === true ? "" : videoName);
+        renderEmoteSettings();
+        await loadEmotePreview("draft");
+      }
+    } catch (err) {
+      if (request === state.emoteRequest && selectionRequest === state.selectionRequest && key === selectionKey()) {
+        resetEmoteReplacement();
+        state.emoteImportError = `保存没有通过：${err.message || err}。请重新选择动图或视频。`;
+        renderEmoteSettings();
+      }
     } finally {
       if (request === state.emoteRequest && selectionRequest === state.selectionRequest && key === selectionKey()) {
         resetEmoteReplacement();
@@ -1033,14 +1164,23 @@ ${row.bundle}`;
     if (selectionKey(sel) !== selectionKey()) {
       resetEmoteReplacement();
       state.emoteVideoName = "";
+      state.emoteDraftVideoName = "";
     }
     state.selection = sel;
+    if (typeof sel?.emote?.draft_video_name === "string" && state.emoteDraftVideoName !== sel.emote.draft_video_name) {
+      state.emoteDraftVideoName = sel.emote.draft_video_name;
+      state.emoteDraftRequest += 1;
+      state.emoteDraftPreview = null;
+      state.emoteDraftError = "";
+      state.emoteDraftLoading = false;
+    }
     empty.classList.toggle("is-hidden", !!sel);
     content.classList.toggle("is-hidden", !sel);
     renderEmoteSettings();
     if (!sel) return;
     const key = selectionKey(sel);
-    $("#studio-title").textContent = sel.caption || sel.name || "";
+    const emoteLabel = sel.emote?.choices?.find((choice) => choice.name === sel.emote.video_name)?.label;
+    $("#studio-title").textContent = sel.emote ? emoteLabel || "静态表情" : sel.caption || sel.name || "";
     $("#studio-description").textContent = sel.category_desc || "";
     const kind = sel.asset_type || sel.kind || "texture";
     const editable = canEdit(sel);
@@ -1048,11 +1188,14 @@ ${row.bundle}`;
     const sequence = isSequenceAnimation(sel);
     $("#studio-image-mode").classList.toggle("is-hidden", kind === "text");
     $("#studio-text-mode").classList.toggle("is-hidden", kind !== "text");
+    $("#studio-original-heading").textContent = sel.emote ? "原静态封面" : "游戏原内容";
+    $("#studio-replacement-heading").textContent = sel.emote ? "你的封面图片" : "你的替换文件";
     $("#choose-replacement").classList.toggle("is-hidden", !editable);
     $("#choose-frame-folder").classList.toggle("is-hidden", !editable || !sequence);
     $("#choose-replacement").textContent = kind === "text" ? "导入文本文件…" : kind === "anim"
       ? sel.atlas_editable === true ? "选择同源动画 / 整张图集…" : "选择同源动画…"
-      : animated ? "选择替换动画…" : "选择替换文件";
+      : animated ? "选择替换动画…" : sel.emote ? "更换静态封面…" : "选择替换文件";
+    $("#commit-replacement").textContent = sel.emote ? "保存封面到作品集" : "保存到作品集";
     syncStudioImportControls();
     $("#animation-settings").classList.toggle("is-hidden", !animated);
     $("#sequence-fps-label").classList.toggle("is-hidden", !sequence);
@@ -1090,6 +1233,7 @@ ${row.bundle}`;
     else if (kind === "anim") renderAnimationState($("#studio-original"), sel.reason || "此动画片段暂不支持动作播放；关联图集仅作静态参考。", null, sel.preview_data);
     else setMedia($("#studio-original"), sel.preview_data, "无可视预览");
     renderReplacement();
+    if (sel.emote) await loadEmotePreview();
     if (animated) {
       if (!state.replacement) renderAnimationState($("#studio-replacement"), "正在加载作品集动画…");
       const [original, draft] = await Promise.allSettled([
@@ -1469,9 +1613,14 @@ ${row.bundle}`;
       setMedia($("#draft-modified"), data.modified_data, "无预览");
       if (item.kind === "emote") {
         const info = data.emote_info || {};
-        const mode = info.custom_video ? "导入兼容 USM：同时替换所选视频原本绑定的表情。" : "使用现有原生视频：仅修改当前表情的播放地址。";
-        $("#draft-mode-notice").textContent = `视频：${info.video_name || item.video_name || "未知"}。${mode} ${info.preview_notice || "这里显示原静态封面，封面不是视频预览；安装后需在游戏内查看实际播放效果。"}`;
+        const independent = info.independent_video === true || item.independent_video === true || info.independent === true || item.independent === true;
+        const mode = independent ? "使用自己的动图：仅修改当前表情，其他原生动图保留。"
+          : info.custom_video ? "使用自己的动图：其他使用同一个游戏动图的表情也会一起变。" : "使用游戏现有动图：只更改当前表情，其他表情不会变。";
+        $("#draft-mode-notice").textContent = `${info.video_label || (independent ? "自定义动态表情" : "已选择的游戏动态表情")}。${mode} ${info.preview_notice || "右侧预览读取作品集中的实际动图，安装后请在游戏中确认显示效果。"}`;
         $("#draft-mode-notice").classList.remove("is-hidden");
+        if (data.emote_original_animation?.frames?.length) renderAnimation($("#draft-original"), data.emote_original_animation);
+        if (data.emote_animation?.frames?.length) renderAnimation($("#draft-modified"), data.emote_animation);
+        else renderAnimationState($("#draft-modified"), data.emote_animation?.notice || "动态预览暂时不可用，请重新加载；原静态封面不代表动态播放效果。");
       }
       if (data.original_text != null || data.modified_text != null) {
         setTextMedia($("#draft-original"), data.original_text ?? "无原文");
@@ -1607,7 +1756,9 @@ ${row.bundle}`;
       state.previewAnimation = null;
       state.replacement = null;
       resetEmoteReplacement();
+      resetEmotePreview();
       state.emoteVideoName = "";
+      state.emoteDraftVideoName = "";
       state.emoteSelectionKey = "";
       state.assetType = e.target.value;
       state.categoryId = state.assetType === "texture" ? "hand_card" : "all";

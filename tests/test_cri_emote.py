@@ -114,8 +114,15 @@ class CriEmoteTests(unittest.TestCase):
         info = cri_emote.inspect_usm_bytes(make_usm(frames=2))
         self.assertEqual((info["width"], info["height"], info["frames"]), (160, 160, 2))
         self.assertTrue(info["has_alpha"])
+        self.assertEqual(info["codec"], "MPEG-1")
         self.assertFalse(info["preview_available"])
         self.assertEqual([row["alpha_type"] for row in info["streams"]], [0, 1])
+
+    def test_codec_comes_from_elementary_stream_instead_of_header_id(self):
+        info = cri_emote.inspect_usm_bytes(make_usm(body=b"\0\0\1\xb5\x10extension"))
+        self.assertEqual(info["codec"], "MPEG-2")
+        with self.assertRaises(ValueError):
+            cri_emote._compatible(info, cri_emote.inspect_usm_bytes(make_usm()))
 
     def test_rgb_only_unknown_codec_and_mismatched_alpha_are_rejected(self):
         for raw in (make_usm(alpha=False), make_usm(codec=9), make_usm(alpha_frames=2)):

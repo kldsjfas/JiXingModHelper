@@ -426,6 +426,10 @@ def check_archive_cleanup() -> None:
 
     class FakeManager:
         @staticmethod
+        def requires_catalog_reload(_name=None):
+            return False
+
+        @staticmethod
         def analyze_mod(mod_dir: Path):
             assert (Path(mod_dir) / "demo.bundle").exists()
             return SimpleNamespace(matched=["demo.bundle"], unmatched=[], files_map={})

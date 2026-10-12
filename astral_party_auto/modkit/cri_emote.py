@@ -170,7 +170,7 @@ def _positive(row: dict, field: str, maximum: int) -> int:
 
 
 def inspect_usm_bytes(raw: bytes) -> dict:
-    """验证容器和已确认的 MPEG-2 双流布局；没有视频解码器参与。"""
+    """验证容器和已确认的 MPEG 双流布局；没有视频解码器参与。"""
     headers, streams, metadata, stages, directory = {}, {}, {}, {}, None
     for chunk in _chunks(raw):
         key = (chunk.tag, chunk.channel)
@@ -238,10 +238,10 @@ def inspect_usm_bytes(raw: bytes) -> dict:
         rate = numerator / denominator
         if not 1 <= rate <= 60 or frames / rate > MAX_DURATION or width * height > 4_194_304:
             raise ValueError("USM 视频尺寸、帧率或时长超过表情工作台范围。")
-        # The current game's reference uses MPEG-2. Other codecs require their
-        # own bitstream checks and a verified CriMana playback fixture.
+        # The header's codec ID identifies the MPEG family. The elementary
+        # stream, rather than that ID, distinguishes MPEG-1 from MPEG-2.
         if header.get("mpeg_codec") != 1:
-            raise ValueError("此 USM 编码暂未验证；目前仅接收原生 MPEG-2 颜色与透明度双流。")
+            raise ValueError("此 USM 编码暂未验证；目前仅接收原生 MPEG 颜色与透明度双流。")
         if header.get("alpha_type") != (0 if key[0] == b"@SFV" else 1):
             raise ValueError("USM 透明度布局暂未验证。")
         if any(header.get(field) != expected for field, expected in (
@@ -250,12 +250,23 @@ def inspect_usm_bytes(raw: bytes) -> dict:
         first = bytes(streams[key][0].payload)
         sequence = first.find(b"\0\0\1\xb3")
         if sequence < 0 or sequence + 7 > len(first):
-            raise ValueError("USM 视频不是可确认的未加密 MPEG-2 序列。")
+            raise ValueError("USM 视频不是可确认的未加密 MPEG 序列。")
         geometry = int.from_bytes(first[sequence + 4:sequence + 7], "big")
         if (geometry >> 12, geometry & 4095) != (width, height):
             raise ValueError("USM 视频序列尺寸与视频头不一致。")
         if len(streams[key]) != frames or any(bytes(part.payload).count(b"\0\0\1\0") != 1 for part in streams[key]):
-            raise ValueError("USM MPEG-2 帧数据与声明帧数不一致；此分包布局暂不支持。")
+            raise ValueError("USM MPEG 帧数据与声明帧数不一致；此分包布局暂不支持。")
+        codec = "MPEG-1"
+        for part in streams[key]:
+            payload = bytes(part.payload)
+            extension = payload.find(b"\0\0\1\xb5")
+            while extension >= 0:
+                if extension + 4 < len(payload) and payload[extension + 4] >> 4 == 1:
+                    codec = "MPEG-2"
+                    break
+                extension = payload.find(b"\0\0\1\xb5", extension + 4)
+            if codec == "MPEG-2":
+                break
         if any(part.rate != round(rate * 100) for part in streams[key]):
             raise ValueError("USM 视频块帧率与视频头不一致。")
         offsets = {part.offset: index for index, part in enumerate(streams[key])}
@@ -273,21 +284,21 @@ def inspect_usm_bytes(raw: bytes) -> dict:
         profiles.append({"stream": key[0].decode("ascii"), "channel": key[1],
                          "width": width, "height": height, "frames": frames,
                          "fps_n": numerator, "fps_d": denominator, "fps": rate,
-                         "codec": "MPEG-2", "codec_id": header["mpeg_codec"],
+                         "codec": codec, "codec_id": header["mpeg_codec"],
                          "alpha_type": header["alpha_type"], "stream_chunks": len(streams[key]),
                          "mat_width": header.get("mat_width"), "mat_height": header.get("mat_height"),
                          "disp_width": header.get("disp_width"), "disp_height": header.get("disp_height")})
     color, alpha = profiles
-    if any(color[field] != alpha[field] for field in ("width", "height", "frames", "fps_n", "fps_d")):
+    if any(color[field] != alpha[field] for field in ("width", "height", "frames", "fps_n", "fps_d", "codec")):
         raise ValueError("USM 颜色流与透明度流尺寸、帧数或时序不一致。")
     if [(part.time, part.rate) for part in streams[(b"@SFV", 0)]] != [
             (part.time, part.rate) for part in streams[(b"@ALP", 0)]]:
         raise ValueError("USM 颜色流与透明度流的块时间不一致。")
-    return {"format": "usm", "codec": "MPEG-2", "width": color["width"], "height": color["height"],
+    return {"format": "usm", "codec": color["codec"], "width": color["width"], "height": color["height"],
             "frames": color["frames"], "fps": color["fps"], "duration_ms": round(color["frames"] / color["fps"] * 1000),
             "video_channels": 1, "alpha_channels": 1, "has_alpha": True, "streams": profiles,
             "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest(), "preview_available": False,
-            "notice": "USM 结构和双流布局已校验；当前工具没有 CRI 解码预览，游戏内播放效果仍需测试。"}
+            "notice": "USM 结构和双流布局已校验；播放预览还需实际解码，游戏内效果仍需测试。"}
 
 
 def _load_bundle(path):
@@ -331,7 +342,7 @@ def inspect_cri_emote_bundle(path: str | Path, asset_name: str) -> dict:
 
 
 def _compatible(candidate, reference):
-    fields = ("stream", "channel", "width", "height", "codec_id", "alpha_type",
+    fields = ("stream", "channel", "width", "height", "codec", "codec_id", "alpha_type",
               "mat_width", "mat_height", "disp_width", "disp_height", "fps_n", "fps_d")
     for imported, original in zip(candidate["streams"], reference["streams"]):
         if any(imported.get(field) != original.get(field) for field in fields):

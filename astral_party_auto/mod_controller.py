@@ -257,6 +257,8 @@ class ModController:
             mod_dir = self._as_mod_dir(source)
         temporary = source.is_file()
         try:
+            if (mod_dir / "emote_addresses.json").exists() or self.manager.requires_catalog_reload():
+                self._require_catalog_game_stopped()
             analysis = self.manager.install_mod(mod_dir, name)
         finally:
             if temporary:
@@ -271,27 +273,53 @@ class ModController:
 
     def uninstall(self, name: str) -> int:
         self._require_game()
+        if self.manager.requires_catalog_reload():
+            self._require_catalog_game_stopped()
         n = self.manager.uninstall_mod(name)
         self.log(f"已卸载「{name}」，重新计算 {n} 个资源包的有效覆盖。")
         return n
 
     def disable_mod(self, name: str) -> int:
         self._require_game()
+        if self.manager.requires_catalog_reload():
+            self._require_catalog_game_stopped()
         n = self.manager.disable_mod(name)
         self.log(f"已禁用「{name}」，重新计算 {n} 个资源包的有效覆盖（记录保留，可再启用）。")
         return n
 
     def enable_mod(self, name: str) -> int:
         self._require_game()
+        if self.manager.requires_catalog_reload():
+            self._require_catalog_game_stopped()
         n = self.manager.enable_mod(name)
         self.log(f"已启用「{name}」，重新应用 {n} 个资源包。")
         return n
 
     def restore_all(self) -> int:
         self._require_game()
+        if self.manager.requires_catalog_reload():
+            self._require_catalog_game_stopped()
         n = self.manager.restore_all()
         self.log(f"一键全还原：恢复 {n} 个原始资源包，游戏回到未改状态。")
         return n
+
+    def _require_catalog_game_stopped(self) -> None:
+        """新增地址要重载资源目录，游戏运行时不能改安装状态。"""
+        if not self.game_install:
+            return
+        names = {path.name for path in (self.game_install.cn_exe, self.game_install.int_exe) if path is not None}
+        for name in names:
+            try:
+                result = subprocess.run(["tasklist", "/FI", f"IMAGENAME eq {name}", "/FO", "CSV", "/NH"],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10, check=False,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise RuntimeError("无法确认游戏是否已退出，请退出游戏后重试独立表情安装或还原。") from exc
+            if result.returncode:
+                raise RuntimeError("无法确认游戏运行状态，请退出游戏后重试独立表情安装或还原。")
+            marker = ('"' + name + '",').encode("utf-8").lower()
+            if any(line.strip().lower().startswith(marker) for line in result.stdout.splitlines()):
+                raise RuntimeError("请先退出游戏，再安装、禁用或还原独立动态表情；新增视频地址需要重新加载。")
 
     def installed_mods(self) -> list[dict]:
         return self.manager.installed_mods() if self.manager else []
@@ -609,12 +637,16 @@ class ModController:
 
     @property
     def emote_workspace(self):
-        if self._emote_workspace is None:
+        if getattr(self, "_emote_workspace", None) is None:
             from .modkit.emote_workspace import EmoteWorkspace
             self._emote_workspace = EmoteWorkspace(self, DATA_DIR, DRAFT_META)
         return self._emote_workspace
 
-    def add_emote_to_draft(self, video_name: str, replacement_path: Path | None = None) -> dict:
+    def add_emote_to_draft(self, video_name: str, replacement_path: Path | None = None, *, independent: bool = False) -> dict:
+        if independent:
+            if replacement_path is None:
+                raise ValueError("独立动态表情需要导入素材。")
+            return self.emote_workspace.save_independent(video_name, replacement_path)
         return self.emote_workspace.save(video_name, replacement_path)
 
     def set_selection(
@@ -1012,6 +1044,7 @@ class ModController:
         if not self.draft_items:
             raise RuntimeError("作品集是空的。")
         pack = self._draft_dir()
+        self.emote_workspace.write_address_manifest()
         export_mod_pack(pack, None, pack_name=self.draft_name, items=self.draft_items)
         self.install(pack, name=self.draft_name)
 
@@ -1432,6 +1465,7 @@ class ModController:
                 bundle_path.unlink(missing_ok=True)
         self._save_draft()
         if remaining:
+            self.emote_workspace.write_address_manifest()
             export_mod_pack(draft_dir, None, pack_name=self.draft_name, items=remaining)
         else:
             (draft_dir / "mod_info.json").unlink(missing_ok=True)
@@ -1468,6 +1502,7 @@ class ModController:
         if not self.draft_items:
             raise RuntimeError("作品集是空的，先加入一些替换再导出。")
         pack_dir = self._draft_dir()
+        self.emote_workspace.write_address_manifest()
         # 确保 meta 写入
         export_mod_pack(pack_dir, None, pack_name=self.draft_name, items=self.draft_items)
         # 复制一份到 made_mods/<name>_<time>

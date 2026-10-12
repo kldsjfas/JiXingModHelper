@@ -15,9 +15,10 @@ from pathlib import Path
 import UnityPy
 
 from .bundles import bundle_source_key
-from .cri_emote import export_cri_emote_bundle, replace_cri_emote_bundle, validate_usm_file
+from .cri_emote import export_cri_emote_bundle, replace_cri_emote_bundle, validate_usm_file, _write_atomic
 from .emote_catalog import discover_emote_locations, emote_id_from_texture
 from .emote_config import inspect_emote_config_bundle, replace_emote_config_bundle
+from .emote_labels import emote_label, video_label
 from .maker import export_mod_pack
 
 
@@ -96,12 +97,23 @@ class EmoteWorkspace:
             if record is None:
                 raise ValueError("该表情不在已验证的角色表情配置中，当前只能替换静态图片。")
             choices = []
-            for name in sorted(context["videos"]):
+            native_names = {row["video_name"] for row in context["records"] if row["video_name"]}
+            for name in sorted(native_names):
                 affected = {row["emote_id"] for row in context["records"] if row["video_name"] == name}
                 affected.update(item["emote_id"] for item in self.controller.draft_items
                                 if item.get("kind") == "emote" and item.get("video_name") == name)
-                choices.append({"name": name, "label": name, "affected_ids": sorted(affected)})
+                affected_ids = sorted(affected)
+                choices.append({"name": name, "label": video_label(name), "affected_ids": affected_ids,
+                                "affected_labels": [emote_label(identifier) for identifier in affected_ids]})
+            character = (identifier - 120_000_000) // 1000
+            same_character = [name for name in sorted(native_names) if name.startswith(f"VEmoji_{character}_")]
+            default_name = record["video_name"] or next(iter(same_character or sorted(native_names)))
+            draft = next((item for item in self.controller.draft_items
+                          if item.get("kind") == "emote" and item.get("emote_id") == identifier), {})
             return {"editable": True, "emote_id": identifier, "video_name": record["video_name"],
+                    "default_video_name": default_name, "independent_supported": True,
+                    "draft_video_name": draft.get("video_name", ""),
+                    "draft_independent": draft.get("independent_video", False),
                     "choices": choices, "reason": "使用游戏原生视频播放；只改变本机资源，不改变表情拥有状态。"}
         except (OSError, ValueError, KeyError) as exc:
             return {"editable": False, "emote_id": identifier, "reason": str(exc)}
@@ -145,6 +157,10 @@ class EmoteWorkspace:
         return current["emote_id"]
 
     def _restore_video(self, item: dict, staged: dict, folder: Path) -> None:
+        if item.get("independent_video"):
+            for name in item_bundle_names(item) - {item.get("bundle")}:
+                staged[name] = None
+            return
         if not item.get("custom_video"):
             return
         bundle_name, original = self.video_bundle(item["video_name"])
@@ -161,7 +177,7 @@ class EmoteWorkspace:
         pack = self.controller._draft_dir()
         if any(not re.fullmatch(r"[A-Za-z0-9_.-]+\.bundle", name) for name in staged):
             raise ValueError("表情草稿资源包名称不合法。")
-        targets = [pack / name for name in staged] + [self.draft_meta, pack / "mod_info.json"]
+        targets = [pack / name for name in staged] + [self.draft_meta, pack / "mod_info.json", pack / "emote_addresses.json"]
         self.data_dir.mkdir(parents=True, exist_ok=True)
         recovery = Path(tempfile.mkdtemp(prefix="emote-change-", dir=self.data_dir))
         snapshots = []
@@ -188,6 +204,7 @@ class EmoteWorkspace:
                     export_mod_pack(pack, None, pack_name=self.controller.draft_name, items=items)
                 else:
                     (pack / "mod_info.json").unlink(missing_ok=True)
+                self.write_address_manifest(items)
             except Exception as exc:
                 self.controller.draft_items = old_items
                 failed = []
@@ -207,6 +224,70 @@ class EmoteWorkspace:
             if not keep_recovery:
                 self._discard_temporary(recovery)
 
+    def write_address_manifest(self, items: list[dict] | None = None) -> None:
+        """从草稿派生独立视频地址；没有新增资源时不产生目录补丁。"""
+        items = self.controller.draft_items if items is None else items
+        pack = self.controller._draft_dir()
+        patches = []
+        for item in items:
+            if not item.get("independent_video"):
+                continue
+            names = item.get("extra_bundles") or []
+            if len(names) != 1 or names[0] not in item_bundle_names(item):
+                raise ValueError("独立表情的视频资源记录不完整。")
+            path = pack / names[0]
+            if not path.is_file():
+                raise ValueError("独立表情的草稿视频缺失。")
+            patches.append({"emote_id": item["emote_id"], "video_name": item["video_name"],
+                            "bundle_name": names[0], "template_video_key": item["reference_video"],
+                            "bundle_size": path.stat().st_size})
+        target = pack / "emote_addresses.json"
+        if not patches:
+            target.unlink(missing_ok=True)
+            return
+        payload = {"format": "jixing-emote-addresses", "version": 1, "patches": patches}
+        _write_atomic(target, json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"))
+
+    def save_independent(self, template_video: str, replacement_path: Path) -> dict:
+        """给当前表情创建自己的视频资源，不替换模板或任何已有动图。"""
+        from .emote_addressables import independent_emote_identity, create_independent_emote_bundle
+        identifier = self._selected_id()
+        context = self.context()
+        _, reference = self.video_bundle(template_video)
+        validate_usm_file(replacement_path, reference, template_video)
+        identity = independent_emote_identity(identifier)
+        if identity["video_name"] in context["videos"]:
+            raise ValueError("当前游戏已经存在这个独立表情地址，请先禁用旧作品再制作。")
+        others = [item for item in self.controller.draft_items
+                  if not (item.get("kind") == "emote" and item.get("emote_id") == identifier)]
+        existing = next((item for item in self.controller.draft_items
+                         if item.get("kind") == "emote" and item.get("emote_id") == identifier), None)
+        selection = self.controller.selection
+        item = {"kind": "emote", "bundle": context["config_bundle"], "name": selection["name"],
+                "source_bundle": selection["bundle"], "emote_id": identifier,
+                "video_name": identity["video_name"], "reference_video": template_video,
+                "custom_video": True, "independent_video": True, "extra_bundles": [identity["bundle_name"]],
+                "note": Path(replacement_path).name, "at": datetime.now().isoformat(timespec="seconds")}
+        items = others + [item]
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        with self._prepare_folder("emote-independent-") as folder:
+            staged = {}
+            if existing and existing.get("custom_video"):
+                self._restore_video(existing, staged, folder)
+            video_output = folder / identity["bundle_name"]
+            create_independent_emote_bundle(reference, template_video, replacement_path, video_output, emote_id=identifier)
+            staged[identity["bundle_name"]] = video_output
+            config_name = context["config_bundle"]
+            current = self.controller._draft_dir() / config_name
+            source = current if current.exists() else context["config_path"]
+            output = folder / config_name
+            replace_emote_config_bundle(source, output, identifier, identity["video_name"])
+            staged[config_name] = output
+            active = set().union(*(item_bundle_names(entry) for entry in items))
+            self._commit({name: source if name in active else None for name, source in staged.items()}, items)
+        self.controller.log(f"已保存独立动态表情：{emote_label(identifier)}")
+        return item
+
     def save(self, video_name: str, replacement_path: Path | None = None) -> dict:
         identifier = self._selected_id()
         context = self.context()
@@ -217,7 +298,7 @@ class EmoteWorkspace:
                          if item.get("kind") == "emote" and item.get("emote_id") == identifier), None)
         if replacement_path is not None and any(item.get("kind") == "emote" and item.get("custom_video")
                                                 and item.get("video_name") == video_name for item in others):
-            raise ValueError("这个视频槽位已被另一项自定义表情占用，请选其它视频或先移除那一项。")
+            raise ValueError(f"{video_label(video_name)}已被另一项自定义表情占用，请选其它原生动画或先移除那一项。")
         if replacement_path is not None:
             validate_usm_file(replacement_path, original_video, video_name)
         selection = self.controller.selection
@@ -225,7 +306,7 @@ class EmoteWorkspace:
                 "source_bundle": selection["bundle"], "emote_id": identifier, "video_name": video_name,
                 "custom_video": replacement_path is not None,
                 "extra_bundles": [video_bundle] if replacement_path is not None else [],
-                "note": Path(replacement_path).name if replacement_path else f"原生动态表情：{video_name}",
+                "note": Path(replacement_path).name if replacement_path else f"原生动画：{video_label(video_name)}",
                 "at": datetime.now().isoformat(timespec="seconds")}
         items = others + [item]
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -247,7 +328,7 @@ class EmoteWorkspace:
                 staged[video_bundle] = output_video
             active = set().union(*(item_bundle_names(entry) for entry in items))
             self._commit({name: source if name in active else None for name, source in staged.items()}, items)
-        self.controller.log(f"已保存动态表情：{identifier} → {video_name}")
+        self.controller.log(f"已保存动态表情：{emote_label(identifier)} → {video_label(video_name)}")
         return item
 
     def remove(self, index: int) -> None:
@@ -271,4 +352,4 @@ class EmoteWorkspace:
             self._restore_video(item, staged, folder)
             active = set().union(*(item_bundle_names(entry) for entry in items)) if items else set()
             self._commit({name: source if name in active else None for name, source in staged.items()}, items)
-        self.controller.log(f"已移除动态表情：{item['name']}")
+        self.controller.log(f"已移除动态表情：{emote_label(item['emote_id'])}")
