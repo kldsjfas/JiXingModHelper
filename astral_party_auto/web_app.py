@@ -197,19 +197,43 @@ class DesktopApi:
         """把需要在主线程执行的操作（tkinter 文件框）从 HTTP 线程调回主线程。"""
         if self._tk_root is None:
             return func()
+        from time import monotonic
+
         box: dict = {}
         done = threading.Event()
+        result_lock = threading.Lock()
+        expired = False
+        deadline = monotonic() + 180
+        timeout_message = "文件选择等待超时，请关闭仍打开的选择窗口后重试。"
 
         def wrapper():
+            with result_lock:
+                if expired:
+                    done.set()
+                    return
+                if monotonic() >= deadline:
+                    box["error"] = TimeoutError(timeout_message)
+                    done.set()
+                    return
             try:
-                box["value"] = func()
+                value = func()
             except Exception as exc:  # noqa: BLE001
-                box["error"] = exc
+                with result_lock:
+                    if not expired:
+                        box["error"] = exc
+            else:
+                with result_lock:
+                    if not expired:
+                        box["value"] = value
             finally:
                 done.set()
 
         self._tk_root.after(0, wrapper)
-        done.wait(180)
+        if not done.wait(180):
+            with result_lock:
+                expired = True
+                box.clear()
+            raise TimeoutError(timeout_message)
         if "error" in box:
             raise box["error"]
         return box.get("value")
