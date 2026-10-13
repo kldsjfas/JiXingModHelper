@@ -26,12 +26,13 @@ def metadata():
             "description": "测试贴图", "category": "texture", "version": "1.0", "game_version": "2026-10"}
 
 
-def pack_bytes(entries=None, *, info=None, compression=zipfile.ZIP_DEFLATED):
+def pack_bytes(entries=None, *, info=None, compression=zipfile.ZIP_DEFLATED, include_info=True):
     entries = [("texture.bundle", bundle())] if entries is None else entries
     info = {"name": "作品", "items": [], "bundle_count": sum(name.endswith(".bundle") for name, _ in entries)} if info is None else info
     output = io.BytesIO()
     with zipfile.ZipFile(output, "w", compression=compression) as archive:
-        archive.writestr("mod_info.json", json.dumps(info).encode())
+        if include_info:
+            archive.writestr("mod_info.json", json.dumps(info).encode())
         for name, data in entries:
             archive.writestr(name, data)
     return output.getvalue()
@@ -231,13 +232,16 @@ class WorkshopTests(unittest.TestCase):
         manifest = {"format": "jixing-emote-addresses", "version": 1, "patches": [
             {"emote_id": 120101008, "video_name": "VEmoji_101_08_999", "bundle_name": name,
              "template_video_key": "VEmoji_101_09", "bundle_size": len(data)}]}
-        result = self.inspect(pack_bytes([(name, data), ("emote_addresses.json", json.dumps(manifest).encode())]))
-        self.assertEqual(len(result["emote_patches"]), 1)
-        with self.assertRaises(ValueError):
-            self.inspect(pack_bytes([(name, data)]))
-        manifest["patches"][0]["bundle_size"] += 1
-        with self.assertRaises(ValueError):
-            self.inspect(pack_bytes([(name, data), ("emote_addresses.json", json.dumps(manifest).encode())]))
+        for include_info in (True, False):
+            with self.subTest(include_info=include_info):
+                result = self.inspect(pack_bytes([(name, data), ("emote_addresses.json", json.dumps(manifest).encode())], include_info=include_info))
+                self.assertEqual(len(result["emote_patches"]), 1)
+                with self.assertRaises(ValueError):
+                    self.inspect(pack_bytes([(name, data)], include_info=include_info))
+                changed = json.loads(json.dumps(manifest))
+                changed["patches"][0]["bundle_size"] += 1
+                with self.assertRaises(ValueError):
+                    self.inspect(pack_bytes([(name, data), ("emote_addresses.json", json.dumps(changed).encode())], include_info=include_info))
 
     def test_catalog_is_copied_cached_and_failed_refresh_removes_stale_items(self):
         payload = pack_bytes()
@@ -326,6 +330,62 @@ class WorkshopTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             workshop.prepare_submission(self.path, metadata(), destination)
         self.assertEqual(destination.read_bytes(), Path(result["path"]).read_bytes())
+
+    def test_external_resource_pack_without_metadata_exports_normalized_submission(self):
+        payload = pack_bytes([("OtherEditor/texture.bundle", bundle())], include_info=False)
+        original = self.inspect(payload)
+        self.assertIsNone(original["mod_info"])
+        self.assertEqual(original["file_count"], 1)
+        self.assertEqual(original["bundles"][0]["path"], "OtherEditor/texture.bundle")
+        destination = self.root / "external-submission.zip"
+        result = workshop.prepare_submission(self.path, metadata(), destination)
+        with zipfile.ZipFile(destination) as archive:
+            self.assertEqual(set(archive.namelist()), {"texture.bundle", "mod_info.json"})
+            self.assertEqual(archive.read("texture.bundle"), bundle())
+            info = json.loads(archive.read("mod_info.json"))
+            self.assertEqual(info["name"], metadata()["name"])
+            self.assertEqual(info["bundle_count"], 1)
+            self.assertEqual(info["items"], [])
+        checked = workshop.inspect_package(destination)
+        self.assertEqual(checked["mod_info"]["name"], metadata()["name"])
+        self.assertEqual(checked["sha256"], result["report"]["asset"]["sha256"])
+        self.assertEqual(checked["bundles"][0]["sha256"], original["bundles"][0]["sha256"])
+        self.assertEqual(result["report"]["review_status"], "pending")
+        self.assertEqual(self.path.read_bytes(), payload)
+        self.assertNotIn(str(self.root), Path(result["report_path"]).read_text(encoding="utf-8"))
+
+    def test_metadata_from_another_editor_is_checked_without_tool_name_requirement(self):
+        result = self.inspect(pack_bytes(info={"name": "外部作品", "tool": "Another Resource Editor", "items": [], "bundle_count": 1}))
+        self.assertEqual(result["mod_info"]["name"], "外部作品")
+        for info in ({"name": "外部作品", "tool": "Another Resource Editor", "items": "invalid"},
+                     {"name": "外部作品", "items": [], "bundle_count": 2},
+                     {"name": "外部作品", "items": [], "execute": "payload.dll"}):
+            with self.subTest(info=info), self.assertRaises(ValueError):
+                self.inspect(pack_bytes(info=info))
+
+    def test_external_pack_still_rejects_plugins_scripts_paths_and_broken_resources(self):
+        for name, data in (("plugin.dll", b"MZ"), ("run.ps1", b"Write-Output x"), ("run.js", b"alert(1)"),
+                           ("README.md", b"external instructions"), ("../escape.bundle", bundle()),
+                           ("bad.bundle", b"MZ-not-a-unity-resource")):
+            payload = pack_bytes([("texture.bundle", bundle()), (name, data)], include_info=False)
+            self.path.write_bytes(payload)
+            destination = self.root / "rejected-submission.zip"
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                workshop.prepare_submission(self.path, metadata(), destination)
+            self.assertFalse(destination.exists())
+            self.assertFalse(destination.with_suffix(".submission.json").exists())
+            self.assertEqual(self.path.read_bytes(), payload)
+
+    def test_reviewed_external_resource_pack_keeps_download_hash_and_snapshot_checks(self):
+        payload = pack_bytes(include_info=False)
+        value = entry(payload)
+        client = workshop.WorkshopClient(self.root)
+        with patch.object(workshop, "_download", side_effect=self.fetch([value], payload)):
+            prepared = client.prepare(value["id"], value["asset"]["sha256"])
+        self.assertIsNone(prepared["inspection"]["mod_info"])
+        self.assertEqual({path.name for path in Path(prepared["mod_dir"]).iterdir()}, {"texture.bundle"})
+        client.verify_prepared(prepared)
+        self.assertTrue(client.discard(prepared)["removed"])
 
     def test_submission_publish_race_preserves_other_writers_file(self):
         self.path.write_bytes(pack_bytes())

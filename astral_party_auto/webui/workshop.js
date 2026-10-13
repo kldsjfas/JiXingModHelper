@@ -299,18 +299,18 @@
     syncButtons();
     try {
       const result = await bridge.call("workshop_choose_submission", {
-        busy: true, busyText: "选择并检查投稿 ZIP…", quiet: true,
+        busy: true, busyText: "选择并检查资源替换 ZIP…", quiet: true,
       });
       if (result?.cancelled) {
-        message("workshop-submission-file", "未选择 ZIP。可先到“我的作品集”导出作品。");
+        message("workshop-submission-file", "未选择 ZIP。支持其他工具制作的资源替换包。");
         return;
       }
       if (!result?.inspection) throw new Error("投稿包没有通过格式检查。");
       state.submission = result;
-      message("workshop-submission-file", `已选择 ${result.path_label || "投稿 ZIP"}，检查通过。`);
+      message("workshop-submission-file", `已选择 ${result.path_label || "资源替换 ZIP"}，检查通过。`);
       message("workshop-submission-check-details", inspectionText(result.inspection));
     } catch (error) {
-      message("workshop-submission-file", `投稿包检查失败：${error.message || "请选择本工具导出的 ZIP"}`, true);
+      message("workshop-submission-file", `投稿包检查失败：${error.message || "请确认是有效的资源替换 ZIP"}`, true);
     } finally {
       state.working = false;
       syncButtons();

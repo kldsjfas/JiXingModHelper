@@ -4,7 +4,7 @@ title: "[工坊投稿] "
 body:
   - type: markdown
     attributes:
-      value: "请用助手的工坊页面生成投稿 ZIP 与审核报告。投稿不直接上架，不能附带程序、脚本或整份游戏。"
+      value: "制作工具不限，兼容的 .bundle 资源替换 ZIP 都可投稿。请在助手的工坊页面选择 ZIP，生成投稿包与审核报告。投稿不直接上架，不能附带程序、脚本、插件或整份游戏。"
   - type: input
     id: name
     attributes:

@@ -236,9 +236,10 @@ async function checkSubmissionBoundary() {
   const ui = loadWorkshop();
   await ui.exportSubmission();
   assert.equal(ui.requests.length, 0);
-  ui.reply("workshop_choose_submission", { path_label: "我的作品.zip", inspection: { file_count: 2, total_size: 4096, sha256: "a".repeat(64) } });
+  ui.reply("workshop_choose_submission", { path_label: "外部工具制作.zip", inspection: { file_count: 2, total_size: 4096, sha256: "a".repeat(64), mod_info: null } });
   await ui.chooseSubmission();
   assert.equal(ui.find("workshop-export-submission").disabled, false);
+  assert.match(ui.find("workshop-submission-file").textContent, /外部工具制作.zip.*检查通过/);
   const fields = { name: " <b>猫猫</b> ", author: " 作者 ", description: "说明<script>attack()</script>", category: "emote", version: "1.0", game_version: "2026-10" };
   for (const [field, value] of Object.entries(fields)) ui.find(`workshop-submit-${field}`).value = value;
   ui.reply("workshop_export_submission", { path: "D:\\投稿.zip", report_path: "D:\\投稿.submission.json", issue_url: "javascript:attack()" });
@@ -259,6 +260,7 @@ async function checkSubmissionBoundary() {
   assert.equal(ui.state.submission, null);
   assert.equal(ui.find("workshop-export-submission").disabled, true);
   assert.equal(ui.find("workshop-open-submission").classList.contains("is-hidden"), true);
+  assert.match(ui.find("workshop-submission-file").textContent, /支持其他工具/);
 }
 
 async function checkInstallWhileLeavingPage() {
@@ -294,6 +296,11 @@ function checkIntegration() {
   for (const phrase of ["浏览无需登录", "未审核的投稿", "不能保证零风险", "不会自动上传", "人工审核", "分享我的作品"]) {
     assert.ok(html.includes(phrase), `Missing workshop guidance: ${phrase}`);
   }
+  const workshopSection = html.slice(html.indexOf('id="page-workshop"'), html.indexOf('id="page-browse"'));
+  assert.ok(workshopSection.includes("制作工具不限"));
+  assert.ok(workshopSection.includes("不接受程序或脚本"));
+  assert.doesNotMatch(workshopSection + source, /请选择本工具导出|可先[在到].*我的作品集/,
+    "Submission guidance still required an archive made by this helper");
   assert.ok(!html.includes('id="workshop-prepare"'), "The separate technical download button remained");
   assert.match(html, /id="workshop-share"[^>]*>\s*<summary>分享我的作品<\/summary>/);
   assert.doesNotMatch(html.match(/<details id="workshop-share"[^>]*>/)[0], /\sopen(?:\s|=|>)/);

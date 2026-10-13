@@ -201,7 +201,7 @@ class DesktopApi:
         from .modkit.workshop import inspect_package
         self._workshop_submission = None
         self._workshop_issue_url = None
-        path = self._pick_path("open", file_types=("助手导出的 Mod ZIP (*.zip)",))
+        path = self._pick_path("open", file_types=("资源替换 Mod ZIP (*.zip)",))
         if path is None:
             return {"cancelled": True}
         inspection = inspect_package(path)

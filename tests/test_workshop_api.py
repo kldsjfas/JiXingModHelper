@@ -5,6 +5,7 @@ import io
 import json
 import threading
 import unittest
+import zipfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
@@ -12,6 +13,8 @@ from wsgiref.util import setup_testing_defaults
 
 from astral_party_auto.web_app import DesktopApi, _build_server
 from astral_party_auto.modkit.workshop_security import scan_workshop_package
+from astral_party_auto.modkit.workshop import inspect_package
+from tests.test_workshop import bundle, metadata, pack_bytes
 
 
 class WorkshopApiTests(unittest.TestCase):
@@ -112,6 +115,52 @@ class WorkshopApiTests(unittest.TestCase):
         self.assertTrue(self.api.workshop_choose_submission()["data"]["cancelled"])
         self.assertIsNone(self.api._workshop_submission)
         self.assertIsNone(self.api._workshop_issue_url)
+
+    def test_external_zip_selection_and_submission_use_real_package_checks(self):
+        source = self.root / "outside-editor.zip"
+        payload = pack_bytes([("OtherEditor/texture.bundle", bundle())], include_info=False)
+        source.write_bytes(payload)
+        destination = self.root / "outside-submission.zip"
+        self.api._pick_path = Mock(side_effect=[source, destination])
+        chosen = self.api.workshop_choose_submission()
+        self.assertTrue(chosen["ok"], chosen)
+        self.assertIsNone(chosen["data"]["inspection"]["mod_info"])
+        self.assertEqual(chosen["data"]["inspection"]["bundle_count"], 1)
+        self.assertEqual(self.api._workshop_submission["sha256"], inspect_package(source)["sha256"])
+        details = metadata()
+        details.pop("id")
+        exported = self.api.workshop_export_submission(details)
+        self.assertTrue(exported["ok"], exported)
+        result = exported["data"]
+        self.assertTrue(Path(result["path"]).samefile(destination))
+        with zipfile.ZipFile(destination) as archive:
+            self.assertEqual(set(archive.namelist()), {"texture.bundle", "mod_info.json"})
+            self.assertEqual(archive.read("texture.bundle"), bundle())
+            self.assertEqual(json.loads(archive.read("mod_info.json"))["name"], details["name"])
+        inspection = inspect_package(destination)
+        report = json.loads(Path(result["report_path"]).read_text(encoding="utf-8"))
+        self.assertEqual(inspection["sha256"], report["asset"]["sha256"])
+        self.assertEqual(report["review_status"], "pending")
+        self.assertTrue(result["issue_url"].startswith("https://github.com/kldsjfas/JiXingModHelper/issues/new?"))
+        self.assertEqual(source.read_bytes(), payload)
+        self.api.controller.install.assert_not_called()
+        self.scanner.assert_not_called()
+
+    def test_external_unsafe_selection_clears_candidate_without_export_or_install(self):
+        source = self.root / "unsafe-outside.zip"
+        for name, data in (("plugin.dll", b"MZ"), ("run.ps1", b"script"), ("../bad.bundle", bundle()),
+                           ("bad.bundle", b"not-unity"), ("mod_info.json", b'{"name":"bad","items":"invalid"}')):
+            with self.subTest(name=name):
+                source.write_bytes(pack_bytes([("texture.bundle", bundle()), (name, data)], include_info=False))
+                self.api._workshop_submission = {"path": "stale.zip", "sha256": "a" * 64}
+                self.api._workshop_issue_url = "https://github.com/stale"
+                self.api._pick_path = Mock(return_value=source)
+                chosen = self.api.workshop_choose_submission()
+                self.assertFalse(chosen["ok"], chosen)
+                self.assertIsNone(self.api._workshop_submission)
+                self.assertIsNone(self.api._workshop_issue_url)
+                self.assertEqual(self.api._pick_path.call_count, 1)
+        self.api.controller.install.assert_not_called()
 
     def test_external_link_is_never_accepted(self):
         with patch("astral_party_auto.web_app.os.startfile", create=True) as opener:

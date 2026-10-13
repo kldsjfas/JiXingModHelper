@@ -243,7 +243,7 @@ def _archive_path(info: zipfile.ZipInfo) -> str:
             raise ValueError("资源包目录条目不能包含数据。")
         return normalized + "/"
     if name not in {"mod_info.json", "emote_addresses.json"} and not name.endswith(".bundle"):
-        raise ValueError("工坊只允许 Unity 资源包和本工具的两种元数据文件，不能包含程序或脚本。")
+        raise ValueError("工坊只允许 Unity 资源包和规定格式的元数据文件，不能包含程序或脚本。")
     return normalized
 
 
@@ -273,7 +273,7 @@ def _mod_info(value: dict, bundle_count: int) -> dict:
     if (not set(value) <= allowed or "name" not in value or "items" not in value
             or not isinstance(value["items"], list) or len(value["items"]) > 2000
             or any(not isinstance(item, dict) for item in value["items"])):
-        raise ValueError("mod_info.json 不是本工具支持的作品元数据。")
+        raise ValueError("mod_info.json 的作品元数据格式不正确。")
     name = _text(value["name"], "作品名", 80)
     for field in ("created_at", "tool"):
         if field in value:
@@ -374,8 +374,6 @@ def inspect_package(path: str | Path) -> dict:
                 if not bundles:
                     raise ValueError("资源包没有 Unity 资源。")
                 info = _mod_info(documents["mod_info.json"], len(bundles)) if "mod_info.json" in documents else None
-                if info is None:
-                    raise ValueError("资源包缺少根目录 mod_info.json，请用本工具导出作品。")
                 patches = []
                 if "emote_addresses.json" in documents:
                     manifest = documents["emote_addresses.json"]
