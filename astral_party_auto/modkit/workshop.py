@@ -27,6 +27,7 @@ from .workshop_security import inspect_resource_bundle, reject_assembly_bundle_t
 
 REPOSITORY_URL = "https://github.com/kldsjfas/JiXingModHelper"
 CATALOG_URL = "https://raw.githubusercontent.com/kldsjfas/JiXingModHelper/workshop/catalog.json"
+CATALOG_API_URL = "https://api.github.com/repos/kldsjfas/JiXingModHelper/contents/catalog.json?ref=workshop"
 FORMAT = "jixing-workshop"
 MAX_CATALOG_BYTES = 1024 * 1024
 MAX_PACKAGE_BYTES = 256 * 1024 * 1024
@@ -166,7 +167,7 @@ class _TrustedRedirects(HTTPRedirectHandler):
 
     def redirect_request(self, request, fp, code, message, headers, new_url):
         source, target = _https_parts(request.full_url), _https_parts(new_url)
-        if (self.initial_url == CATALOG_URL or target.hostname != "release-assets.githubusercontent.com"
+        if (self.initial_url in (CATALOG_URL, CATALOG_API_URL) or target.hostname != "release-assets.githubusercontent.com"
                 or not target.path.startswith("/")
                 or not (request.full_url == self.initial_url or source.hostname == "release-assets.githubusercontent.com")):
             raise ValueError("下载重定向离开了受信任的 GitHub 资源服务。")
@@ -175,17 +176,20 @@ class _TrustedRedirects(HTTPRedirectHandler):
 
 def _download(url: str, output, limit: int, *, expected_size=None) -> int:
     parts = _https_parts(url)
-    if url != CATALOG_URL and (parts.hostname != "github.com" or parts.query
+    if url not in (CATALOG_URL, CATALOG_API_URL) and (parts.hostname != "github.com" or parts.query
                              or not re.fullmatch(r"/kldsjfas/JiXingModHelper/releases/download/[A-Za-z0-9][A-Za-z0-9_.-]{0,79}/[A-Za-z0-9][A-Za-z0-9_.-]{0,115}\.zip", parts.path)):
         raise ValueError("下载只能来自本项目审核过的 GitHub Release。")
-    request = Request(url, headers={"User-Agent": "JiXingModHelper-Workshop/1", "Accept-Encoding": "identity"})
+    headers = {"User-Agent": "JiXingModHelper-Workshop/1", "Accept-Encoding": "identity", "Cache-Control": "no-cache"}
+    if url == CATALOG_API_URL:
+        headers["Accept"] = "application/vnd.github.raw+json"
+    request = Request(url, headers=headers)
     started = time.monotonic()
     count = 0
     with build_opener(_TrustedRedirects(url)).open(request, timeout=12) as response:
         final_url = response.geturl()
         if final_url != url:
             final = _https_parts(final_url)
-            if url == CATALOG_URL or final.hostname != "release-assets.githubusercontent.com":
+            if url in (CATALOG_URL, CATALOG_API_URL) or final.hostname != "release-assets.githubusercontent.com":
                 raise ValueError("下载响应来源不正确。")
         declared = response.headers.get("Content-Length")
         if declared is not None:
@@ -471,8 +475,17 @@ class WorkshopClient:
             import io
 
             buffer = io.BytesIO()
+            source_url = CATALOG_URL
             try:
-                _download(CATALOG_URL, buffer, MAX_CATALOG_BYTES)
+                try:
+                    _download(CATALOG_URL, buffer, MAX_CATALOG_BYTES)
+                except (OSError, URLError, TimeoutError):
+                    # The same branch and file, served by GitHub's fixed API.
+                    # Never retry malformed content or an untrusted redirect.
+                    buffer.seek(0)
+                    buffer.truncate()
+                    source_url = CATALOG_API_URL
+                    _download(CATALOG_API_URL, buffer, MAX_CATALOG_BYTES)
                 catalog = validate_catalog(buffer.getvalue())
                 revoked = [entry["id"] for entry in catalog["mods"] if entry["revoked"]]
                 result = {**catalog, "mods": [entry for entry in catalog["mods"] if not entry["revoked"]],
@@ -483,7 +496,7 @@ class WorkshopClient:
             except (ValueError, OSError, URLError, TimeoutError):
                 result = {"format": FORMAT, "version": 1, "mods": [], "revoked_ids": [], "status": "unavailable",
                           "message": "目录获取或验证失败；已停止下载，请检查网络后刷新。"}
-            result.update(source=CATALOG_URL, fetched_at=datetime.now(timezone.utc).isoformat(timespec="seconds"), risk_note=RISK_NOTE)
+            result.update(source=source_url, fetched_at=datetime.now(timezone.utc).isoformat(timespec="seconds"), risk_note=RISK_NOTE)
             self._cached, self._cached_at = result, time.monotonic()
             return json.loads(json.dumps(result, ensure_ascii=False))
 

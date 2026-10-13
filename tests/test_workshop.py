@@ -255,6 +255,33 @@ class WorkshopTests(unittest.TestCase):
             self.assertEqual(result["status"], "unavailable")
             self.assertEqual(result["mods"], [])
 
+    def test_raw_network_failure_uses_only_fixed_github_api_and_discards_partial_bytes(self):
+        client = workshop.WorkshopClient(self.root)
+        calls = []
+        def fetch(url, output, limit, **kwargs):
+            calls.append(url)
+            if url == workshop.CATALOG_URL:
+                output.write(b"partial network response")
+                raise TimeoutError()
+            self.assertEqual(url, workshop.CATALOG_API_URL)
+            output.write(b'{"format":"jixing-workshop","version":1,"mods":[]}')
+        with patch.object(workshop, "_download", side_effect=fetch):
+            result = client.catalog(force=True)
+        self.assertEqual(result["status"], "ready")
+        self.assertEqual(result["source"], workshop.CATALOG_API_URL)
+        self.assertEqual(calls, [workshop.CATALOG_URL, workshop.CATALOG_API_URL])
+
+    def test_catalog_validation_or_redirect_failure_does_not_trigger_fallback(self):
+        for response in (b'{"untrusted":true}', None):
+            def fetch(url, output, limit, **kwargs):
+                if response is None:
+                    raise ValueError("Untrusted redirect")
+                output.write(response)
+            with patch.object(workshop, "_download", side_effect=fetch) as download:
+                result = workshop.WorkshopClient(self.root).catalog(force=True)
+            self.assertEqual(result["status"], "unavailable")
+            self.assertEqual(download.call_count, 1)
+
     def test_prepare_always_refreshes_and_refuses_revocation_or_changed_hash(self):
         payload = pack_bytes()
         value = entry(payload)
