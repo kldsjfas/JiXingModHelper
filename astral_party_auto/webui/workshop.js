@@ -1,4 +1,4 @@
-/* 工坊只展示后端验证的审核目录；下载、检查与安装分别由用户发起。 */
+/* 点击安装先下载检查；只有用户再次确认才写入游戏。 */
 (() => {
   "use strict";
 
@@ -8,8 +8,8 @@
   const $ = (id) => document.getElementById(id);
   const state = {
     initialized: false, loaded: false, working: false, catalogLoading: false,
-    items: [], selected: null, prepared: null, submission: null,
-    selectionVersion: 0, catalogVersion: 0,
+    items: [], selected: null, prepared: null, submission: null, submissionExported: false,
+    selectionVersion: 0, catalogVersion: 0, pageVersion: 0,
   };
   let bridge;
 
@@ -57,14 +57,16 @@
   function syncButtons() {
     const locked = state.working || state.catalogLoading;
     $("workshop-refresh").disabled = locked;
-    $("workshop-prepare").disabled = !state.selected || locked;
-    $("workshop-install").disabled = !canInstall() || locked;
+    $("workshop-install").disabled = !state.selected || locked;
+    $("workshop-install").textContent = state.working ? "处理中…" : canInstall() ? "继续安装" : "安装";
+    $("workshop-install").classList.toggle("is-hidden", !$("workshop-install-confirm").classList.contains("is-hidden"));
     $("workshop-install-accept").disabled = !canInstall() || locked;
     $("workshop-install-cancel").disabled = locked;
     $("workshop-report").disabled = !state.selected || locked;
     $("workshop-choose-submission").disabled = locked;
     $("workshop-export-submission").disabled = !state.submission || locked;
     $("workshop-open-submission").disabled = locked;
+    $("workshop-open-submission").classList.toggle("is-hidden", !state.submissionExported);
     $("workshop-repository").disabled = locked;
     $("workshop-submit-form").querySelectorAll("input, select, textarea").forEach((input) => {
       input.disabled = locked;
@@ -77,6 +79,7 @@
   function hideConfirmation() {
     $("workshop-install-confirm").classList.add("is-hidden");
     $("workshop-install").setAttribute("aria-expanded", "false");
+    syncButtons();
   }
 
   function showDetail(entry) {
@@ -84,8 +87,8 @@
     state.prepared = null;
     state.selectionVersion += 1;
     hideConfirmation();
-    $("workshop-detail-empty").classList.toggle("is-hidden", Boolean(entry));
-    $("workshop-detail-content").classList.toggle("is-hidden", !entry);
+    $("workshop-layout").classList.toggle("has-selection", Boolean(entry));
+    $("workshop-detail").classList.toggle("is-hidden", !entry);
     if (entry) {
       $("workshop-detail-title").textContent = entry.name || "未命名作品";
       $("workshop-detail-author").textContent = entry.author || "未填写作者";
@@ -95,7 +98,11 @@
       $("workshop-detail-size").textContent = formatSize(entrySize(entry));
       $("workshop-detail-description").textContent = entry.description || "作者暂未填写说明。";
       $("workshop-detail-sha256").textContent = entryHash(entry);
-      message("workshop-analysis", "下载后先检查文件格式、哈希、游戏资源匹配和冲突。通过检查也不会自动安装。");
+      message("workshop-analysis", "确认前会先检查资源包。");
+      message("workshop-check-details", "尚未下载检查。");
+      message("workshop-conflicts", "");
+      $("workshop-conflicts").classList.add("is-hidden");
+      $("workshop-more-info").open = false;
     }
     renderItems();
     syncButtons();
@@ -111,10 +118,11 @@
       return (!query || text.includes(query)) && (!category || entry.category === category);
     });
     $("workshop-count").textContent = `${items.length} / ${state.items.length} 个作品`;
+    $("workshop-list-hint").classList.toggle("is-hidden", !state.items.length);
     if (!items.length) {
       const empty = node("div", "workshop-empty");
       empty.appendChild(node("strong", "", state.items.length ? "没有找到匹配的作品" : "暂时没有已审核的作品"));
-      empty.appendChild(node("span", "", state.items.length ? "换个关键词或分类试试。" : "可以先准备投稿包，作品通过人工审核后才会上架。"));
+      empty.appendChild(node("span", "", state.items.length ? "换个关键词或分类试试。" : "也可以在下方分享自己的作品。"));
       list.appendChild(empty);
       return;
     }
@@ -127,7 +135,7 @@
       heading.appendChild(node("strong", "", entry.name || "未命名作品"));
       heading.appendChild(node("span", "workshop-category-tag", CATEGORY_LABELS[entry.category] || "其他"));
       button.appendChild(heading);
-      button.appendChild(node("span", "workshop-item-meta", `${entry.author || "未填写作者"} · ${entry.version || "未填写版本"} · ${formatSize(entrySize(entry))}`));
+      button.appendChild(node("span", "workshop-item-meta", entry.author || "未填写作者"));
       button.appendChild(node("span", "workshop-item-description", entry.description || "暂无说明"));
       button.addEventListener("click", () => {
         if (!state.working && !state.catalogLoading) showDetail(entry);
@@ -141,7 +149,7 @@
     state.catalogLoading = true;
     const request = ++state.catalogVersion;
     showDetail(null);
-    message("workshop-catalog-status", "正在读取已审核作品目录…");
+    message("workshop-catalog-status", "加载作品中…");
     syncButtons();
     try {
       const catalog = await bridge.call("workshop_catalog", { quiet: true }, force);
@@ -188,15 +196,35 @@
     return lines.filter(Boolean).join("\n");
   }
 
+  function showCheckResult(result) {
+    const analysis = result?.analysis || {};
+    let summary = "检查通过，确认后开始安装。";
+    if (analysis.can_install !== true) {
+      summary = count(analysis.unmatched) > 0
+        ? "不适用当前游戏版本，请换一个作品。"
+        : analysis.message || "暂时无法安装，请检查游戏是否安装。";
+    }
+    message("workshop-analysis", summary, analysis.can_install !== true);
+    message("workshop-check-details", analysisText(result));
+    const conflicts = Array.isArray(analysis.conflict_names) ? analysis.conflict_names : [];
+    const warning = count(analysis.conflicts) > 0
+      ? `将覆盖已有 Mod 的 ${count(analysis.conflicts)} 个资源包${conflicts.length ? `（${conflicts.map(String).join("、")}）` : ""}。原有效果可能改变。`
+      : "";
+    message("workshop-conflicts", warning);
+    $("workshop-conflicts").classList.toggle("is-hidden", !warning);
+  }
+
   async function prepare() {
     if (!state.selected || state.working || state.catalogLoading) return;
     const selected = state.selected;
     const request = state.selectionVersion;
     state.working = true;
     state.prepared = null;
+    message("workshop-conflicts", "");
+    $("workshop-conflicts").classList.add("is-hidden");
     hideConfirmation();
     syncButtons();
-    message("workshop-analysis", "正在下载并检查资源包，请稍候…");
+    message("workshop-analysis", "正在下载并检查…");
     try {
       const result = await bridge.call("workshop_prepare", {
         busy: true, busyText: "下载并检查工坊资源包…", quiet: true,
@@ -204,7 +232,7 @@
       if (request !== state.selectionVersion || !sameEntry(state.selected, selected)) return;
       if (!sameEntry(result?.entry, selected)) throw new Error("检查结果与当前作品不一致，请重新刷新目录。");
       state.prepared = result;
-      message("workshop-analysis", analysisText(result), result.analysis?.can_install !== true);
+      showCheckResult(result);
     } catch (error) {
       if (request === state.selectionVersion) {
         state.prepared = null;
@@ -216,15 +244,23 @@
     }
   }
 
+  async function beginInstall() {
+    if (!state.selected || state.working || state.catalogLoading) return;
+    const page = state.pageVersion;
+    if (!canInstall()) await prepare();
+    if (page === state.pageVersion && canInstall()) confirmInstall();
+  }
+
   function confirmInstall() {
     if (!canInstall() || state.working) return;
     const analysis = state.prepared.analysis;
     const conflictNote = count(analysis.conflicts) > 0
       ? `与现有 Mod 有 ${count(analysis.conflicts)} 个资源包冲突，继续会替换这些资源；已有 Mod 的效果可能受影响。`
-      : "本次检查未发现资源包冲突。";
-    message("workshop-install-confirm-text", `确认安装「${state.selected.name}」？${conflictNote}安装会自动备份，可在 Mod 管理中禁用或卸载。`);
+      : "";
+    message("workshop-install-confirm-text", `安装「${state.selected.name}」？${conflictNote}确认后会扫描并安装，原文件会自动备份。`);
     $("workshop-install-confirm").classList.remove("is-hidden");
     $("workshop-install").setAttribute("aria-expanded", "true");
+    syncButtons();
     $("workshop-install-accept").focus();
   }
 
@@ -238,13 +274,14 @@
       });
       state.prepared = null;
       hideConfirmation();
+      $("workshop-conflicts").classList.add("is-hidden");
       bridge.onInstall?.(result);
-      message("workshop-analysis", `已安装「${result.name || state.selected?.name || "作品"}」。可在“Mod 管理”禁用、卸载或还原。`);
+      message("workshop-analysis", "已安装。可在“Mod 管理”禁用或卸载。");
       bridge.toast("工坊作品已安装，原文件已自动备份");
     } catch (error) {
       state.prepared = null;
       hideConfirmation();
-      message("workshop-analysis", `安装未完成：${error.message || "检查未通过"}。请重新下载检查后再试。`, true);
+      message("workshop-analysis", `安装未完成：${error.message || "检查未通过"}`, true);
     } finally {
       state.working = false;
       syncButtons();
@@ -255,7 +292,10 @@
     if (state.working || state.catalogLoading) return;
     state.working = true;
     state.submission = null;
+    state.submissionExported = false;
     message("workshop-submission-result", "");
+    message("workshop-submission-check-details", "");
+    message("workshop-submission-export-details", "");
     syncButtons();
     try {
       const result = await bridge.call("workshop_choose_submission", {
@@ -267,7 +307,8 @@
       }
       if (!result?.inspection) throw new Error("投稿包没有通过格式检查。");
       state.submission = result;
-      message("workshop-submission-file", `已选择：${result.path_label || "投稿 ZIP"}\n${inspectionText(result.inspection)}`);
+      message("workshop-submission-file", `已选择 ${result.path_label || "投稿 ZIP"}，检查通过。`);
+      message("workshop-submission-check-details", inspectionText(result.inspection));
     } catch (error) {
       message("workshop-submission-file", `投稿包检查失败：${error.message || "请选择本工具导出的 ZIP"}`, true);
     } finally {
@@ -286,6 +327,7 @@
       metadata[field] = $(`workshop-submit-${field}`).value.trim();
     }
     state.working = true;
+    state.submissionExported = false;
     syncButtons();
     try {
       const result = await bridge.call("workshop_export_submission", {
@@ -296,7 +338,9 @@
         return;
       }
       const reportLine = result.report_path ? `\n检查报告：${result.report_path}` : "";
-      message("workshop-submission-result", `已导出投稿包：${result.path || "所选保存位置"}${reportLine}\n下一步：打开 GitHub 投稿页，手动上传生成的文件。提交后等待人工审核，通过审核才会上架。`);
+      state.submissionExported = true;
+      message("workshop-submission-result", "导出完成。打开 GitHub 投稿页，手动上传投稿 ZIP 和报告，等待人工审核。");
+      message("workshop-submission-export-details", `投稿包：${result.path || "所选保存位置"}${reportLine}`);
       bridge.toast("投稿包已导出，还需到 GitHub 手动提交审核");
     } catch (error) {
       message("workshop-submission-result", `导出失败：${error.message || "请重新检查投稿包"}`, true);
@@ -323,13 +367,14 @@
     $("workshop-refresh").addEventListener("click", () => refresh(true));
     $("workshop-search").addEventListener("input", () => { renderItems(); syncButtons(); });
     $("workshop-category").addEventListener("change", () => { renderItems(); syncButtons(); });
-    $("workshop-prepare").addEventListener("click", prepare);
-    $("workshop-install").addEventListener("click", confirmInstall);
+    $("workshop-install").addEventListener("click", beginInstall);
     $("workshop-install-accept").addEventListener("click", install);
     $("workshop-install-cancel").addEventListener("click", hideConfirmation);
     $("workshop-choose-submission").addEventListener("click", chooseSubmission);
     $("workshop-submit-form").addEventListener("submit", exportSubmission);
-    $("workshop-open-submission").addEventListener("click", () => openLink("submission"));
+    $("workshop-open-submission").addEventListener("click", () => {
+      if (state.submissionExported) openLink("submission");
+    });
     $("workshop-repository").addEventListener("click", () => openLink("repository"));
     $("workshop-report").addEventListener("click", () => {
       if (state.selected) openLink("report", state.selected.id);
@@ -342,6 +387,7 @@
   }
 
   function leave() {
+    state.pageVersion += 1;
     hideConfirmation();
   }
 

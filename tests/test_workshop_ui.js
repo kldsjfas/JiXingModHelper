@@ -68,7 +68,7 @@ function loadWorkshop() {
     document: { getElementById: find, createElement: (tag) => element(tag) },
   });
   const source = fs.readFileSync(path.join(__dirname, "../astral_party_auto/webui/workshop.js"), "utf8");
-  const hooks = "state, showDetail, refresh, prepare, confirmInstall, install, chooseSubmission, exportSubmission";
+  const hooks = "state, showDetail, refresh, prepare, beginInstall, confirmInstall, install, chooseSubmission, exportSubmission";
   vm.runInContext(source.replace(/\}\)\(\);\s*$/, `globalThis.ui = { ${hooks} };\n})();`), context);
   context.window.ModWorkshop.init({
     async call(name, options, ...args) {
@@ -122,7 +122,8 @@ async function checkSafeDisplayAndSearch() {
   assert.equal(ui.find("workshop-detail-description").textContent, item.description);
   assert.equal(ui.find("workshop-detail-sha256").textContent, item.asset.sha256);
   assert.equal(ui.find("workshop-detail-size").textContent, "2.0 KB");
-  assert.equal(ui.find("workshop-install").disabled, true);
+  assert.equal(ui.find("workshop-install").textContent, "安装");
+  assert.equal(ui.find("workshop-install-accept").disabled, true);
   ui.find("workshop-search").value = "alert";
   await ui.find("workshop-search").trigger("input");
   assert.equal(ui.find("workshop-results").children.length, 1);
@@ -148,7 +149,6 @@ async function checkEmptyAndNetworkRetry() {
   assert.equal(ui.state.loaded, true);
   assert.equal(ui.find("workshop-catalog-status").textContent, "首批作品正在征集。");
   assert.match(ui.find("workshop-results").children[0].children[0].textContent, /暂时没有已审核/);
-  assert.equal(ui.find("workshop-prepare").disabled, true);
   assert.equal(ui.find("workshop-install").disabled, true);
   ui.reply("workshop_catalog", { mods: [], status: "unavailable", message: "目录获取或验证失败；已停止下载，请检查网络后刷新。" });
   await ui.refresh(true);
@@ -161,28 +161,36 @@ async function checkTwoStepInstallAndPageLeave() {
   const item = entry();
   await loadEntries(ui, [item]);
   ui.showDetail(item);
+  await ui.install();
+  assert.equal(ui.requests.length, 1, "An unchecked work could be installed");
   ui.reply("workshop_prepare", prepared(item, true, 1));
-  await ui.prepare();
+  await ui.find("workshop-install").trigger("click");
   assert.equal(ui.requests.at(-1).name, "workshop_prepare");
   assert.deepEqual(Array.from(ui.requests.at(-1).args), [item.id, item.asset.sha256]);
   assert.equal(ui.find("workshop-install").disabled, false);
-  assert.match(ui.find("workshop-analysis").textContent, /可匹配 2.*冲突 1/);
-  assert.match(ui.find("workshop-analysis").textContent, /已有贴图/);
-  await ui.install();
-  assert.equal(ui.requests.length, 2, "Preparation alone allowed installation");
-  ui.confirmInstall();
+  assert.match(ui.find("workshop-check-details").textContent, /可匹配 2.*冲突 1/);
+  assert.match(ui.find("workshop-conflicts").textContent, /已有贴图/);
+  assert.equal(ui.requests.length, 2, "The main button installed without separate confirmation");
   assert.equal(ui.find("workshop-install-confirm").classList.contains("is-hidden"), false);
+  assert.equal(ui.find("workshop-install").classList.contains("is-hidden"), true);
   assert.match(ui.find("workshop-install-confirm-text").textContent, /已有 Mod 的效果可能受影响/);
+  await ui.find("workshop-install-cancel").trigger("click");
+  assert.equal(ui.find("workshop-install").classList.contains("is-hidden"), false);
+  assert.equal(ui.find("workshop-install").textContent, "继续安装");
+  await ui.install();
+  assert.equal(ui.requests.length, 2, "Cancel retained active confirmation");
+  await ui.find("workshop-install").trigger("click");
+  assert.equal(ui.requests.length, 2, "A checked work was downloaded again after cancellation");
   ui.publicApi.leave();
   assert.equal(ui.find("workshop-install-confirm").classList.contains("is-hidden"), true);
   await ui.install();
   assert.equal(ui.requests.length, 2, "Page leave retained pending install confirmation");
-  ui.confirmInstall();
+  await ui.find("workshop-install").trigger("click");
   ui.reply("workshop_install", { name: item.name, matched: 2, installed: [{ name: item.name }] });
   await ui.find("workshop-install-accept").trigger("click");
   assert.equal(ui.requests.at(-1).name, "workshop_install");
   assert.equal(ui.installed.length, 1);
-  assert.equal(ui.find("workshop-install").disabled, true);
+  assert.equal(ui.find("workshop-install-accept").disabled, true);
   assert.equal(ui.state.prepared, null);
 }
 
@@ -194,7 +202,7 @@ async function checkFailuresAndAsyncCandidate() {
   ui.showDetail(first);
   ui.reply("workshop_prepare", prepared(first, false));
   await ui.prepare();
-  assert.equal(ui.find("workshop-install").disabled, true, "Missing game was installable");
+  assert.equal(ui.find("workshop-install-accept").disabled, true, "Missing game was installable");
   ui.confirmInstall();
   assert.equal(ui.find("workshop-install-confirm").classList.contains("is-hidden"), true);
   const download = deferred();
@@ -215,7 +223,7 @@ async function checkFailuresAndAsyncCandidate() {
   ui.confirmInstall();
   ui.reply("workshop_install", new Error("系统扫描不可用，已拒绝安装"));
   await ui.install();
-  assert.equal(ui.find("workshop-install").disabled, true);
+  assert.equal(ui.find("workshop-install-accept").disabled, true);
   assert.equal(ui.state.prepared, null);
   assert.match(ui.find("workshop-analysis").textContent, /已拒绝安装/);
   ui.reply("workshop_catalog", new Error("下架目录不可用"));
@@ -240,7 +248,8 @@ async function checkSubmissionBoundary() {
   assert.equal(metadata.description, fields.description);
   assert.ok(!("id" in metadata));
   assert.match(ui.find("workshop-submission-result").textContent, /手动上传.*人工审核/);
-  assert.match(ui.find("workshop-submission-result").textContent, /检查报告.*submission\.json/);
+  assert.match(ui.find("workshop-submission-export-details").textContent, /检查报告.*submission\.json/);
+  assert.equal(ui.find("workshop-open-submission").classList.contains("is-hidden"), false);
   assert.doesNotMatch(ui.find("workshop-submission-result").textContent, /javascript/);
   ui.reply("workshop_open_link", true);
   await ui.find("workshop-open-submission").trigger("click");
@@ -249,6 +258,26 @@ async function checkSubmissionBoundary() {
   await ui.chooseSubmission();
   assert.equal(ui.state.submission, null);
   assert.equal(ui.find("workshop-export-submission").disabled, true);
+  assert.equal(ui.find("workshop-open-submission").classList.contains("is-hidden"), true);
+}
+
+async function checkInstallWhileLeavingPage() {
+  const ui = loadWorkshop();
+  const item = entry();
+  await loadEntries(ui, [item]);
+  ui.showDetail(item);
+  const download = deferred();
+  ui.reply("workshop_prepare", download.promise);
+  const click = ui.find("workshop-install").trigger("click");
+  ui.publicApi.leave();
+  download.resolve(prepared(item));
+  await click;
+  assert.equal(ui.find("workshop-install-confirm").classList.contains("is-hidden"), true,
+    "Late download opened installation confirmation after leaving the page");
+  assert.equal(ui.find("workshop-install").textContent, "继续安装");
+  assert.equal(ui.requests.filter((request) => request.name === "workshop_install").length, 0);
+  await ui.install();
+  assert.equal(ui.requests.length, 2, "Late download installed without confirmation");
 }
 
 function checkIntegration() {
@@ -262,9 +291,14 @@ function checkIntegration() {
   assert.ok(app.includes("window.ModWorkshop?.enter"));
   assert.ok(app.includes("window.ModWorkshop?.leave"));
   assert.doesNotMatch(source, /innerHTML|outerHTML|insertAdjacentHTML|\beval\s*\(|\bfetch\s*\(|window\.open/);
-  for (const phrase of ["浏览无需登录", "未审核的投稿", "不能保证零风险", "不会自动上传", "人工审核"]) {
+  for (const phrase of ["浏览无需登录", "未审核的投稿", "不能保证零风险", "不会自动上传", "人工审核", "分享我的作品"]) {
     assert.ok(html.includes(phrase), `Missing workshop guidance: ${phrase}`);
   }
+  assert.ok(!html.includes('id="workshop-prepare"'), "The separate technical download button remained");
+  assert.match(html, /id="workshop-share"[^>]*>\s*<summary>分享我的作品<\/summary>/);
+  assert.doesNotMatch(html.match(/<details id="workshop-share"[^>]*>/)[0], /\sopen(?:\s|=|>)/);
+  assert.ok(html.indexOf('id="workshop-choose-submission"') < html.indexOf('id="workshop-submit-form"'));
+  assert.match(html, /id="workshop-submit-version"[^>]*value="1\.0\.0"/);
 }
 
 (async () => {
@@ -274,5 +308,6 @@ function checkIntegration() {
   await checkTwoStepInstallAndPageLeave();
   await checkFailuresAndAsyncCandidate();
   await checkSubmissionBoundary();
-  console.log("Workshop UI safety: 6 checks passed");
+  await checkInstallWhileLeavingPage();
+  console.log("Workshop UI safety: 7 checks passed");
 })().catch((error) => { console.error(error); process.exitCode = 1; });

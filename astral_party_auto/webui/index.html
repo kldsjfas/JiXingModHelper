@@ -143,64 +143,68 @@
         </section>
 
         <section id="page-workshop" class="page">
-          <article class="card workshop-intro">
-            <div><h2>Mod 工坊</h2><p>发现玩家作品，也可以把自己的作品提交审核。浏览无需登录，投稿使用 GitHub。</p>
-              <p class="workshop-safety-note">这里只提供已审核上架的资源包。下载会核对文件与审核记录，安装前重新检查并扫描；审核、哈希和杀毒均不能保证零风险。未审核的投稿不会出现在可安装目录中。</p>
-            </div>
-            <button id="workshop-repository" class="button ghost compact" type="button">仓库 ↗</button>
-          </article>
-
-          <article class="card">
+          <article class="card workshop-browse-header">
+            <p class="workshop-intro">浏览玩家作品，选中后即可安装。</p>
             <div class="workshop-toolbar">
               <input id="workshop-search" type="search" maxlength="100" aria-label="搜索工坊作品" placeholder="搜索作品名、作者或介绍…">
               <select id="workshop-category" aria-label="工坊分类"><option value="">全部分类</option><option value="texture">贴图</option><option value="text">文字</option><option value="animation">动画</option><option value="emote">表情</option><option value="audio">音频</option><option value="mixed">综合</option></select>
-              <button id="workshop-refresh" class="button ghost compact" type="button">刷新目录</button>
+              <button id="workshop-refresh" class="button ghost compact" type="button">刷新</button>
             </div>
-            <p id="workshop-catalog-status" class="workshop-status" role="status" aria-live="polite">进入工坊后读取审核目录。</p>
+            <p id="workshop-catalog-status" class="workshop-status" role="status" aria-live="polite">进入后加载作品。</p>
+            <details class="workshop-extra"><summary>使用说明</summary><p>浏览无需登录。只提供已审核作品；安装前会检查文件并扫描，确认后才会写入游戏，原文件自动备份。</p><p>审核、哈希和杀毒均不能保证零风险。未审核的投稿不会出现在安装目录中。</p><button id="workshop-repository" class="button ghost compact" type="button">查看仓库 ↗</button></details>
           </article>
 
-          <div class="workshop-layout">
+          <div id="workshop-layout" class="workshop-layout">
             <article class="card">
               <div class="section-heading"><h3>已审核作品</h3><span id="workshop-count" class="workshop-count">0 个作品</span></div>
+              <p id="workshop-list-hint" class="workshop-list-hint is-hidden">选中作品，查看说明并安装。</p>
               <div id="workshop-results" class="workshop-results"></div>
             </article>
-            <article class="card workshop-detail">
-              <div id="workshop-detail-empty" class="workshop-empty"><strong>选一个作品看看</strong><span>先查看作者说明和适用版本，下载检查后再决定是否安装。</span></div>
-              <div id="workshop-detail-content" class="is-hidden">
+            <article id="workshop-detail" class="card workshop-detail is-hidden">
+              <div id="workshop-detail-content">
                 <h3 id="workshop-detail-title"></h3>
                 <dl class="workshop-facts">
-                  <dt>作者</dt><dd id="workshop-detail-author"></dd><dt>分类</dt><dd id="workshop-detail-category"></dd>
-                  <dt>作品版本</dt><dd id="workshop-detail-version"></dd><dt>适用游戏版本</dt><dd id="workshop-detail-game-version"></dd>
-                  <dt>下载大小</dt><dd id="workshop-detail-size"></dd>
+                  <dt>作者</dt><dd id="workshop-detail-author"></dd><dt>适用游戏版本</dt><dd id="workshop-detail-game-version"></dd>
                 </dl>
                 <p id="workshop-detail-description" class="workshop-description"></p>
-                <details class="workshop-hash"><summary>查看审核目录中的文件指纹</summary><code id="workshop-detail-sha256"></code></details>
-                <div id="workshop-analysis" class="notice workshop-check-result" role="status" aria-live="polite"></div>
-                <div class="action-row"><button id="workshop-prepare" class="button purple" type="button" disabled>下载并检查</button><button id="workshop-install" class="button primary" type="button" aria-expanded="false" aria-controls="workshop-install-confirm" disabled>确认安装…</button><button id="workshop-report" class="button ghost compact" type="button" disabled>举报 ↗</button></div>
+                <p id="workshop-analysis" class="workshop-status" role="status" aria-live="polite"></p>
+                <p id="workshop-conflicts" class="notice workshop-conflict-warning is-hidden" role="status"></p>
+                <div class="action-row"><button id="workshop-install" class="button primary" type="button" aria-expanded="false" aria-controls="workshop-install-confirm" disabled>安装</button></div>
                 <div id="workshop-install-confirm" class="notice workshop-install-confirm is-hidden" role="group" aria-label="确认安装工坊作品">
-                  <p id="workshop-install-confirm-text"></p><div class="action-row"><button id="workshop-install-accept" class="button primary compact" type="button" disabled>开始扫描并安装</button><button id="workshop-install-cancel" class="button ghost compact" type="button">取消</button></div>
+                  <p id="workshop-install-confirm-text"></p><div class="action-row"><button id="workshop-install-accept" class="button primary compact" type="button" disabled>确认安装</button><button id="workshop-install-cancel" class="button ghost compact" type="button">取消</button></div>
                 </div>
+                <details id="workshop-more-info" class="workshop-extra"><summary>更多信息</summary>
+                  <dl class="workshop-facts"><dt>分类</dt><dd id="workshop-detail-category"></dd><dt>作品版本</dt><dd id="workshop-detail-version"></dd><dt>下载大小</dt><dd id="workshop-detail-size"></dd></dl>
+                  <div class="workshop-hash">文件指纹<code id="workshop-detail-sha256"></code></div>
+                  <p id="workshop-check-details" class="workshop-check-result"></p>
+                  <button id="workshop-report" class="button ghost compact" type="button" disabled>举报作品 ↗</button>
+                </details>
               </div>
             </article>
           </div>
 
-          <article class="card">
-            <div class="section-heading"><div><h2>我的投稿</h2><p>先从“我的作品集”导出 ZIP，再填写介绍。导出的投稿包不会自动上传，也不会直接上架。</p></div></div>
-            <form id="workshop-submit-form">
-              <div class="workshop-submit-grid">
-                <label for="workshop-submit-name">作品名称<input id="workshop-submit-name" type="text" maxlength="80" required placeholder="给作品起个名字"></label>
-                <label for="workshop-submit-author">作者<input id="workshop-submit-author" type="text" maxlength="80" required placeholder="公开展示的昵称"></label>
-                <label for="workshop-submit-category">分类<select id="workshop-submit-category" required><option value="texture">贴图</option><option value="text">文字</option><option value="animation">动画</option><option value="emote">表情</option><option value="audio">音频</option><option value="mixed">综合</option></select></label>
-                <label for="workshop-submit-version">作品版本<input id="workshop-submit-version" type="text" maxlength="32" required placeholder="例如 1.0.0"></label>
-                <label for="workshop-submit-game_version">适用游戏版本<input id="workshop-submit-game_version" type="text" maxlength="80" required placeholder="填写实际测试过的游戏版本"></label>
-                <label class="workshop-submit-description" for="workshop-submit-description">介绍和注意事项<textarea id="workshop-submit-description" maxlength="2000" required placeholder="改了什么、如何使用、可能与哪些作品冲突；请勿填写账号密码等隐私。"></textarea></label>
-              </div>
-              <div class="action-row"><button id="workshop-choose-submission" class="button ghost" type="button">1. 选择并检查 ZIP</button><button id="workshop-export-submission" class="button purple" type="submit" disabled>2. 导出投稿包和报告</button><button id="workshop-open-submission" class="button ghost" type="button">3. 打开 GitHub 投稿页 ↗</button></div>
-            </form>
-            <p id="workshop-submission-file" class="workshop-status workshop-check-result" role="status" aria-live="polite">未选择 ZIP。可先到“我的作品集”导出作品。</p>
-            <p id="workshop-submission-result" class="workshop-status workshop-check-result" role="status" aria-live="polite"></p>
-            <small>投稿需手动上传生成的文件，提交后由维护者人工审核。未通过审核的作品不能从工坊下载安装。仅接受资源替换 ZIP，不接受程序、脚本或安装器。</small>
-          </article>
+          <details id="workshop-share" class="card workshop-submission">
+            <summary>分享我的作品</summary>
+            <div class="workshop-share-content">
+              <p class="workshop-safety-note">选择作品 ZIP、填写介绍，再导出投稿包。GitHub 需手动上传，人工审核后上架。</p>
+              <button id="workshop-choose-submission" class="button ghost" type="button">选择作品 ZIP</button>
+              <p id="workshop-submission-file" class="workshop-status" role="status" aria-live="polite">可先在“我的作品集”导出 ZIP。</p>
+              <form id="workshop-submit-form">
+                <div class="workshop-submit-grid">
+                  <label for="workshop-submit-name">作品名称<input id="workshop-submit-name" type="text" maxlength="80" required placeholder="给作品起个名字"></label>
+                  <label for="workshop-submit-author">作者<input id="workshop-submit-author" type="text" maxlength="80" required placeholder="公开展示的昵称"></label>
+                  <label for="workshop-submit-category">分类<select id="workshop-submit-category" required><option value="texture">贴图</option><option value="text">文字</option><option value="animation">动画</option><option value="emote">表情</option><option value="audio">音频</option><option value="mixed">综合</option></select></label>
+                  <label for="workshop-submit-version">作品版本<input id="workshop-submit-version" type="text" maxlength="32" value="1.0.0" required></label>
+                  <label for="workshop-submit-game_version">适用游戏版本<input id="workshop-submit-game_version" type="text" maxlength="80" required placeholder="实际测试过的游戏版本"></label>
+                  <label class="workshop-submit-description" for="workshop-submit-description">作品介绍<textarea id="workshop-submit-description" maxlength="2000" required placeholder="改了什么、使用方法和注意事项"></textarea></label>
+                </div>
+                <div class="action-row"><button id="workshop-export-submission" class="button purple" type="submit" disabled>导出投稿包</button></div>
+              </form>
+              <p id="workshop-submission-result" class="workshop-status" role="status" aria-live="polite"></p>
+              <button id="workshop-open-submission" class="button primary compact is-hidden" type="button">打开投稿页 ↗</button>
+              <details class="workshop-extra"><summary>检查结果与保存位置</summary><p id="workshop-submission-check-details" class="workshop-check-result"></p><p id="workshop-submission-export-details" class="workshop-check-result"></p><p>导出的投稿包不会自动上传。仅接受资源替换 ZIP；未审核的作品不能从工坊安装。</p></details>
+            </div>
+          </details>
         </section>
 
         <section id="page-browse" class="page browse-page">
