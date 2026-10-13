@@ -43,7 +43,7 @@ jobs:
       - name: Checkout reviewed workshop bridge
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          ref: 36910382d235f7abbde0811c06373e6705710cb2 # reviewed source; never accepts an input ref
+          ref: 7b3a973ceb02839ca0ad50a4f29884eb2038934b # reviewed source; never accepts an input ref
           persist-credentials: false
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
@@ -55,7 +55,11 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           WORKSHOP_ADMIN_SECRET: ${{ secrets.WORKSHOP_ADMIN_SECRET }}
-          WORKSHOP_ORIGIN_IP: ${{ secrets.WORKSHOP_ORIGIN_IP }}
+          WORKSHOP_REVIEW_TUNNEL_PORT: '18443'
+          WORKSHOP_REVIEW_SSH_HOST: ${{ secrets.WORKSHOP_REVIEW_SSH_HOST }}
+          WORKSHOP_REVIEW_SSH_PORT: ${{ secrets.WORKSHOP_REVIEW_SSH_PORT }}
+          WORKSHOP_REVIEW_SSH_KEY: ${{ secrets.WORKSHOP_REVIEW_SSH_KEY }}
+          WORKSHOP_REVIEW_KNOWN_HOSTS: ${{ secrets.WORKSHOP_REVIEW_KNOWN_HOSTS }}
           BRIDGE_ACTION: ${{ github.event.inputs.action || 'sync' }}
           SUBMISSION_ID: ${{ github.event.inputs.submission_id }}
           REVIEW_MESSAGE: ${{ github.event.inputs.message }}
@@ -64,4 +68,39 @@ jobs:
           GAME_NOTES: ${{ github.event.inputs.game_notes }}
           PYTHONPATH: ${{ github.workspace }}
           PYTHONDONTWRITEBYTECODE: '1'
-        run: python -B tools/workshop_github_bridge.py
+        run: |
+          set -euo pipefail
+          review_dir=$(mktemp -d "$RUNNER_TEMP/jixing-review.XXXXXXXX")
+          chmod 700 "$review_dir"
+          tunnel_pid=''
+          trap 'if [ -n "$tunnel_pid" ]; then kill "$tunnel_pid" 2>/dev/null || true; wait "$tunnel_pid" 2>/dev/null || true; fi; rm -f "$review_dir/key" "$review_dir/known_hosts"; rmdir "$review_dir"' EXIT
+          umask 077
+          printf '%s\n' "$WORKSHOP_REVIEW_SSH_KEY" > "$review_dir/key"
+          printf '%s\n' "$WORKSHOP_REVIEW_KNOWN_HOSTS" > "$review_dir/known_hosts"
+          python -B - <<'PY'
+          import ipaddress, os
+          address = ipaddress.ip_address(os.environ['WORKSHOP_REVIEW_SSH_HOST'])
+          port = os.environ['WORKSHOP_REVIEW_SSH_PORT']
+          if not address.is_global or not port.isascii() or not port.isdigit() or not 1 <= int(port) <= 65535:
+              raise SystemExit('The protected review SSH route is invalid')
+          PY
+          ssh -N -L 127.0.0.1:18443:127.0.0.1:19443 \
+            -i "$review_dir/key" -p "$WORKSHOP_REVIEW_SSH_PORT" -l jixing-review-tunnel \
+            -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$review_dir/known_hosts" -o GlobalKnownHostsFile=/dev/null \
+            -o ExitOnForwardFailure=yes -o ConnectTimeout=10 \
+            -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+            -- "$WORKSHOP_REVIEW_SSH_HOST" &
+          tunnel_pid=$!
+          python -B - <<'PY'
+          import os, socket, time
+          for attempt in range(60):
+              try:
+                  with socket.create_connection(('127.0.0.1',18443),timeout=1):
+                      break
+              except OSError:
+                  time.sleep(0.25)
+          else:
+              raise SystemExit('The restricted review tunnel did not start')
+          PY
+          python -B tools/workshop_github_bridge.py
