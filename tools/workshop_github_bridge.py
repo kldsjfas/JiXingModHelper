@@ -5,9 +5,12 @@ import base64
 import hashlib
 import html
 import http.client
+import ipaddress
 import json
 import os
 import re
+import socket
+import ssl
 import sys
 import tempfile
 import time
@@ -31,13 +34,16 @@ BLOCK_BYTES = 64 * 1024
 
 
 class ApiFailure(RuntimeError):
-    def __init__(self, status):
+    def __init__(self, status, source_host=""):
         self.status = status
-        super().__init__(f"受信服务请求失败（HTTP {status}），未输出远端内容。")
+        allowed_hosts = {"api.github.com", "uploads.github.com", urlsplit(SERVICE_URL).hostname}
+        self.source_host = source_host if source_host in allowed_hosts else ""
+        source = "（" + self.source_host + "）" if self.source_host else ""
+        super().__init__(f"受信服务{source}请求失败（HTTP {status}），未输出远端内容。")
 
 
 class TrustedHttp:
-    def __init__(self, origin, token):
+    def __init__(self, origin, token, *, origin_ip=""):
         parts = urlsplit(origin)
         if (parts.scheme != "https" or parts.username is not None or parts.password is not None or parts.port or parts.query or parts.fragment
                 or not parts.hostname or "\\" in origin or any(ord(char) <= 32 for char in origin)):
@@ -45,11 +51,41 @@ class TrustedHttp:
         if not isinstance(token, str) or not token or any(ord(char) <= 32 or ord(char) >= 127 for char in token):
             raise ValueError("缺少受保护的桥接凭证。")
         self.host, self.prefix, self.token = parts.hostname, parts.path.rstrip("/"), token
+        self._origin_ip = ""
+        if origin_ip:
+            if origin != SERVICE_URL:
+                raise ValueError("源站直连只允许固定工坊服务，不能改变 GitHub 连接。")
+            try:
+                if not isinstance(origin_ip, str) or origin_ip != origin_ip.strip():
+                    raise ValueError
+                address = ipaddress.ip_address(origin_ip)
+                if (not address.is_global or address.is_private or address.is_loopback or address.is_multicast
+                        or address.is_reserved or address.is_link_local or address.is_unspecified
+                        or getattr(address, "ipv4_mapped", None) is not None or getattr(address, "scope_id", None) is not None):
+                    raise ValueError
+            except (TypeError, ValueError):
+                raise ValueError("工坊源站直连配置必须是有效的公网地址。") from None
+            self._origin_ip = address.compressed
+
+    def _connection(self):
+        if not self._origin_ip:
+            return trusted_https_connection(self.host, timeout=30)
+        connection = http.client.HTTPSConnection(self.host, timeout=30, context=ssl.create_default_context())
+
+        def connect_origin(address, timeout=30, source_address=None):
+            if address != (self.host, 443):
+                raise ValueError("源站直连不能改变受信服务来源。")
+            return socket.create_connection((self._origin_ip, 443), timeout, source_address)
+
+        # 仅 TCP 使用维护者的 Secret 地址；HTTPSConnection 仍用原域名作 SNI、
+        # 校验证书并生成 Host 请求头。认证请求在完成 TLS 校验后才发送。
+        connection._create_connection = connect_origin
+        return connection
 
     def request(self, method, path, value=None, *, file=None, size=0, sha256="", output=None, binary=False):
         if not path.startswith("/") or "\\" in path or any(ord(char) <= 32 for char in path):
             raise ValueError("桥接请求路径不正确。")
-        connection = trusted_https_connection(self.host, timeout=30)
+        connection = self._connection()
         try:
             headers = {"Authorization": "Bearer " + self.token, "User-Agent": "JiXing-Workshop-Review",
                        "Accept": "application/octet-stream" if binary else "application/vnd.github+json",
@@ -79,7 +115,7 @@ class TrustedHttp:
             response = connection.getresponse()
             if response.status not in (200, 201, 204):
                 # 包括所有跳转：绝不把任何 Bearer 凭证转发到其它来源。
-                raise ApiFailure(response.status)
+                raise ApiFailure(response.status, self.host)
             if output is not None:
                 if response.getheader("Content-Type", "").split(";")[0] not in ("application/zip", "application/octet-stream"):
                     raise ValueError("审核包响应类型不正确。")
@@ -116,8 +152,8 @@ class TrustedHttp:
 
 
 class ServiceApi:
-    def __init__(self, secret):
-        self.http = TrustedHttp(SERVICE_URL, secret)
+    def __init__(self, secret, *, origin_ip=""):
+        self.http = TrustedHttp(SERVICE_URL, secret, origin_ip=origin_ip)
 
     def pending(self):
         for page in range(101):
@@ -416,7 +452,7 @@ def main(environment=None):
     environment = os.environ if environment is None else environment
     github = GithubApi(environment.get("GITHUB_TOKEN", ""))
     actor, default_branch = authorize_environment(environment, github)
-    service = ServiceApi(environment.get("WORKSHOP_ADMIN_SECRET", ""))
+    service = ServiceApi(environment.get("WORKSHOP_ADMIN_SECRET", ""), origin_ip=environment.get("WORKSHOP_ORIGIN_IP", ""))
     bridge = WorkshopBridge(service, github, actor=actor, default_branch=default_branch)
     action = environment.get("BRIDGE_ACTION", "sync")
     identifier = environment.get("SUBMISSION_ID", "")

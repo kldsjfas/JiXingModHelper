@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import ssl
 import time
 import unittest
 from copy import deepcopy
@@ -11,7 +12,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from tests.test_workshop import metadata, pack_bytes
-from tools.workshop_github_bridge import (ApiFailure, REPOSITORY, TrustedHttp, WorkshopBridge,
+from tools.workshop_github_bridge import (ApiFailure, REPOSITORY, SERVICE_URL, ServiceApi, TrustedHttp, WorkshopBridge,
                                           GithubApi, approved_submission, authorize_environment, issue_body)
 
 SUBMISSION = "a" * 32
@@ -423,6 +424,79 @@ class WorkshopGithubBridgeTests(unittest.TestCase):
         with patch.object(github, "request", side_effect=duplicate_drafts):
             with self.assertRaisesRegex(ValueError, "多个"):
                 github.release(tag)
+
+    def test_http_failure_reports_only_fixed_source_host(self):
+        response = Mock(status=403)
+        connection = Mock()
+        connection.getresponse.return_value = response
+        transport = TrustedHttp(SERVICE_URL, "private-test-admin-token", origin_ip="8.8.8.8")
+        with patch.object(transport, "_connection", return_value=connection):
+            with self.assertRaises(ApiFailure) as caught:
+                transport.request("GET", "/v1/admin/submissions/pending")
+        self.assertEqual(caught.exception.source_host, "xn--killer-gx2m.top")
+        self.assertIn("xn--killer-gx2m.top", str(caught.exception))
+        self.assertNotIn("8.8.8.8", str(caught.exception))
+        self.assertNotIn("private-test-admin-token", str(caught.exception))
+        response.read.assert_not_called()
+        self.assertNotIn("8.8.8.8", str(ApiFailure(403, "8.8.8.8")))
+
+    def test_origin_pin_keeps_domain_host_sni_and_certificate_verification(self):
+        hostname = "xn--killer-gx2m.top"
+        transport = TrustedHttp(SERVICE_URL, "private-test-admin-token", origin_ip="8.8.8.8")
+        context = Mock(check_hostname=True, verify_mode=ssl.CERT_REQUIRED)
+        encrypted_socket = Mock()
+        context.wrap_socket.return_value = encrypted_socket
+        raw_socket = Mock()
+        with patch("tools.workshop_github_bridge.ssl.create_default_context", return_value=context), patch("tools.workshop_github_bridge.socket.create_connection", return_value=raw_socket) as dialer, patch("tools.workshop_github_bridge.trusted_https_connection") as proxy_factory:
+            connection = transport._connection()
+            try:
+                self.assertEqual(connection.host, hostname)
+                self.assertEqual(connection.port, 443)
+                connection.connect()
+                dialer.assert_called_once_with(("8.8.8.8", 443), 30, None)
+                context.wrap_socket.assert_called_once_with(raw_socket, server_hostname=hostname)
+                self.assertIs(connection.sock, encrypted_socket)
+                proxy_factory.assert_not_called()
+                connection.putrequest("GET", "/jixing-workshop/v1/admin/submissions/pending")
+                self.assertIn(b"Host: " + hostname.encode(), connection._buffer)
+                self.assertNotIn(b"Host: 8.8.8.8", connection._buffer)
+            finally:
+                connection.close()
+        self.assertTrue(context.check_hostname)
+        self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+
+    def test_pinned_connection_certificate_failure_sends_no_admin_bearer(self):
+        transport = TrustedHttp(SERVICE_URL, "private-test-admin-token", origin_ip="8.8.8.8")
+        context = Mock(check_hostname=True, verify_mode=ssl.CERT_REQUIRED)
+        context.wrap_socket.side_effect = ssl.SSLCertVerificationError("test-domain-mismatch")
+        raw_socket = Mock()
+        with patch("tools.workshop_github_bridge.ssl.create_default_context", return_value=context), patch("tools.workshop_github_bridge.socket.create_connection", return_value=raw_socket):
+            with self.assertRaisesRegex(RuntimeError, "网络连接失败") as caught:
+                transport.request("GET", "/v1/admin/submissions/pending")
+        raw_socket.sendall.assert_not_called()
+        self.assertNotIn("private-test-admin-token", str(caught.exception))
+        self.assertNotIn("8.8.8.8", str(caught.exception))
+
+    def test_origin_pin_rejects_nonpublic_addresses_and_cannot_pin_github(self):
+        for address in ("127.0.0.1", "10.1.2.3", "192.168.2.3", "172.16.2.3", "169.254.169.254", "0.0.0.0",
+                        "224.0.0.1", "255.255.255.255", "192.0.2.1", "::1", "fc00::1", "fe80::1", "ff02::1",
+                        "::ffff:8.8.8.8", "2001:4860:4860::8888%eth0", "8.8.8.8\n", "not-an-address"):
+            with self.subTest(address=address), self.assertRaises(ValueError) as caught:
+                TrustedHttp(SERVICE_URL, "test-protected-token", origin_ip=address)
+            self.assertNotIn(address, str(caught.exception))
+        for origin in ("https://api.github.com", "https://uploads.github.com", SERVICE_URL + "/extra"):
+            with self.subTest(origin=origin), self.assertRaisesRegex(ValueError, "固定工坊"):
+                TrustedHttp(origin, "test-protected-token", origin_ip="8.8.8.8")
+
+    def test_unpinned_service_still_uses_normal_trusted_system_proxy_connection(self):
+        service = ServiceApi("test-protected-token")
+        factory = Mock()
+        with patch("tools.workshop_github_bridge.trusted_https_connection", factory):
+            service.http._connection()
+        factory.assert_called_once_with("xn--killer-gx2m.top", timeout=30)
+        github = GithubApi("test-protected-github-token")
+        self.assertEqual(github.http._origin_ip, "")
+        self.assertEqual(github.uploads._origin_ip, "")
 
 
 if __name__ == "__main__":
