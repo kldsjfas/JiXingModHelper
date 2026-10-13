@@ -107,6 +107,160 @@ class DesktopApi:
         self.controller = ModController(self._append_log)
         self._audio_workspace = None
         self._update_checker = UpdateChecker(__version__)
+        self._workshop_client = None
+        self._workshop_pending = None
+        self._workshop_submission = None
+        self._workshop_issue_url = None
+
+    def _workshop(self):
+        if self._workshop_client is None:
+            from .modkit.workshop import WorkshopClient
+            self._workshop_client = WorkshopClient(DATA_DIR)
+        return self._workshop_client
+
+    def _clear_workshop_pending(self) -> None:
+        pending = getattr(self, "_workshop_pending", None)
+        self._workshop_pending = None
+        if pending is not None:
+            cleanup = self._workshop().discard(pending)
+            if isinstance(cleanup, dict) and not cleanup.get("removed"):
+                self._append_log("工坊暂存保留：" + cleanup.get("message", "暂存无法安全清理。"))
+
+    def _workshop_analysis(self, directory: Path, entry: dict) -> dict:
+        manager = self.controller.manager
+        if manager is None:
+            return {"matched": 0, "unmatched": 0, "conflicts": 0, "conflict_names": [],
+                    "can_install": False, "message": "未检测到游戏；可以浏览和投稿，安装需要先连接游戏。"}
+        analysis = manager.analyze_mod(directory)
+        name = "工坊 " + entry["id"]
+        conflict_files = set()
+        conflicts = []
+        for mod_name, mod in manager._load_state().get("mods", {}).items():
+            overlap = set(analysis.matched).intersection(mod.get("files", []))
+            if mod_name != name and not mod.get("disabled", False) and overlap:
+                conflicts.append(mod_name)
+                conflict_files.update(overlap)
+        compatible = bool(analysis.matched) and not analysis.unmatched
+        return {"matched": len(analysis.matched), "unmatched": len(analysis.unmatched),
+                "conflicts": len(conflict_files), "conflict_names": conflicts, "can_install": compatible,
+                "matched_names": sorted(analysis.matched), "unmatched_names": sorted(analysis.unmatched),
+                "message": "资源名称匹配，仍请核对作者标注的游戏版本。" if compatible else "资源与当前游戏不完全匹配，工坊停止安装。"}
+
+    @exposed
+    def workshop_catalog(self, force: bool = False) -> dict:
+        return self._workshop().catalog(force=bool(force))
+
+    @exposed
+    def workshop_prepare(self, mod_id: str, sha256: str) -> dict:
+        self._clear_workshop_pending()
+        prepared = self._workshop().prepare(mod_id, expected_sha256=sha256)
+        try:
+            analysis = self._workshop_analysis(Path(prepared["mod_dir"]), prepared["entry"])
+            prepared["game_key"] = self.controller._index_source_key
+            prepared["analysis"] = analysis
+            self._workshop_pending = prepared
+            return {"entry": prepared["entry"], "inspection": prepared["inspection"], "analysis": analysis}
+        except Exception:
+            self._workshop().discard(prepared)
+            raise
+
+    @exposed
+    def workshop_install(self) -> dict:
+        from .modkit.workshop_security import scan_workshop_package
+        previous = self._workshop_pending
+        if previous is None:
+            raise ValueError("请先下载并检查一个工坊作品。")
+        entry = previous["entry"]
+        game_key = previous["game_key"]
+        previous_analysis = previous.get("analysis")
+        self._clear_workshop_pending()
+        if game_key != self.controller._index_source_key or self.controller.manager is None:
+            raise ValueError("游戏目录已改变，请重新下载并检查作品。")
+        # 即使刚才下载通过，也要重新检查撤回状态和目录摘要。
+        prepared = self._workshop().prepare(entry["id"], expected_sha256=entry["asset"]["sha256"])
+        try:
+            analysis = self._workshop_analysis(Path(prepared["mod_dir"]), prepared["entry"])
+            if not analysis["can_install"]:
+                raise ValueError(analysis["message"])
+            keys = ("matched", "unmatched", "conflicts", "matched_names", "unmatched_names", "conflict_names")
+            if previous_analysis is None or any(analysis.get(key) != previous_analysis.get(key) for key in keys):
+                raise ValueError("资源匹配或 Mod 冲突已改变，请重新下载并检查后确认安装。")
+            self.controller._require_catalog_game_stopped()
+            scan = scan_workshop_package(Path(prepared["mod_dir"]))
+            self._workshop().verify_prepared(prepared)
+            name = "工坊 " + entry["id"]
+            result = self.controller.install(Path(prepared["mod_dir"]), name=name)
+            self._append_log(f"工坊安装完成：{entry['name']} {entry['version']}；已通过格式、摘要和本机扫描。")
+            return {"name": name, "matched": len(result.matched), "entry": prepared["entry"], "scan": scan,
+                    "installed": self.controller.installed_mods(), "dashboard": self._dashboard_state()}
+        finally:
+            self._workshop().discard(prepared)
+
+    @exposed
+    def workshop_choose_submission(self) -> dict:
+        from .modkit.workshop import inspect_package
+        self._workshop_submission = None
+        self._workshop_issue_url = None
+        path = self._pick_path("open", file_types=("助手导出的 Mod ZIP (*.zip)",))
+        if path is None:
+            return {"cancelled": True}
+        inspection = inspect_package(path)
+        self._workshop_submission = {"path": path, "sha256": inspection["sha256"]}
+        return {"cancelled": False, "path_label": path.name, "inspection": inspection}
+
+    @exposed
+    def workshop_export_submission(self, metadata: dict) -> dict:
+        from urllib.parse import urlencode
+        from uuid import uuid4
+        from .modkit.workshop import inspect_package, prepare_submission, validate_metadata
+        candidate = self._workshop_submission
+        self._workshop_issue_url = None
+        if candidate is None:
+            raise ValueError("请先选择投稿 ZIP。")
+        if not isinstance(metadata, dict):
+            raise ValueError("投稿信息无效。")
+        if inspect_package(candidate["path"])["sha256"] != candidate["sha256"]:
+            self._workshop_submission = None
+            raise ValueError("投稿 ZIP 已改变，请重新选择。")
+        details = dict(metadata)
+        details["id"] = "mod-" + uuid4().hex[:20]
+        details = validate_metadata(details)
+        destination = self._pick_path("save", file_types=("投稿 ZIP (*.zip)",), save_filename="workshop-submission.zip")
+        if destination is None:
+            return {"cancelled": True}
+        if destination.suffix.lower() != ".zip":
+            destination = destination.with_suffix(".zip")
+        if destination.resolve() == candidate["path"].resolve():
+            raise ValueError("请另存投稿包，不能覆盖原始作品。")
+        if inspect_package(candidate["path"])["sha256"] != candidate["sha256"]:
+            self._workshop_submission = None
+            raise ValueError("投稿 ZIP 在选择保存位置时发生改变，请重新选择。")
+        result = prepare_submission(candidate["path"], details, destination)
+        body = ("工坊投稿，请审核后上架。\n\n"
+                f"名称：{details.get('name', '')}\n作者：{details.get('author', '')}\n"
+                f"作品版本：{details.get('version', '')}\n游戏版本：{details.get('game_version', '')}\n\n"
+                "请在此附上刚导出的 ZIP 和审核报告；大文件请附作者 GitHub Release 链接。\n"
+                "格式校验通过不等于无毒，投稿不直接上架。")
+        self._workshop_issue_url = REPOSITORY_URL + "/issues/new?" + urlencode({"title": "[工坊投稿] " + details.get("name", ""), "body": body})
+        return {"cancelled": False, **result, "issue_url": self._workshop_issue_url}
+
+    @exposed
+    def workshop_open_link(self, kind: str, mod_id: str = "") -> bool:
+        from urllib.parse import urlencode
+        if kind == "submission":
+            url = self._workshop_issue_url or REPOSITORY_URL + "/issues/new?" + urlencode({"title": "[工坊投稿] ", "body": "请附投稿 ZIP、审核报告及作品说明。投稿后由维护者审核，不直接上架。"})
+        elif kind == "report":
+            # 固定仓库入口，远端条目不能指定任意导航地址。
+            entry = next((item for item in self._workshop().catalog()["mods"] if item["id"] == mod_id), None)
+            if entry is None:
+                raise ValueError("作品已不在当前目录，请刷新工坊。")
+            url = REPOSITORY_URL + "/issues/new?" + urlencode({"title": "[工坊举报] " + entry["id"], "body": "作品：" + entry["id"] + "\n请描述问题及复现情况，不要公开个人信息。"})
+        elif kind == "repository":
+            url = REPOSITORY_URL + "/tree/workshop"
+        else:
+            raise ValueError("未知的工坊链接。")
+        os.startfile(url)
+        return True
 
     @exposed
     def check_for_updates(self, force: bool = False) -> dict:
@@ -374,6 +528,7 @@ class DesktopApi:
 
     @exposed
     def refresh_detection(self) -> dict:
+        self._clear_workshop_pending()
         self._clear_emote_candidate()
         self._replacement_path = None
         self.controller.refresh_detection()

@@ -194,11 +194,18 @@ python -m unittest discover -s tests -p "test_*.py"
 node tests/test_animation_import_ui.js
 node tests/test_frontend_regressions.js
 node tests/test_emote_ui.js
+node tests/test_workshop_ui.js
 ```
 
 默认自检使用临时目录和模拟资源，检查迁移匹配、热更新缓存、Mod 启停与还原、作品集、文字与动画读写、完整图集导入和前端状态，不需要安装游戏，也不会修改真实游戏文件。`selfcheck.py` 出现 `ALL CHECKS PASSED`，其余测试显示通过，表示这些检查通过。使用自己的真实资源副本验证时，参见[功能试用指南](PREVIEW_GUIDE.md)。
 
 每个 PR 都会运行这套自检；主分支和版本标签的构建也会先检查，通过后再打包。
+
+### Mod 工坊
+
+工坊支持浏览、搜索、分类、下载检查及确认安装。第一版采用 GitHub 投稿和人工审核：作者在软件里选择已导出的 Mod ZIP，填写介绍并导出投稿包与 `.submission.json` 报告，再打开 GitHub 投稿页手动附上文件。投稿不会直接上架，客户端不保存 GitHub 密钥。
+
+安装只接受本项目审核目录登记的 GitHub Release 资源包，并重新核对下架状态、SHA256、大小、ZIP 路径和文件类型。与当前游戏资源不完全匹配、Windows Defender 不可用、发现威胁或扫描失败时停止安装。格式、摘要和扫描通过不能保证零风险，维护者仍需审查来源和实际内容。[维护与防护边界](workshop/README.md)。
 
 ---
 

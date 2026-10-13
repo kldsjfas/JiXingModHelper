@@ -86,6 +86,7 @@ def main() -> None:
     try:
         root.mainloop()
     finally:
+        api._clear_workshop_pending()
         api.controller.close()
         try:
             server.shutdown()

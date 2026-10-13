@@ -8,6 +8,7 @@
   const PAGE_TITLES = {
     dashboard: "仪表盘",
     manage: "Mod 管理",
+    workshop: "Mod 工坊",
     browse: "浏览资源",
     audio: "音频工作台",
     studio: "制作替换",
@@ -160,6 +161,7 @@
   function showPage(page) {
     if (!PAGE_TITLES[page]) return;
     if (state.page === "audio") window.AudioWorkbench?.leave();
+    if (state.page === "workshop") window.ModWorkshop?.leave();
     rememberTextEdit();
     state.studioRequest += 1;
     state.draftDetailRequest += 1;
@@ -176,6 +178,7 @@
     document.body.classList.remove("nav-open");
     if (page === "browse") { refreshBrowse(); renderPreview(); }
     if (page === "audio") window.AudioWorkbench?.enter();
+    if (page === "workshop") window.ModWorkshop?.enter();
     if (page === "studio") refreshStudio();
     if (page === "pack") refreshPack();
     if (page === "manage") renderInstalled();
@@ -1688,6 +1691,16 @@ ${row.bundle}`;
   }
 
   function bindEvents() {
+    window.ModWorkshop?.init({
+      call,
+      toast,
+      onInstall(data) {
+        if (data.dashboard) state.dashboard = data.dashboard;
+        if (data.installed) state.installed = data.installed;
+        renderDashboard();
+        renderInstalled();
+      },
+    });
     window.AudioWorkbench?.init({
       call,
       toast,

@@ -1,0 +1,45 @@
+name: 工坊投稿
+description: 提交资源 Mod，人工审核后上架
+title: "[工坊投稿] "
+body:
+  - type: markdown
+    attributes:
+      value: "请用助手的工坊页面生成投稿 ZIP 与审核报告。投稿不直接上架，不能附带程序、脚本或整份游戏。"
+  - type: input
+    id: name
+    attributes:
+      label: 作品名称与版本
+    validations:
+      required: true
+  - type: input
+    id: author
+    attributes:
+      label: 作者
+    validations:
+      required: true
+  - type: input
+    id: game_version
+    attributes:
+      label: 适用游戏版本
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: 修改内容与使用说明
+    validations:
+      required: true
+  - type: textarea
+    id: attachments
+    attributes:
+      label: 投稿 ZIP 和审核报告
+      description: 拖入文件；较大 ZIP 可提供作者 GitHub Release 链接。维护者审核后会镜像到本仓库。
+    validations:
+      required: true
+  - type: checkboxes
+    id: ownership
+    attributes:
+      label: 投稿确认
+      options:
+        - label: 我有权分享这些修改，不包含整份游戏、私人信息或可执行程序。
+          required: true
