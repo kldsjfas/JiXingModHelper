@@ -191,11 +191,13 @@
               <p id="workshop-submission-file" class="workshop-status" role="status" aria-live="polite">支持其他工具制作的资源替换包。</p>
               <form id="workshop-submit-form">
                 <div class="workshop-submit-grid">
-                  <label for="workshop-submit-name">作品名称<input id="workshop-submit-name" type="text" maxlength="80" required placeholder="给作品起个名字"></label>
-                  <label for="workshop-submit-author">作者<input id="workshop-submit-author" type="text" maxlength="80" required placeholder="公开展示的昵称"></label>
-                  <label for="workshop-submit-category">分类<select id="workshop-submit-category" required><option value="texture">贴图</option><option value="text">文字</option><option value="animation">动画</option><option value="emote">表情</option><option value="audio">音频</option><option value="mixed">综合</option></select></label>
-                  <label class="workshop-submit-description" for="workshop-submit-description">作品介绍<textarea id="workshop-submit-description" maxlength="2000" required placeholder="改了什么、使用方法和注意事项"></textarea></label>
+                  <label for="workshop-submit-name">作品名称（必填）<input id="workshop-submit-name" type="text" maxlength="80" required placeholder="给作品起个名字"></label>
+                  <label class="workshop-submit-description" for="workshop-submit-description">作品介绍（必填）<textarea id="workshop-submit-description" maxlength="2000" required placeholder="改了什么、使用方法和注意事项"></textarea></label>
                 </div>
+                <details class="workshop-extra"><summary>作者与分类（可选）</summary><div class="workshop-submit-grid workshop-advanced-fields">
+                  <label for="workshop-submit-author">作者<input id="workshop-submit-author" type="text" maxlength="80" placeholder="公开展示的昵称，留空为匿名作者"></label>
+                  <label for="workshop-submit-category">分类<select id="workshop-submit-category"><option value="mixed" selected>综合</option><option value="texture">贴图</option><option value="text">文字</option><option value="animation">动画</option><option value="emote">表情</option><option value="audio">音频</option></select></label>
+                </div></details>
                 <details class="workshop-extra"><summary>版本信息（可选）</summary><div class="workshop-submit-grid workshop-advanced-fields">
                   <label for="workshop-submit-version">作品版本<input id="workshop-submit-version" type="text" maxlength="32" value="1.0.0"></label>
                   <label for="workshop-submit-game_version">适用游戏版本<input id="workshop-submit-game_version" type="text" maxlength="80" placeholder="可填实际测试过的版本，留空为未标注"></label>

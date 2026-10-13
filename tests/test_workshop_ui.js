@@ -402,6 +402,45 @@ async function checkInvalidUploadReceipt() {
   assert.equal(ui.find("workshop-submission-receipts").children.length, 1);
 }
 
+async function checkOptionalMetadataAndRetry() {
+  const ui = loadWorkshop();
+  ui.reply("get_workshop_upload_status", uploadService());
+  await ui.loadUploadStatus(true);
+  await chooseUpload(ui);
+  for (const field of ["author", "category", "version", "game_version"]) {
+    ui.find(`workshop-submit-${field}`).value = "  ";
+  }
+  await ui.find("workshop-submit-form").trigger("input");
+  ui.reply("submit_workshop_upload", new Error("回执连接中断"));
+  await ui.uploadSubmission();
+  const firstMetadata = ui.requests.at(-1).args[0];
+  assert.equal(firstMetadata.name, "猫猫贴图");
+  assert.equal(firstMetadata.description, "作品说明");
+  assert.equal(firstMetadata.author, "匿名作者");
+  assert.equal(firstMetadata.category, "mixed");
+  assert.equal(firstMetadata.version, "1.0.0");
+  assert.equal(firstMetadata.game_version, "");
+  assert.equal(ui.find("workshop-upload-submission").disabled, false);
+
+  for (const [field, value] of Object.entries({ author: "匿名作者", category: "mixed", version: "1.0.0" })) {
+    ui.find(`workshop-submit-${field}`).value = value;
+  }
+  await ui.find("workshop-submit-form").trigger("input");
+  ui.reply("submit_workshop_upload", { submission_id: "sub-anonymous", status: "pending", name: "猫猫贴图" });
+  await ui.uploadSubmission();
+  assert.deepEqual(ui.requests.at(-1).args[0], firstMetadata,
+    "Blank optional fields and their displayed defaults produced different retry metadata");
+  const uploadedFingerprint = ui.state.uploadedFingerprint;
+
+  for (const field of ["author", "category", "version"]) ui.find(`workshop-submit-${field}`).value = "";
+  await ui.find("workshop-submit-form").trigger("input");
+  assert.equal(ui.state.uploadedFingerprint, uploadedFingerprint);
+  assert.equal(ui.find("workshop-upload-submission").disabled, true,
+    "Clearing optional defaults made the uploaded work available for duplicate upload");
+  await ui.uploadSubmission();
+  assert.equal(ui.requests.filter((request) => request.name === "submit_workshop_upload").length, 2);
+}
+
 async function checkInstallWhileLeavingPage() {
   const ui = loadWorkshop();
   const item = entry();
@@ -444,6 +483,16 @@ function checkIntegration() {
   assert.match(html, /id="workshop-share"[^>]*>\s*<summary>分享我的作品<\/summary>/);
   assert.doesNotMatch(html.match(/<details id="workshop-share"[^>]*>/)[0], /\sopen(?:\s|=|>)/);
   assert.ok(html.indexOf('id="workshop-choose-submission"') < html.indexOf('id="workshop-submit-form"'));
+  const submissionForm = html.match(/<form id="workshop-submit-form">([\s\S]*?)<\/form>/)[1];
+  const requiredFields = Array.from(submissionForm.matchAll(/<(?:input|textarea|select)\b[^>]*\brequired\b[^>]*>/g),
+    (match) => match[0].match(/\bid="([^"]+)"/)[1]);
+  assert.deepEqual(requiredFields, ["workshop-submit-name", "workshop-submit-description"]);
+  const authorOptions = submissionForm.match(/<details\b[^>]*><summary>作者与分类（可选）<\/summary>([\s\S]*?)<\/details>/);
+  assert.ok(authorOptions, "Author and category were not grouped as optional fields");
+  assert.ok(authorOptions[1].includes('id="workshop-submit-author"'));
+  assert.ok(authorOptions[1].includes('id="workshop-submit-category"'));
+  assert.match(authorOptions[1], /<option value="mixed" selected>综合<\/option>/);
+  assert.doesNotMatch(authorOptions[0].match(/<details\b[^>]*>/)[0], /\sopen(?:\s|=|>)/);
   assert.match(html, /id="workshop-submit-version"[^>]*value="1\.0\.0"/);
   assert.match(html, /id="workshop-upload-submission"[^>]*type="submit"[^>]*disabled>上传作品/);
   assert.match(html, /id="workshop-export-submission"[^>]*type="button"/);
@@ -463,6 +512,7 @@ function checkIntegration() {
   await checkUploadReceiptAndExplicitAction();
   await checkUploadRetryAndReviewRefresh();
   await checkInvalidUploadReceipt();
+  await checkOptionalMetadataAndRetry();
   await checkInstallWhileLeavingPage();
-  console.log("Workshop UI safety: 11 checks passed");
+  console.log("Workshop UI safety: 12 checks passed");
 })().catch((error) => { console.error(error); process.exitCode = 1; });

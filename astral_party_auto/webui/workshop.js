@@ -329,6 +329,9 @@
     for (const field of ["name", "author", "description", "category", "version", "game_version"]) {
       metadata[field] = $(`workshop-submit-${field}`).value.trim();
     }
+    metadata.author ||= "匿名作者";
+    metadata.category ||= "mixed";
+    metadata.version ||= "1.0.0";
     return metadata;
   }
 
