@@ -162,6 +162,7 @@
     if (!PAGE_TITLES[page]) return;
     if (state.page === "audio") window.AudioWorkbench?.leave();
     if (state.page === "workshop") window.ModWorkshop?.leave();
+    if (state.page === "studio") window.VisualAnimation?.leave();
     rememberTextEdit();
     state.studioRequest += 1;
     state.draftDetailRequest += 1;
@@ -592,6 +593,7 @@ ${row.bundle}`;
     stopAllAnimations();
     closeLightbox();
     state.replacement = null;
+    window.VisualAnimation?.leave();
     resetEmoteReplacement();
     resetEmotePreview();
     state.emoteVideoName = "";
@@ -1180,6 +1182,7 @@ ${row.bundle}`;
     empty.classList.toggle("is-hidden", !!sel);
     content.classList.toggle("is-hidden", !sel);
     renderEmoteSettings();
+    window.VisualAnimation?.refresh(sel);
     if (!sel) return;
     const key = selectionKey(sel);
     const emoteLabel = sel.emote?.choices?.find((choice) => choice.name === sel.emote.video_name)?.label;
@@ -1566,7 +1569,7 @@ ${row.bundle}`;
       const btn = document.createElement("button");
       btn.type = "button";
       btn.className = "draft-item" + (index === state.draftIndex ? " is-active" : "");
-      const kind = item.kind === "texture" ? "图" : item.kind === "text" ? "文" : ["anim", "dynamic", "emote"].includes(item.kind) ? "动" : item.kind || "?";
+      const kind = item.kind === "texture" ? "图" : item.kind === "text" ? "文" : ["anim", "dynamic", "emote", "visual_animation"].includes(item.kind) ? "动" : item.kind || "?";
       btn.innerHTML = `<span>[${kind}] ${escapeHtml(item.name || "")}</span><small>${escapeHtml(item.note || "")}</small>`;
       btn.addEventListener("click", () => showDraftDetail(index));
       list.appendChild(btn);
@@ -1610,10 +1613,17 @@ ${row.bundle}`;
       const data = await call("get_draft_detail", { quiet: true }, index);
       if (request !== state.draftDetailRequest || state.page !== "pack") return;
       const item = data.item || {};
-      const kindLabel = item.from_anim ? "动画图集" : { texture: "图片", text: "文字", anim: "动画片段", dynamic: "动画", emote: "动态表情" }[item.kind] || "资源";
+      const kindLabel = item.from_anim ? "动画图集" : { texture: "图片", text: "文字", anim: "动画片段", dynamic: "动画", emote: "动态表情", visual_animation: data.visual_info?.label || "动态卡面 / 立绘（试用）" }[item.kind] || "资源";
       $("#draft-detail-title").textContent = `${kindLabel} · ${item.name || ""}`;
       setMedia($("#draft-original"), data.original_data, "无预览");
       setMedia($("#draft-modified"), data.modified_data, "无预览");
+      if (item.kind === "visual_animation") {
+        $("#draft-mode-notice").textContent = data.visual_info?.notice || "动态卡面 / 立绘试用功能。右侧读取作品集实际动画；安装后请在游戏中测试。";
+        $("#draft-mode-notice").classList.remove("is-hidden");
+        if (!data.modified_animation?.frames?.length) {
+          renderAnimationState($("#draft-modified"), data.modified_animation?.notice || "动态预览未加载，请重新打开作品集检查。");
+        }
+      }
       if (item.kind === "emote") {
         const info = data.emote_info || {};
         const independent = info.independent_video === true || item.independent_video === true || info.independent === true || item.independent === true;
@@ -1691,6 +1701,15 @@ ${row.bundle}`;
   }
 
   function bindEvents() {
+    window.VisualAnimation?.init({
+      call, toast, renderAnimation, renderAnimationState,
+      getSelection: () => state.selection,
+      isStudio: () => state.page === "studio",
+      onSave(data) {
+        if (data?.draft) state.draft = data.draft;
+        renderDraftList();
+      },
+    });
     window.ModWorkshop?.init({
       call,
       toast,

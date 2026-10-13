@@ -430,6 +430,14 @@ def check_archive_cleanup() -> None:
             return False
 
         @staticmethod
+        def has_native_ui_animation(_mod_dir):
+            return False
+
+        @staticmethod
+        def requires_native_ui_reload(_name=None):
+            return False
+
+        @staticmethod
         def analyze_mod(mod_dir: Path):
             assert (Path(mod_dir) / "demo.bundle").exists()
             return SimpleNamespace(matched=["demo.bundle"], unmatched=[], files_map={})

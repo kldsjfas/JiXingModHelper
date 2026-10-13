@@ -343,6 +343,8 @@ class ModManager:
                 "store": str(store),
                 "disabled": False,
             }
+            if self.has_native_ui_animation(mod_dir):
+                state["mods"][mod_name]["native_ui_animation"] = True
             if analysis.catalog_patches:
                 state["mods"][mod_name].update(
                     catalog_patches=analysis.catalog_patches,
@@ -465,6 +467,22 @@ class ModManager:
         if name is not None and mods.get(name, {}).get("catalog_patches"):
             return True
         return bool(state.get("catalog_overlay")) or any(mod.get("catalog_patches") for mod in mods.values())
+
+    @staticmethod
+    def has_native_ui_animation(mod_dir: str | Path) -> bool:
+        info = Path(mod_dir) / "mod_info.json"
+        if not info.is_file() or info.stat().st_size > 2 * 1024 * 1024:
+            return False
+        try:
+            value = json.loads(info.read_text(encoding="utf-8-sig"))
+        except (OSError, UnicodeError, json.JSONDecodeError, RecursionError):
+            return False
+        items = value.get("items") if isinstance(value, dict) else None
+        return isinstance(items, list) and any(isinstance(item, dict) and item.get("kind") == "visual_animation" for item in items)
+
+    def requires_native_ui_reload(self, name: str | None = None) -> bool:
+        mods = self._load_state().get("mods", {})
+        return bool(mods.get(name, {}).get("native_ui_animation")) if name is not None else any(mod.get("native_ui_animation") for mod in mods.values())
 
     # ---- 状态存取 ----
     def _load_state(self) -> dict:

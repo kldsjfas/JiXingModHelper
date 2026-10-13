@@ -49,7 +49,7 @@ $arch = Join-Path $out "_internal\archspec\json\cpu\microarchitectures.json"
 if (-not (Test-Path $exe)) { throw "missing exe" }
 if (-not (Test-Path $tpk)) { throw "missing UnityPy resources\lzma.tpk - package broken" }
 if (-not (Test-Path $web)) { throw "missing webui" }
-foreach ($name in @('app.js', 'audio.js', 'updates.js', 'workshop.js', 'workshop.css', 'styles.css')) {
+foreach ($name in @('app.js', 'audio.js', 'updates.js', 'workshop.js', 'visual-animation.js', 'workshop.css', 'styles.css')) {
   if (-not (Test-Path -LiteralPath (Join-Path $out ('_internal\astral_party_auto\webui\' + $name)))) {
     throw "missing webui resource: $name"
   }

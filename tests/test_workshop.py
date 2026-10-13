@@ -13,12 +13,11 @@ from unittest.mock import Mock, patch
 from urllib.request import Request
 
 from astral_party_auto.modkit import workshop
+from tests.workshop_fixtures import resource_bundle
 
 
 def bundle(payload=b"resource-data"):
-    prefix = b"UnityFS\0" + struct.pack(">I", 7) + b"2021.3.0f1\0" + b"2021.3.0f1\0"
-    size = len(prefix) + 20 + len(payload)
-    return prefix + struct.pack(">QIII", size, 8, 16, 0x43) + payload
+    return resource_bundle(payload)
 
 
 def metadata():

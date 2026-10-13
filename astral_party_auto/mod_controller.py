@@ -100,6 +100,7 @@ class ModController:
         # 当前在「浏览」里选中的资源，供「制作」页使用
         self.selection: dict | None = None
         self._emote_workspace = None
+        self._visual_animation_workspace = None
         # 角色标注：bundle 级 + 资源级覆盖
         self._bundle_labels: dict[str, str] = {}
         self._resource_labels: dict[str, dict[str, str]] = {}
@@ -257,7 +258,8 @@ class ModController:
             mod_dir = self._as_mod_dir(source)
         temporary = source.is_file()
         try:
-            if (mod_dir / "emote_addresses.json").exists() or self.manager.requires_catalog_reload():
+            if ((mod_dir / "emote_addresses.json").exists() or self.manager.requires_catalog_reload()
+                    or self.manager.has_native_ui_animation(mod_dir) or self.manager.requires_native_ui_reload()):
                 self._require_catalog_game_stopped()
             analysis = self.manager.install_mod(mod_dir, name)
         finally:
@@ -273,7 +275,7 @@ class ModController:
 
     def uninstall(self, name: str) -> int:
         self._require_game()
-        if self.manager.requires_catalog_reload():
+        if self.manager.requires_catalog_reload() or self.manager.requires_native_ui_reload(name):
             self._require_catalog_game_stopped()
         n = self.manager.uninstall_mod(name)
         self.log(f"已卸载「{name}」，重新计算 {n} 个资源包的有效覆盖。")
@@ -281,7 +283,7 @@ class ModController:
 
     def disable_mod(self, name: str) -> int:
         self._require_game()
-        if self.manager.requires_catalog_reload():
+        if self.manager.requires_catalog_reload() or self.manager.requires_native_ui_reload(name):
             self._require_catalog_game_stopped()
         n = self.manager.disable_mod(name)
         self.log(f"已禁用「{name}」，重新计算 {n} 个资源包的有效覆盖（记录保留，可再启用）。")
@@ -289,7 +291,7 @@ class ModController:
 
     def enable_mod(self, name: str) -> int:
         self._require_game()
-        if self.manager.requires_catalog_reload():
+        if self.manager.requires_catalog_reload() or self.manager.requires_native_ui_reload(name):
             self._require_catalog_game_stopped()
         n = self.manager.enable_mod(name)
         self.log(f"已启用「{name}」，重新应用 {n} 个资源包。")
@@ -297,14 +299,14 @@ class ModController:
 
     def restore_all(self) -> int:
         self._require_game()
-        if self.manager.requires_catalog_reload():
+        if self.manager.requires_catalog_reload() or self.manager.requires_native_ui_reload():
             self._require_catalog_game_stopped()
         n = self.manager.restore_all()
         self.log(f"一键全还原：恢复 {n} 个原始资源包，游戏回到未改状态。")
         return n
 
     def _require_catalog_game_stopped(self) -> None:
-        """新增地址要重载资源目录，游戏运行时不能改安装状态。"""
+        """新增地址和动态公共界面均需重载，游戏运行时不改安装状态。"""
         if not self.game_install:
             return
         names = {path.name for path in (self.game_install.cn_exe, self.game_install.int_exe) if path is not None}
@@ -314,12 +316,12 @@ class ModController:
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10, check=False,
                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             except (OSError, subprocess.TimeoutExpired) as exc:
-                raise RuntimeError("无法确认游戏是否已退出，请退出游戏后重试独立表情安装或还原。") from exc
+                raise RuntimeError("无法确认游戏是否已退出，请退出游戏后重试动态资源安装或还原。") from exc
             if result.returncode:
-                raise RuntimeError("无法确认游戏运行状态，请退出游戏后重试独立表情安装或还原。")
+                raise RuntimeError("无法确认游戏运行状态，请退出游戏后重试动态资源安装或还原。")
             marker = ('"' + name + '",').encode("utf-8").lower()
             if any(line.strip().lower().startswith(marker) for line in result.stdout.splitlines()):
-                raise RuntimeError("请先退出游戏，再安装、禁用或还原独立动态表情；新增视频地址需要重新加载。")
+                raise RuntimeError("请先退出游戏，再安装、禁用或还原动态资源；动态地址和界面需要重新加载。")
 
     def installed_mods(self) -> list[dict]:
         return self.manager.installed_mods() if self.manager else []
@@ -649,6 +651,13 @@ class ModController:
             return self.emote_workspace.save_independent(video_name, replacement_path)
         return self.emote_workspace.save(video_name, replacement_path)
 
+    @property
+    def visual_animation_workspace(self):
+        if getattr(self, "_visual_animation_workspace", None) is None:
+            from .modkit.visual_animation import VisualAnimationWorkspace
+            self._visual_animation_workspace = VisualAnimationWorkspace(self)
+        return self._visual_animation_workspace
+
     def set_selection(
         self,
         bundle_name: str,
@@ -686,6 +695,8 @@ class ModController:
             }
             if cat == "emoji":
                 self.selection["emote"] = self.emote_workspace.selection(info.name)
+            elif info.name.startswith(("UT_HandCard_", "UT_Hero_Card_", "UT_Hero_InGameCard_", "UT_Monster_Card_")):
+                self.selection["visual_animation"] = self.visual_animation_workspace.selection(info.name)
             return self.selection
 
         if asset_type == "text":
@@ -1167,6 +1178,11 @@ class ModController:
     def draft_count(self) -> int:
         return len(self.draft_items)
 
+    def _check_visual_bundle_overlap(self, bundle_name: str) -> None:
+        for item in self.draft_items:
+            if item.get("kind") == "visual_animation" and bundle_name in (item.get("extra_bundles") or []):
+                raise RuntimeError("此公共界面资源正在用于动态卡面或立绘，请另建作品集编辑，避免覆盖动态帧。")
+
     def add_texture_to_draft(
         self,
         bundle_path: str | Path,
@@ -1183,6 +1199,7 @@ class ModController:
         bundle_name = Path(bundle_name).name if bundle_name else logical_bundle_name(bundle_path)
         if not bundle_name.lower().endswith(".bundle"):
             raise RuntimeError(f"无法确定资源包名称：{bundle_name}")
+        self._check_visual_bundle_overlap(bundle_name)
         pack_dir = self._draft_dir()
         out_bundle = pack_dir / bundle_name
         # 底图：优先备份原皮 → 传入路径 → 游戏目录
@@ -1230,6 +1247,7 @@ class ModController:
         bundle_name = Path(bundle_name).name if bundle_name else logical_bundle_name(bundle_path)
         if not bundle_name.lower().endswith(".bundle"):
             raise RuntimeError(f"无法确定资源包名称：{bundle_name}")
+        self._check_visual_bundle_overlap(bundle_name)
         pack_dir = self._draft_dir()
         out_bundle = pack_dir / bundle_name
         # 若作品集里已有同 bundle，基于作品集版本继续改，否则用原版
@@ -1442,6 +1460,9 @@ class ModController:
         item = self.draft_items[index]
         if item.get("kind") == "emote":
             self.emote_workspace.remove(index)
+            return
+        if item.get("kind") == "visual_animation":
+            self.visual_animation_workspace.remove(index)
             return
         bundle_name = item.get("bundle")
         remaining = [entry for item_index, entry in enumerate(self.draft_items) if item_index != index]

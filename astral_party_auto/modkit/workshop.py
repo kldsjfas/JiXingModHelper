@@ -23,6 +23,7 @@ from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from .catalog_mods import MANIFEST_FORMAT, MAX_MANIFEST_BYTES, OWNED_BUNDLE, validate_patches
+from .workshop_security import inspect_resource_bundle, reject_assembly_bundle_targets
 
 REPOSITORY_URL = "https://github.com/kldsjfas/JiXingModHelper"
 CATALOG_URL = "https://raw.githubusercontent.com/kldsjfas/JiXingModHelper/workshop/catalog.json"
@@ -33,6 +34,8 @@ MAX_EXPANDED_BYTES = 512 * 1024 * 1024
 MAX_BUNDLE_BYTES = 128 * 1024 * 1024
 MAX_INFO_BYTES = 256 * 1024
 MAX_ZIP_DIRECTORY_BYTES = 1024 * 1024
+MAX_INNER_PACKAGE_BYTES = 512 * 1024 * 1024
+MAX_INNER_PACKAGE_OBJECTS = 100_000
 MAX_FILES = 512
 MAX_MODS = 1000
 MAX_RATIO = 100
@@ -312,8 +315,8 @@ def _zip_preflight(source, size: int) -> int:
     return count
 
 
-def inspect_package(path: str | Path) -> dict:
-    """Check every member without extracting or loading external data in UnityPy."""
+def inspect_package(path: str | Path, *, forbidden_bundle_names=()) -> dict:
+    """Check archive paths and bounded Unity contents without loading assemblies."""
     path = Path(path)
     _regular_file(path, MAX_PACKAGE_BYTES)
     try:
@@ -350,25 +353,39 @@ def inspect_package(path: str | Path) -> dict:
                 for name in paths:
                     if any(parent.as_posix().casefold() in file_paths for parent in PurePosixPath(name).parents if parent.as_posix() != "."):
                         raise ValueError("资源包文件与目录路径冲突。")
-                files, documents = [], {}
+                reject_assembly_bundle_targets((name for _, name in checked if name.endswith(".bundle")), forbidden_bundle_names)
+                files, documents, bundle_checks, inner_total, inner_objects = [], {}, [], 0, 0
                 for member, name in checked:
                     digest, count, prefix, json_data = hashlib.sha256(), 0, b"", bytearray()
-                    with archive.open(member) as content:
-                        while block := content.read(64 * 1024):
-                            count += len(block)
-                            if count > member.file_size:
-                                raise ValueError("资源包展开大小与 ZIP 记录不一致。")
-                            digest.update(block)
-                            if len(prefix) < 512:
-                                prefix += block[:512 - len(prefix)]
-                            if name.endswith(".json"):
-                                json_data.extend(block)
-                    if count != member.file_size:
-                        raise ValueError("资源包文件不完整。")
-                    if name.endswith(".bundle"):
-                        _bundle_header(prefix, count)
-                    else:
-                        documents[name] = _json(bytes(json_data), MAX_MANIFEST_BYTES if name == "emote_addresses.json" else MAX_INFO_BYTES)
+                    temporary = tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024) if name.endswith(".bundle") else None
+                    try:
+                        with archive.open(member) as content:
+                            while block := content.read(64 * 1024):
+                                count += len(block)
+                                if count > member.file_size:
+                                    raise ValueError("资源包展开大小与 ZIP 记录不一致。")
+                                digest.update(block)
+                                if len(prefix) < 512:
+                                    prefix += block[:512 - len(prefix)]
+                                if temporary is not None:
+                                    temporary.write(block)
+                                else:
+                                    json_data.extend(block)
+                        if count != member.file_size:
+                            raise ValueError("资源包文件不完整。")
+                        if temporary is not None:
+                            _bundle_header(prefix, count)
+                            internal = inspect_resource_bundle(temporary, count, max_expanded_bytes=MAX_INNER_PACKAGE_BYTES - inner_total)
+                            inner_total += internal["expanded_size"]
+                            inner_objects += internal["object_count"]
+                            if inner_objects > MAX_INNER_PACKAGE_OBJECTS:
+                                raise ValueError("资源包内部对象总数超过限制。")
+                            bundle_checks.append({"path": name, **internal})
+                        else:
+                            documents[name] = _json(bytes(json_data), MAX_MANIFEST_BYTES if name == "emote_addresses.json" else MAX_INFO_BYTES)
+                    finally:
+                        if temporary is not None:
+                            temporary.close()
                     files.append({"path": name, "size": count, "sha256": digest.hexdigest()})
                 bundles = [file for file in files if file["path"].endswith(".bundle")]
                 if not bundles:
@@ -395,6 +412,7 @@ def inspect_package(path: str | Path) -> dict:
     return {"format": "jixing-resource-pack", "sha256": package_digest, "size": size,
             "total_size": total, "expanded_size": total, "file_count": len(files),
             "bundle_count": len(bundles), "files": files, "bundles": bundles,
+            "inner_expanded_size": inner_total, "inner_object_count": inner_objects, "bundle_checks": bundle_checks,
             "mod_info": info, "emote_patches": patches, "risk_note": RISK_NOTE}
 
 
@@ -469,7 +487,7 @@ class WorkshopClient:
             self._cached, self._cached_at = result, time.monotonic()
             return json.loads(json.dumps(result, ensure_ascii=False))
 
-    def prepare(self, mod_id: str, expected_sha256="") -> dict:
+    def prepare(self, mod_id: str, expected_sha256="", *, forbidden_bundle_names=()) -> dict:
         if not isinstance(mod_id, str) or not SLUG.fullmatch(mod_id):
             raise ValueError("作品编号不正确。")
         if not isinstance(expected_sha256, str) or not SHA256.fullmatch(expected_sha256):
@@ -490,7 +508,7 @@ class WorkshopClient:
             try:
                 with pending.open("xb") as output:
                     _download(asset_url(entry), output, MAX_PACKAGE_BYTES, expected_size=entry["asset"]["size"])
-                inspection = inspect_package(pending)
+                inspection = inspect_package(pending, forbidden_bundle_names=forbidden_bundle_names)
                 if inspection["sha256"] != entry["asset"]["sha256"] or inspection["size"] != entry["asset"]["size"]:
                     raise ValueError("下载资源与审核摘要不一致，已隔离并拒绝使用。")
                 pending.replace(package)
@@ -506,13 +524,14 @@ class WorkshopClient:
                     stage.rmdir()
                 raise
 
-    def verify_prepared(self, prepared: dict) -> None:
+    def verify_prepared(self, prepared: dict, *, forbidden_bundle_names=()) -> None:
         """Recheck the exact ZIP and flat resource snapshot before installation."""
         with self._lock:
             key = prepared.get("path") if isinstance(prepared, dict) else None
             owned = self._prepared.get(key)
             if owned is None:
                 raise ValueError("此资源不是本次工坊校验产生的候选包。")
+            reject_assembly_bundle_targets((file["path"] for file in owned["inspection"]["bundles"]), forbidden_bundle_names)
             package, content = Path(owned["path"]), Path(owned["mod_dir"])
             stage = package.parent
             if (_is_link(stage) or _is_link(content) or stage.parent != self.work_dir.resolve()
@@ -568,10 +587,10 @@ class WorkshopClient:
         return self.cleanup_prepared(prepared)
 
 
-def prepare_submission(path: str | Path, metadata: dict, destination: str | Path) -> dict:
+def prepare_submission(path: str | Path, metadata: dict, destination: str | Path, *, forbidden_bundle_names=()) -> dict:
     """Create a reviewable ZIP and a path-free report. No upload credentials needed."""
     checked = validate_metadata(metadata)
-    inspection = inspect_package(path)
+    inspection = inspect_package(path, forbidden_bundle_names=forbidden_bundle_names)
     package = Path(destination)
     if not ASSET_NAME.fullmatch(package.name):
         raise ValueError("投稿文件名只能用英文字母、数字、下划线、点和短横线，并以 .zip 结尾。")
@@ -614,11 +633,11 @@ def prepare_submission(path: str | Path, metadata: dict, destination: str | Path
                 output.writestr("mod_info.json", json.dumps(info, ensure_ascii=False, indent=2).encode("utf-8"))
             if _digest(source) != inspection["sha256"]:
                 raise ValueError("投稿来源在复制期间改变。")
-        final = inspect_package(temporary_package)
+        final = inspect_package(temporary_package, forbidden_bundle_names=forbidden_bundle_names)
         asset = {"tag": "workshop-pending", "name": package.name, "size": final["size"], "sha256": final["sha256"]}
         report = {"format": "jixing-workshop-submission", "version": 1, "metadata": checked,
                   "asset": asset, "files": final["files"], "risk_note": RISK_NOTE,
-                  "review_status": "pending", "checks": ["resource_only", "archive_paths", "size_limits", "sha256", "unityfs_header"]}
+                  "review_status": "pending", "checks": ["resource_only", "archive_paths", "size_limits", "sha256", "unityfs_objects", "no_embedded_pe_or_assemblies"]}
         handle, temporary_name = tempfile.mkstemp(prefix=".workshop-report-", suffix=".tmp", dir=root)
         temporary_report = Path(temporary_name)
         with os.fdopen(handle, "w", encoding="utf-8") as output:

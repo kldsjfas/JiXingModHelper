@@ -34,6 +34,7 @@ class WorkshopApiTests(unittest.TestCase):
         self.api._workshop_issue_url = None
         self.api._workshop_client.prepare.return_value = self.prepared
         self.api.controller = Mock()
+        self.api.controller.aa_dirs = ()
         self.api.controller._index_source_key = "game-a"
         self.api.controller.install.return_value = Mock(matched=["one.bundle"])
         self.api._dashboard_state = Mock(return_value={"has_game": True})
@@ -45,12 +46,12 @@ class WorkshopApiTests(unittest.TestCase):
     def test_success_rechecks_catalog_and_scans_before_install(self):
         order = []
         self.scanner.side_effect = lambda *_: order.append("scan") or {"status": "passed"}
-        self.api._workshop_client.verify_prepared.side_effect = lambda *_: order.append("verify")
+        self.api._workshop_client.verify_prepared.side_effect = lambda *_args, **_kwargs: order.append("verify")
         self.api.controller.install.side_effect = lambda *_args, **_kwargs: order.append("install") or Mock(matched=["one.bundle"])
         result = self.api.workshop_install()
         self.assertTrue(result["ok"], result)
         self.assertEqual(order, ["scan", "verify", "install"])
-        self.api._workshop_client.prepare.assert_called_once_with("safe-mod", expected_sha256="a" * 64)
+        self.api._workshop_client.prepare.assert_called_once_with("safe-mod", expected_sha256="a" * 64, forbidden_bundle_names=set())
         self.assertIsNone(self.api._workshop_pending)
         self.assertEqual(self.api._workshop_client.discard.call_count, 2)
 

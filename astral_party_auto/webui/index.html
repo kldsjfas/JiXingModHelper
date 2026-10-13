@@ -292,6 +292,19 @@
                 </div>
               </details>
             </article>
+            <article id="visual-animation-settings" class="card emote-settings is-hidden">
+              <h3>让这张图片动起来（试用）</h3>
+              <p>为当前卡面或立绘导入动图或视频，自动识别 GIF、APNG、WebP、MP4、WebM 等格式。普通视频会保留背景。</p>
+              <p class="notice">这是试用功能，游戏内效果尚未验证。先保存到作品集，再手动安装测试。</p>
+              <p id="visual-animation-reason" class="editor-status"></p>
+              <h4 id="visual-animation-preview-label">你的动态效果</h4>
+              <div id="visual-animation-preview" class="preview-media tall"></div>
+              <p id="visual-animation-status" class="editor-status" role="status"></p>
+              <div class="action-row">
+                <button id="visual-animation-import" class="button ghost" disabled>导入动图或视频…</button>
+                <button id="visual-animation-save" class="button primary" disabled>保存动态卡面 / 立绘</button>
+              </div>
+            </article>
             <div id="studio-image-mode" class="compare-grid">
               <article class="card preview-card"><h3 id="studio-original-heading">游戏原内容</h3><div id="studio-original" class="preview-media tall"></div></article>
               <article class="card preview-card"><h3 id="studio-replacement-heading">你的替换文件</h3><div id="studio-replacement" class="preview-media tall"><span>点击下方按钮选择文件</span></div></article>
@@ -472,6 +485,7 @@
   <script src="audio.js" defer></script>
   <script src="updates.js" defer></script>
   <script src="workshop.js" defer></script>
+  <script src="visual-animation.js" defer></script>
   <script src="app.js" defer></script>
 </body>
 </html>
