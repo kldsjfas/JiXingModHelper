@@ -1,0 +1,66 @@
+name: Workshop Review
+
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+    inputs:
+      action:
+        type: choice
+        options: [sync, approve, reject, revoke]
+        default: sync
+        required: true
+      submission_id:
+        description: '投稿编号（approve/reject/revoke 必填）'
+        type: string
+      message:
+        description: '维护者审核或撤回说明'
+        type: string
+      game_version:
+        description: '实际测试的游戏版本（approve 必填）'
+        type: string
+      game_evidence:
+        description: '游戏实测证据链接或编号（approve 必填）'
+        type: string
+      game_notes:
+        description: '游戏实测过程与结论，至少 20 字（approve 必填）'
+        type: string
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: workshop-review
+  cancel-in-progress: false
+
+jobs:
+  review:
+    if: github.repository == 'kldsjfas/JiXingModHelper' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout reviewed workshop bridge
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: 51fe76567be8ecc5c67a0ab32827af8a8661dcbc # reviewed source; never accepts an input ref
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.11'
+      - name: Install checked dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Review quarantined resources
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          WORKSHOP_ADMIN_SECRET: ${{ secrets.WORKSHOP_ADMIN_SECRET }}
+          BRIDGE_ACTION: ${{ github.event.inputs.action || 'sync' }}
+          SUBMISSION_ID: ${{ github.event.inputs.submission_id }}
+          REVIEW_MESSAGE: ${{ github.event.inputs.message }}
+          GAME_VERSION: ${{ github.event.inputs.game_version }}
+          GAME_EVIDENCE: ${{ github.event.inputs.game_evidence }}
+          GAME_NOTES: ${{ github.event.inputs.game_notes }}
+          PYTHONPATH: ${{ github.workspace }}
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python -B tools/workshop_github_bridge.py
