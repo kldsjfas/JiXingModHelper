@@ -43,7 +43,7 @@ jobs:
       - name: Checkout reviewed workshop bridge
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          ref: 51fe76567be8ecc5c67a0ab32827af8a8661dcbc # reviewed source; never accepts an input ref
+          ref: 36910382d235f7abbde0811c06373e6705710cb2 # reviewed source; never accepts an input ref
           persist-credentials: false
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
@@ -55,6 +55,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           WORKSHOP_ADMIN_SECRET: ${{ secrets.WORKSHOP_ADMIN_SECRET }}
+          WORKSHOP_ORIGIN_IP: ${{ secrets.WORKSHOP_ORIGIN_IP }}
           BRIDGE_ACTION: ${{ github.event.inputs.action || 'sync' }}
           SUBMISSION_ID: ${{ github.event.inputs.submission_id }}
           REVIEW_MESSAGE: ${{ github.event.inputs.message }}
