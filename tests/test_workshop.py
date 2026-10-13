@@ -311,7 +311,7 @@ class WorkshopTests(unittest.TestCase):
         self.path.write_bytes(payload)
         destination = self.root / "submission.zip"
         result = workshop.prepare_submission(self.path, metadata(), destination)
-        self.assertEqual(result["path"], str(destination))
+        self.assertTrue(Path(result["path"]).samefile(destination))
         with zipfile.ZipFile(destination) as archive:
             self.assertEqual(set(archive.namelist()), {"texture.bundle", "mod_info.json"})
             info = json.loads(archive.read("mod_info.json"))
