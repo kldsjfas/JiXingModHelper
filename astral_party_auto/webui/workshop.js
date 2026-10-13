@@ -5,10 +5,14 @@
   const CATEGORY_LABELS = {
     texture: "贴图", text: "文字", animation: "动画", emote: "表情", audio: "音频", mixed: "综合",
   };
+  const REVIEW_LABELS = {
+    pending: "待审核", approved: "审核通过", rejected: "未通过审核", published: "已上架",
+  };
   const $ = (id) => document.getElementById(id);
   const state = {
     initialized: false, loaded: false, working: false, catalogLoading: false,
-    items: [], selected: null, prepared: null, submission: null, submissionExported: false,
+    items: [], selected: null, prepared: null, submission: null,
+    uploadService: null, statusLoading: false, serviceError: false, receipts: [], uploadedFingerprint: "",
     selectionVersion: 0, catalogVersion: 0, pageVersion: 0,
   };
   let bridge;
@@ -65,8 +69,11 @@
     $("workshop-report").disabled = !state.selected || locked;
     $("workshop-choose-submission").disabled = locked;
     $("workshop-export-submission").disabled = !state.submission || locked;
-    $("workshop-open-submission").disabled = locked;
-    $("workshop-open-submission").classList.toggle("is-hidden", !state.submissionExported);
+    const uploaded = state.uploadedFingerprint && state.uploadedFingerprint === submissionFingerprint();
+    $("workshop-upload-submission").disabled = !state.submission || locked || state.statusLoading
+      || state.uploadService?.configured !== true || state.uploadService?.accepting_uploads !== true || Boolean(uploaded);
+    $("workshop-upload-submission").textContent = uploaded ? "已上传" : "上传作品";
+    $("workshop-refresh-submissions").disabled = locked || state.statusLoading;
     $("workshop-repository").disabled = locked;
     $("workshop-submit-form").querySelectorAll("input, select, textarea").forEach((input) => {
       input.disabled = locked;
@@ -292,7 +299,7 @@
     if (state.working || state.catalogLoading) return;
     state.working = true;
     state.submission = null;
-    state.submissionExported = false;
+    state.uploadedFingerprint = "";
     message("workshop-submission-result", "");
     message("workshop-submission-check-details", "");
     message("workshop-submission-export-details", "");
@@ -317,17 +324,118 @@
     }
   }
 
+  function submissionMetadata() {
+    const metadata = {};
+    for (const field of ["name", "author", "description", "category", "version", "game_version"]) {
+      metadata[field] = $(`workshop-submit-${field}`).value.trim();
+    }
+    return metadata;
+  }
+
+  function submissionFingerprint() {
+    return state.submission ? JSON.stringify([state.submission.inspection?.sha256 || "", submissionMetadata()]) : "";
+  }
+
+  function showUploadService() {
+    let text;
+    if (state.statusLoading) {
+      text = "正在连接上传服务…";
+    } else if (state.serviceError) {
+      text = "暂无法确认上传服务状态，已暂停上传。请刷新审核状态重试。";
+    } else if (state.uploadService?.configured !== true) {
+      text = "上传服务暂未开通。可先选择 ZIP 和填写介绍，开通后再上传。";
+    } else if (state.uploadService.accepting_uploads !== true) {
+      text = state.uploadService.message || "上传服务暂未接收作品，请稍后刷新。";
+    } else {
+      text = "上传后进入人工审核，通过后才会出现在工坊。";
+      if (Number(state.uploadService.max_package_bytes) > 0) {
+        text += ` 单个 ZIP 最多 ${formatSize(state.uploadService.max_package_bytes)}。`;
+      }
+    }
+    message("workshop-upload-service-status", text);
+  }
+
+  function renderReceipts() {
+    const list = $("workshop-submission-receipts");
+    list.replaceChildren();
+    $("workshop-my-submissions").classList.toggle("is-hidden", !state.receipts.length);
+    for (const receipt of state.receipts) {
+      const item = node("div", "workshop-receipt");
+      const heading = node("div", "workshop-item-heading");
+      heading.appendChild(node("strong", "", receipt.name || "未命名作品"));
+      heading.appendChild(node("span", "workshop-review-status", REVIEW_LABELS[receipt.status] || "等待更新"));
+      item.appendChild(heading);
+      item.appendChild(node("p", "workshop-receipt-number", `投稿编号：${receipt.submission_id || "未返回"}`));
+      if (receipt.message) item.appendChild(node("p", "workshop-status", receipt.message));
+      list.appendChild(item);
+    }
+  }
+
+  async function loadUploadStatus(refresh = false) {
+    if (state.statusLoading || state.working) return;
+    state.statusLoading = true;
+    showUploadService();
+    syncButtons();
+    try {
+      const result = await bridge.call("get_workshop_upload_status", { quiet: true }, refresh);
+      if (!result || typeof result.configured !== "boolean") throw new Error("上传服务状态无效");
+      state.uploadService = result;
+      state.serviceError = false;
+      state.receipts = Array.isArray(result.submissions)
+        ? result.submissions.filter((receipt) => receipt && typeof receipt.submission_id === "string").slice(0, 100)
+        : [];
+      renderReceipts();
+      message("workshop-review-refresh-result", refresh && result.configured && result.accepting_uploads ? "审核状态已刷新。" : "");
+    } catch (error) {
+      // 状态检查失败时停止上传，保留已经收到的审核回执。
+      state.uploadService = null;
+      state.serviceError = true;
+      message("workshop-review-refresh-result", `状态读取失败：${error.message || "网络暂不可用"}。可点击“刷新审核状态”重试。`, true);
+    } finally {
+      state.statusLoading = false;
+      showUploadService();
+      syncButtons();
+    }
+  }
+
+  async function uploadSubmission(event) {
+    event?.preventDefault();
+    if ($("workshop-upload-submission").disabled || state.working || state.catalogLoading) return;
+    if (!$("workshop-submit-form").reportValidity()) return;
+    const metadata = submissionMetadata();
+    const fingerprint = submissionFingerprint();
+    state.working = true;
+    syncButtons();
+    message("workshop-submission-result", "正在复查并上传作品，请不要重复点击…");
+    try {
+      const result = await bridge.call("submit_workshop_upload", {
+        busy: true, busyText: "安全检查并上传作品…", quiet: true,
+      }, metadata);
+      if (typeof result?.submission_id !== "string" || !result.submission_id
+          || !["pending", "approved", "rejected", "published"].includes(result.status)) {
+        throw new Error("服务器未返回有效的审核回执，请重试确认上传状态。");
+      }
+      state.uploadedFingerprint = fingerprint;
+      state.receipts = [result, ...state.receipts.filter((receipt) => receipt.submission_id !== result.submission_id)];
+      renderReceipts();
+      const status = REVIEW_LABELS[result.status];
+      message("workshop-submission-result", `上传完成，${result.status === "pending" ? "待人工审核" : status}。投稿编号：${result.submission_id}。可点击“刷新审核状态”查看进度。`);
+      bridge.toast(`作品已上传，${status}`);
+    } catch (error) {
+      message("workshop-submission-result", `上传未确认：${error.message || "网络暂不可用"}。选好的 ZIP 和介绍已保留，可点击“上传作品”重试。`, true);
+    } finally {
+      state.working = false;
+      syncButtons();
+    }
+  }
+
   async function exportSubmission(event) {
     event?.preventDefault();
     if (!state.submission || state.working || state.catalogLoading) return;
     const form = $("workshop-submit-form");
     if (!form.reportValidity()) return;
-    const metadata = {};
-    for (const field of ["name", "author", "description", "category", "version", "game_version"]) {
-      metadata[field] = $(`workshop-submit-${field}`).value.trim();
-    }
+    const metadata = submissionMetadata();
     state.working = true;
-    state.submissionExported = false;
     syncButtons();
     try {
       const result = await bridge.call("workshop_export_submission", {
@@ -338,10 +446,12 @@
         return;
       }
       const reportLine = result.report_path ? `\n检查报告：${result.report_path}` : "";
-      state.submissionExported = true;
-      message("workshop-submission-result", "导出完成。打开 GitHub 投稿页，手动上传投稿 ZIP 和报告，等待人工审核。");
+      const alreadyUploaded = state.uploadedFingerprint && state.uploadedFingerprint === submissionFingerprint();
+      message("workshop-submission-result", alreadyUploaded
+        ? "本地副本已导出。此前上传的作品可在“我的投稿”查看审核状态。"
+        : "本地副本已导出，尚未上传。要投稿，请点击“上传作品”。");
       message("workshop-submission-export-details", `投稿包：${result.path || "所选保存位置"}${reportLine}`);
-      bridge.toast("投稿包已导出，还需到 GitHub 手动提交审核");
+      bridge.toast("本地副本已导出");
     } catch (error) {
       message("workshop-submission-result", `导出失败：${error.message || "请重新检查投稿包"}`, true);
     } finally {
@@ -371,19 +481,22 @@
     $("workshop-install-accept").addEventListener("click", install);
     $("workshop-install-cancel").addEventListener("click", hideConfirmation);
     $("workshop-choose-submission").addEventListener("click", chooseSubmission);
-    $("workshop-submit-form").addEventListener("submit", exportSubmission);
-    $("workshop-open-submission").addEventListener("click", () => {
-      if (state.submissionExported) openLink("submission");
-    });
+    $("workshop-submit-form").addEventListener("submit", uploadSubmission);
+    $("workshop-submit-form").addEventListener("input", syncButtons);
+    $("workshop-submit-form").addEventListener("change", syncButtons);
+    $("workshop-export-submission").addEventListener("click", exportSubmission);
+    $("workshop-refresh-submissions").addEventListener("click", () => loadUploadStatus(true));
     $("workshop-repository").addEventListener("click", () => openLink("repository"));
     $("workshop-report").addEventListener("click", () => {
       if (state.selected) openLink("report", state.selected.id);
     });
     syncButtons();
+    showUploadService();
   }
 
   function enter() {
     if (!state.loaded && !state.catalogLoading) refresh(false);
+    loadUploadStatus(true);
   }
 
   function leave() {

@@ -113,12 +113,19 @@ class DesktopApi:
         self._workshop_pending = None
         self._workshop_submission = None
         self._workshop_issue_url = None
+        self._workshop_upload_client = None
 
     def _workshop(self):
         if self._workshop_client is None:
             from .modkit.workshop import WorkshopClient
             self._workshop_client = WorkshopClient(DATA_DIR)
         return self._workshop_client
+
+    def _workshop_upload(self):
+        if getattr(self, "_workshop_upload_client", None) is None:
+            from .modkit.workshop_upload import WorkshopUploadClient
+            self._workshop_upload_client = WorkshopUploadClient(DATA_DIR)
+        return self._workshop_upload_client
 
     def _clear_workshop_pending(self) -> None:
         pending = getattr(self, "_workshop_pending", None)
@@ -217,8 +224,59 @@ class DesktopApi:
         return {"cancelled": False, "path_label": path.name, "inspection": inspection}
 
     @exposed
+    def get_workshop_upload_status(self, refresh: bool = False) -> dict:
+        return {**self._workshop_upload().snapshot(refresh=bool(refresh)), "game_version": ""}
+
+    @exposed
+    def submit_workshop_upload(self, metadata: dict) -> dict:
+        """复制已检查作品再上传；不发送源路径、编辑记录或审核日志。"""
+        from .modkit.workshop import inspect_package, prepare_submission, validate_metadata
+        candidate = self._workshop_submission
+        if candidate is None:
+            raise ValueError("请先选择投稿 ZIP。")
+        if not isinstance(metadata, dict):
+            raise ValueError("投稿信息无效。")
+        client = self._workshop_upload()
+        state = client.snapshot()
+        if not state["configured"]:
+            raise RuntimeError(state["message"])
+        forbidden = self._workshop_forbidden_bundles()
+        if inspect_package(candidate["path"], forbidden_bundle_names=forbidden)["sha256"] != candidate["sha256"]:
+            self._workshop_submission = None
+            raise ValueError("投稿 ZIP 已改变，请重新选择。")
+        details = dict(metadata)
+        if not details.get("version"):
+            details["version"] = "1.0.0"
+        if not details.get("game_version"):
+            details["game_version"] = "未标注"
+        details["id"] = "pending"
+        details = validate_metadata(details)
+        # 同原件和资料在重选、重启后仍得到同一编号，丢失回执不会重复投稿。
+        identity = json.dumps({key: value for key, value in details.items() if key != "id"},
+                              ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        details["id"] = "mod-" + hashlib.sha256(candidate["sha256"].encode("ascii") + b"\0" + identity).hexdigest()[:32]
+        stage_root = DATA_DIR / "workshop-upload-staging"
+        stage_root.mkdir(parents=True, exist_ok=True)
+        if stage_root.is_symlink() or getattr(stage_root.lstat(), "st_file_attributes", 0) & 0x400:
+            raise ValueError("投稿暂存目录不安全，已停止上传。")
+        with tempfile.TemporaryDirectory(prefix="submission-", dir=stage_root) as temporary:
+            prepared = prepare_submission(candidate["path"], details, Path(temporary) / "submission.zip",
+                                          forbidden_bundle_names=forbidden)
+            if (self._workshop_submission is not candidate
+                    or inspect_package(candidate["path"], forbidden_bundle_names=forbidden)["sha256"] != candidate["sha256"]):
+                self._workshop_submission = None
+                raise ValueError("投稿作品在准备期间发生改变，请重新选择。")
+            inspection = inspect_package(prepared["path"], forbidden_bundle_names=forbidden)
+            if (inspection["sha256"] != prepared["inspection"]["sha256"]
+                    or inspection["size"] != prepared["inspection"]["size"]):
+                raise ValueError("投稿暂存发生改变，请重新选择。")
+            result = client.upload(prepared["path"], details, expected_sha256=inspection["sha256"],
+                                   expected_size=inspection["size"])
+        self._append_log("工坊投稿已确认：" + details["name"] + "；" + result["message"])
+        return result
+
+    @exposed
     def workshop_export_submission(self, metadata: dict) -> dict:
-        from urllib.parse import urlencode
         from uuid import uuid4
         from .modkit.workshop import inspect_package, prepare_submission, validate_metadata
         candidate = self._workshop_submission
@@ -231,6 +289,10 @@ class DesktopApi:
             self._workshop_submission = None
             raise ValueError("投稿 ZIP 已改变，请重新选择。")
         details = dict(metadata)
+        if not details.get("version"):
+            details["version"] = "1.0.0"
+        if not details.get("game_version"):
+            details["game_version"] = "未标注"
         details["id"] = "mod-" + uuid4().hex[:20]
         details = validate_metadata(details)
         destination = self._pick_path("save", file_types=("投稿 ZIP (*.zip)",), save_filename="workshop-submission.zip")
@@ -244,19 +306,13 @@ class DesktopApi:
             self._workshop_submission = None
             raise ValueError("投稿 ZIP 在选择保存位置时发生改变，请重新选择。")
         result = prepare_submission(candidate["path"], details, destination, forbidden_bundle_names=self._workshop_forbidden_bundles())
-        body = ("工坊投稿，请审核后上架。\n\n"
-                f"名称：{details.get('name', '')}\n作者：{details.get('author', '')}\n"
-                f"作品版本：{details.get('version', '')}\n游戏版本：{details.get('game_version', '')}\n\n"
-                "请在此附上刚导出的 ZIP 和审核报告；大文件请附作者 GitHub Release 链接。\n"
-                "格式校验通过不等于无毒，投稿不直接上架。")
-        self._workshop_issue_url = REPOSITORY_URL + "/issues/new?" + urlencode({"title": "[工坊投稿] " + details.get("name", ""), "body": body})
-        return {"cancelled": False, **result, "issue_url": self._workshop_issue_url}
+        return {"cancelled": False, **result}
 
     @exposed
     def workshop_open_link(self, kind: str, mod_id: str = "") -> bool:
         from urllib.parse import urlencode
         if kind == "submission":
-            url = self._workshop_issue_url or REPOSITORY_URL + "/issues/new?" + urlencode({"title": "[工坊投稿] ", "body": "请附投稿 ZIP、审核报告及作品说明。投稿后由维护者审核，不直接上架。"})
+            raise ValueError("请在工坊内填写资料并点击上传，无需打开 GitHub。")
         elif kind == "report":
             # 固定仓库入口，远端条目不能指定任意导航地址。
             entry = next((item for item in self._workshop().catalog()["mods"] if item["id"] == mod_id), None)

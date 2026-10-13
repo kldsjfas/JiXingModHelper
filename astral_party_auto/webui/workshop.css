@@ -66,6 +66,15 @@
 .workshop-submit-grid .workshop-submit-description { grid-column: 1 / -1; }
 .workshop-submit-grid textarea { min-height: 100px; resize: vertical; }
 .workshop-submit-grid + .action-row { margin-top: 18px; }
+.workshop-advanced-fields { margin-top: 12px; }
+.workshop-upload-notice { max-width: 65em; margin: 14px 0; color: var(--muted); font-size: 12px; line-height: 1.7; }
+.workshop-my-submissions { margin-top: 18px; padding-top: 4px; }
+.workshop-my-submissions h4 { margin: 0 0 10px; font-size: 13px; }
+.workshop-receipt { padding: 12px 0; border-top: 1px solid var(--line); }
+.workshop-receipt strong { font-size: 13px; }
+.workshop-review-status { flex-shrink: 0; color: var(--gold); font-size: 12px; line-height: 1.5; }
+.workshop-receipt-number { margin: 8px 0 0; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; user-select: text; }
+.workshop-receipt .workshop-status { margin-top: 6px; white-space: pre-wrap; }
 
 @media (max-width: 1050px) {
   .workshop-layout.has-selection { grid-template-columns: minmax(0, 1fr); }

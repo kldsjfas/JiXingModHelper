@@ -142,7 +142,8 @@ class WorkshopApiTests(unittest.TestCase):
         report = json.loads(Path(result["report_path"]).read_text(encoding="utf-8"))
         self.assertEqual(inspection["sha256"], report["asset"]["sha256"])
         self.assertEqual(report["review_status"], "pending")
-        self.assertTrue(result["issue_url"].startswith("https://github.com/kldsjfas/JiXingModHelper/issues/new?"))
+        self.assertNotIn("issue_url", result)
+        self.assertIsNone(self.api._workshop_issue_url)
         self.assertEqual(source.read_bytes(), payload)
         self.api.controller.install.assert_not_called()
         self.scanner.assert_not_called()
@@ -167,6 +168,150 @@ class WorkshopApiTests(unittest.TestCase):
         with patch("astral_party_auto.web_app.os.startfile", create=True) as opener:
             self.assertFalse(self.api.workshop_open_link("https://attacker.example")["ok"])
             opener.assert_not_called()
+
+    def test_old_github_submission_link_is_no_longer_a_submission_action(self):
+        with patch("astral_party_auto.web_app.os.startfile", create=True) as opener:
+            result = self.api.workshop_open_link("submission")
+            self.assertFalse(result["ok"])
+            self.assertIn("工坊内", result["error"])
+            opener.assert_not_called()
+
+    def test_upload_is_unconfigured_without_a_server_and_keeps_selection(self):
+        self.api._workshop_submission = {"path": "selected.zip", "sha256": "a" * 64}
+        client = Mock()
+        client.snapshot.return_value = {"configured": False, "accepting_uploads": False,
+                                        "message": "投稿服务尚未部署"}
+        self.api._workshop_upload_client = client
+        result = self.api.submit_workshop_upload(metadata())
+        self.assertFalse(result["ok"])
+        self.assertIn("尚未部署", result["error"])
+        self.assertIsNotNone(self.api._workshop_submission)
+        client.upload.assert_not_called()
+
+    def _upload_fixture(self):
+        source = self.root / "outside-upload.zip"
+        source.write_bytes(pack_bytes([("ExternalEditor/texture.bundle", bundle())], include_info=False))
+        self.api._pick_path = Mock(return_value=source)
+        self.assertTrue(self.api.workshop_choose_submission()["ok"])
+        client = Mock()
+        client.snapshot.return_value = {"configured": True, "accepting_uploads": True,
+                                        "message": "可以投稿", "submissions": [], "max_package_bytes": 80 * 1024 * 1024}
+        self.api._workshop_upload_client = client
+        self.enterContext(patch("astral_party_auto.web_app.DATA_DIR", self.root / "data"))
+        return source, client
+
+    def test_upload_prepares_and_rechecks_external_zip_in_private_temporary_directory(self):
+        source, client = self._upload_fixture()
+        original = source.read_bytes()
+        stages = []
+
+        def uploaded(path, details, **checks):
+            stages.append(Path(path).parent)
+            checked = inspect_package(path)
+            self.assertEqual(checks, {"expected_sha256": checked["sha256"], "expected_size": checked["size"]})
+            self.assertEqual(details["version"], "1.0.0")
+            self.assertEqual(details["game_version"], "未标注")
+            with zipfile.ZipFile(path) as archive:
+                self.assertEqual(set(archive.namelist()), {"texture.bundle", "mod_info.json"})
+                info = json.loads(archive.read("mod_info.json"))
+                self.assertEqual(info["items"], [])
+                self.assertNotIn(str(self.root), json.dumps(info))
+            return {"submission_id": "a" * 32, "status": "pending", "message": "等待审核"}
+
+        client.upload.side_effect = uploaded
+        details = metadata()
+        details.pop("id")
+        details["version"] = details["game_version"] = ""
+        result = self.api.submit_workshop_upload(details)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["data"]["status"], "pending")
+        self.assertEqual(source.read_bytes(), original)
+        self.assertTrue(stages)
+        self.assertFalse(stages[0].exists())
+        self.assertIsNotNone(self.api._workshop_submission)
+        self.api.controller.install.assert_not_called()
+
+    def test_upload_failure_keeps_candidate_and_cleans_copy_for_retry(self):
+        source, client = self._upload_fixture()
+        stages = []
+
+        def interrupted(path, *_args, **_kwargs):
+            stages.append(Path(path).parent)
+            raise RuntimeError("连接中断，结果尚未确认")
+
+        client.upload.side_effect = interrupted
+        candidate = self.api._workshop_submission
+        self.assertFalse(self.api.submit_workshop_upload(metadata())["ok"])
+        self.assertIs(self.api._workshop_submission, candidate)
+        self.assertEqual(candidate["path"], source)
+        self.assertFalse(stages[0].exists())
+
+    def test_retry_uses_identical_prepared_bytes_even_after_the_clock_changes(self):
+        _source, client = self._upload_fixture()
+        checks = []
+
+        def uploaded(_path, _details, **inspection):
+            checks.append(inspection)
+            if len(checks) == 1:
+                raise RuntimeError("第一次连接中断")
+            return {"submission_id": "a" * 32, "status": "pending", "message": "等待审核"}
+
+        client.upload.side_effect = uploaded
+        with patch("zipfile.time.localtime", return_value=(2026, 1, 1, 0, 0, 0, 3, 1, -1)):
+            self.assertFalse(self.api.submit_workshop_upload(metadata())["ok"])
+        with patch("zipfile.time.localtime", return_value=(2026, 10, 13, 12, 30, 0, 1, 286, -1)):
+            self.assertTrue(self.api.submit_workshop_upload(metadata())["ok"])
+        self.assertEqual(checks[0], checks[1])
+
+    def test_reselection_and_restart_preserve_submission_identity_for_same_zip_and_details(self):
+        source, client = self._upload_fixture()
+        details = []
+        client.upload.side_effect = lambda _path, metadata, **_checks: details.append(dict(metadata)) or {
+            "submission_id": "a" * 32, "status": "pending", "message": "等待审核"}
+        self.assertTrue(self.api.submit_workshop_upload(metadata())["ok"])
+        self.api._workshop_submission = None
+        self.api._pick_path = Mock(return_value=source)
+        self.assertTrue(self.api.workshop_choose_submission()["ok"])
+        self.assertTrue(self.api.submit_workshop_upload(metadata())["ok"])
+        self.assertEqual(details[0], details[1])
+        changed = {**metadata(), "version": "2.0.0"}
+        self.assertTrue(self.api.submit_workshop_upload(changed)["ok"])
+        self.assertNotEqual(details[0]["id"], details[2]["id"])
+
+    def test_changed_selected_zip_is_cleared_before_any_upload(self):
+        source, client = self._upload_fixture()
+        source.write_bytes(pack_bytes([("changed.bundle", bundle())], include_info=False))
+        result = self.api.submit_workshop_upload(metadata())
+        self.assertFalse(result["ok"], result)
+        self.assertIn("已改变", result["error"])
+        self.assertIsNone(self.api._workshop_submission)
+        client.upload.assert_not_called()
+
+    def test_source_change_during_prepare_never_uploads_generated_copy(self):
+        source, client = self._upload_fixture()
+        from astral_party_auto.modkit.workshop import prepare_submission
+
+        def changed_during_copy(*args, **kwargs):
+            result = prepare_submission(*args, **kwargs)
+            source.write_bytes(pack_bytes([("changed.bundle", bundle())], include_info=False))
+            return result
+
+        with patch("astral_party_auto.modkit.workshop.prepare_submission", side_effect=changed_during_copy):
+            result = self.api.submit_workshop_upload(metadata())
+        self.assertFalse(result["ok"], result)
+        self.assertIn("准备期间", result["error"])
+        client.upload.assert_not_called()
+        self.assertFalse(list((self.root / "data" / "workshop-upload-staging").iterdir()))
+
+    def test_upload_status_only_exposes_public_snapshot(self):
+        client = Mock()
+        client.snapshot.return_value = {"configured": False, "accepting_uploads": False,
+                                        "message": "未部署", "submissions": []}
+        self.api._workshop_upload_client = client
+        result = self.api.get_workshop_upload_status(True)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["data"]["game_version"], "")
+        client.snapshot.assert_called_once_with(refresh=True)
 
 
 class DefenderScanTests(unittest.TestCase):

@@ -309,6 +309,23 @@ class WorkshopTests(unittest.TestCase):
         self.assertFalse(Path(prepared["path"]).exists())
         self.assertFalse(client.discard(prepared)["removed"])
 
+    def test_submission_keeps_animation_reload_guard_without_private_history(self):
+        from astral_party_auto.modkit.manager import ModManager
+
+        self.path.write_bytes(pack_bytes(info={"name": "animation", "items": [
+            {"kind": "visual_animation", "source": "C:/private/user/clip.gif", "bundle": "texture.bundle"},
+            {"source": "D:/private/photo.png"}], "bundle_count": 1}))
+        destination = self.root / "animation-submission.zip"
+        result = workshop.prepare_submission(self.path, metadata(), destination)
+        self.assertEqual(result["inspection"]["mod_info"]["items"], [{"kind": "visual_animation"}])
+        installed = self.root / "installed-animation"
+        installed.mkdir()
+        with zipfile.ZipFile(destination) as archive:
+            info = archive.read("mod_info.json")
+            self.assertNotIn(b"private", info)
+            (installed / "mod_info.json").write_bytes(info)
+        self.assertTrue(ModManager.has_native_ui_animation(installed))
+
     def test_submission_rewrites_local_history_and_keeps_sidecar_outside_zip(self):
         payload = pack_bytes(info={"name": "original", "items": [{"source": "C:/private/user/photo.png", "original_path": "D:/secret"}], "bundle_count": 1})
         self.path.write_bytes(payload)

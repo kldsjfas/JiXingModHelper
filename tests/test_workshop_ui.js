@@ -52,6 +52,10 @@ function deferred() {
   return { promise, resolve };
 }
 
+function visibleText(element) {
+  return [element.textContent, ...element.children.map(visibleText)].join("\n");
+}
+
 function loadWorkshop() {
   const elements = new Map();
   const find = (id) => {
@@ -68,7 +72,7 @@ function loadWorkshop() {
     document: { getElementById: find, createElement: (tag) => element(tag) },
   });
   const source = fs.readFileSync(path.join(__dirname, "../astral_party_auto/webui/workshop.js"), "utf8");
-  const hooks = "state, showDetail, refresh, prepare, beginInstall, confirmInstall, install, chooseSubmission, exportSubmission";
+  const hooks = "state, showDetail, refresh, prepare, beginInstall, confirmInstall, install, chooseSubmission, exportSubmission, uploadSubmission, loadUploadStatus";
   vm.runInContext(source.replace(/\}\)\(\);\s*$/, `globalThis.ui = { ${hooks} };\n})();`), context);
   context.window.ModWorkshop.init({
     async call(name, options, ...args) {
@@ -248,19 +252,154 @@ async function checkSubmissionBoundary() {
   assert.equal(metadata.name, "<b>猫猫</b>");
   assert.equal(metadata.description, fields.description);
   assert.ok(!("id" in metadata));
-  assert.match(ui.find("workshop-submission-result").textContent, /手动上传.*人工审核/);
+  assert.match(ui.find("workshop-submission-result").textContent, /本地副本已导出.*尚未上传/);
   assert.match(ui.find("workshop-submission-export-details").textContent, /检查报告.*submission\.json/);
-  assert.equal(ui.find("workshop-open-submission").classList.contains("is-hidden"), false);
   assert.doesNotMatch(ui.find("workshop-submission-result").textContent, /javascript/);
-  ui.reply("workshop_open_link", true);
-  await ui.find("workshop-open-submission").trigger("click");
-  assert.deepEqual(Array.from(ui.requests.at(-1).args), ["submission", ""]);
+  assert.equal(ui.requests.filter((request) => request.name === "submit_workshop_upload").length, 0,
+    "Exporting a local copy automatically uploaded it");
   ui.reply("workshop_choose_submission", { cancelled: true });
   await ui.chooseSubmission();
   assert.equal(ui.state.submission, null);
   assert.equal(ui.find("workshop-export-submission").disabled, true);
-  assert.equal(ui.find("workshop-open-submission").classList.contains("is-hidden"), true);
   assert.match(ui.find("workshop-submission-file").textContent, /支持其他工具/);
+}
+
+function uploadService(submissions = [], accepting = true) {
+  return { configured: true, accepting_uploads: accepting, submissions, max_package_bytes: 100000 };
+}
+
+async function chooseUpload(ui) {
+  ui.reply("workshop_choose_submission", { path_label: "作品.zip", inspection: { file_count: 2, total_size: 4096, sha256: "a".repeat(64) } });
+  await ui.chooseSubmission();
+  for (const [field, value] of Object.entries({ name: "猫猫贴图", author: "作者", description: "作品说明", category: "texture", version: "1.0.0", game_version: "2026-10" })) {
+    ui.find(`workshop-submit-${field}`).value = value;
+  }
+  await ui.find("workshop-submit-form").trigger("input");
+}
+
+async function checkUploadRequiresLiveService() {
+  const entered = loadWorkshop();
+  entered.reply("workshop_catalog", { mods: [] });
+  entered.reply("get_workshop_upload_status", { configured: false, accepting_uploads: false, submissions: [] });
+  entered.publicApi.enter();
+  assert.deepEqual(Array.from(entered.requests.find((request) => request.name === "get_workshop_upload_status").args), [true],
+    "Entering workshop did not request a current upload service health check");
+  const ui = loadWorkshop();
+  await ui.uploadSubmission();
+  assert.equal(ui.requests.length, 0);
+  await chooseUpload(ui);
+  assert.equal(ui.find("workshop-upload-submission").disabled, true);
+  assert.match(ui.find("workshop-upload-service-status").textContent, /上传服务暂未开通/);
+  ui.reply("get_workshop_upload_status", { configured: false, accepting_uploads: false, submissions: [] });
+  await ui.loadUploadStatus(true);
+  await ui.find("workshop-submit-form").trigger("submit", { preventDefault() {} });
+  assert.equal(ui.requests.filter((request) => request.name === "submit_workshop_upload").length, 0);
+  ui.reply("get_workshop_upload_status", uploadService([], false));
+  await ui.loadUploadStatus(true);
+  assert.equal(ui.find("workshop-upload-submission").disabled, true, "Configured but offline service allowed upload");
+  assert.match(ui.find("workshop-upload-service-status").textContent, /暂未接收作品/);
+  ui.reply("get_workshop_upload_status", uploadService());
+  await ui.find("workshop-refresh-submissions").trigger("click");
+  assert.equal(ui.find("workshop-upload-submission").disabled, false);
+  assert.match(ui.find("workshop-upload-service-status").textContent, /单个 ZIP 最多 97\.7 KB/);
+  assert.deepEqual(Array.from(ui.requests.at(-1).args), [true]);
+  ui.find("workshop-submit-form").reportValidity = () => false;
+  await ui.uploadSubmission();
+  assert.equal(ui.requests.filter((request) => request.name === "submit_workshop_upload").length, 0,
+    "Invalid metadata reached upload API");
+}
+
+async function checkUploadReceiptAndExplicitAction() {
+  const ui = loadWorkshop();
+  ui.reply("get_workshop_upload_status", uploadService());
+  await ui.loadUploadStatus(true);
+  await chooseUpload(ui);
+  assert.equal(ui.requests.filter((request) => request.name === "submit_workshop_upload").length, 0,
+    "Choosing ZIP uploaded without user action");
+  ui.find("workshop-submit-name").value = " <b>作品</b> ";
+  await ui.find("workshop-submit-form").trigger("input");
+  const pending = deferred();
+  ui.reply("submit_workshop_upload", pending.promise);
+  const upload = ui.find("workshop-submit-form").trigger("submit", { preventDefault() {} });
+  assert.equal(ui.find("workshop-upload-submission").disabled, true);
+  await ui.uploadSubmission();
+  assert.equal(ui.requests.filter((request) => request.name === "submit_workshop_upload").length, 1,
+    "Repeated click caused concurrent upload");
+  const metadata = ui.requests.at(-1).args[0];
+  assert.equal(metadata.name, "<b>作品</b>");
+  assert.ok(!("id" in metadata));
+  assert.ok(!("path" in metadata));
+  assert.ok(!("sha256" in metadata));
+  pending.resolve({ submission_id: "sub-123", status: "pending", name: "<b>作品</b>", message: "等待人工审核。", secret: "DO_NOT_DISPLAY", sha256: "a".repeat(64), size: 4096 });
+  await upload;
+  assert.match(ui.find("workshop-submission-result").textContent, /上传完成，待人工审核.*sub-123/);
+  assert.equal(ui.find("workshop-upload-submission").textContent, "已上传");
+  assert.equal(ui.find("workshop-upload-submission").disabled, true);
+  assert.equal(ui.find("workshop-my-submissions").classList.contains("is-hidden"), false);
+  const receipt = ui.find("workshop-submission-receipts").children[0];
+  assert.equal(receipt.children[0].children[0].textContent, "<b>作品</b>");
+  assert.equal(receipt.children[0].children[1].textContent, "待审核");
+  assert.equal(receipt.children[1].textContent, "投稿编号：sub-123");
+  assert.doesNotMatch(visibleText(receipt), /DO_NOT_DISPLAY|sha256/);
+  await ui.uploadSubmission();
+  assert.equal(ui.requests.filter((request) => request.name === "submit_workshop_upload").length, 1,
+    "Already uploaded form allowed accidental duplicate");
+  ui.reply("workshop_export_submission", { path: "D:\\已上传作品副本.zip" });
+  await ui.exportSubmission();
+  assert.doesNotMatch(ui.find("workshop-submission-result").textContent, /尚未上传/,
+    "Exporting uploaded work falsely reported it was not uploaded");
+}
+
+async function checkUploadRetryAndReviewRefresh() {
+  const ui = loadWorkshop();
+  ui.reply("get_workshop_upload_status", uploadService());
+  await ui.loadUploadStatus(true);
+  await chooseUpload(ui);
+  ui.reply("submit_workshop_upload", new Error("连接中断"));
+  await ui.uploadSubmission();
+  assert.ok(ui.state.submission, "Network failure lost chosen ZIP");
+  assert.equal(ui.find("workshop-submit-description").value, "作品说明");
+  assert.equal(ui.find("workshop-upload-submission").disabled, false);
+  assert.match(ui.find("workshop-submission-result").textContent, /上传未确认.*连接中断.*已保留.*重试/);
+  const firstMetadata = ui.requests.at(-1).args[0];
+  ui.reply("submit_workshop_upload", { submission_id: "sub-retry", status: "pending", name: "猫猫贴图", message: "等待人工审核。" });
+  await ui.uploadSubmission();
+  assert.deepEqual(ui.requests.at(-1).args[0], firstMetadata, "Retry changed original metadata");
+  ui.find("workshop-submit-description").value = "更新作品说明";
+  await ui.find("workshop-submit-form").trigger("input");
+  assert.equal(ui.find("workshop-upload-submission").disabled, false);
+  ui.reply("get_workshop_upload_status", new Error("状态服务超时"));
+  await ui.loadUploadStatus(true);
+  assert.equal(ui.find("workshop-upload-submission").disabled, true);
+  assert.equal(ui.find("workshop-submission-receipts").children.length, 1, "Status failure discarded receipt");
+  assert.match(ui.find("workshop-upload-service-status").textContent, /暂停上传/);
+  const unsafeMessage = "<img src=x onerror=alert(1)>";
+  ui.reply("get_workshop_upload_status", uploadService([{ submission_id: "sub-retry", name: "猫猫贴图", status: "approved", message: unsafeMessage, query_secret: "NOT_FOR_UI" }]));
+  await ui.find("workshop-refresh-submissions").trigger("click");
+  const receipt = ui.find("workshop-submission-receipts").children[0];
+  assert.equal(receipt.children[0].children[1].textContent, "审核通过");
+  assert.equal(receipt.children[2].textContent, unsafeMessage);
+  assert.doesNotMatch(visibleText(receipt), /NOT_FOR_UI/);
+  assert.equal(ui.find("workshop-upload-submission").disabled, false);
+  ui.reply("workshop_choose_submission", { cancelled: true });
+  await ui.chooseSubmission();
+  assert.equal(ui.find("workshop-upload-submission").disabled, true);
+  assert.equal(ui.state.uploadedFingerprint, "");
+}
+
+async function checkInvalidUploadReceipt() {
+  const ui = loadWorkshop();
+  ui.reply("get_workshop_upload_status", uploadService([null, false, {}, { submission_id: "valid-old", status: "pending", name: "旧投稿" }]));
+  await ui.loadUploadStatus(true);
+  assert.equal(ui.find("workshop-submission-receipts").children.length, 1);
+  await chooseUpload(ui);
+  ui.reply("submit_workshop_upload", { submission_id: { secret: "DO_NOT_DISPLAY" }, status: "pending" });
+  await ui.uploadSubmission();
+  assert.equal(ui.state.uploadedFingerprint, "");
+  assert.equal(ui.find("workshop-upload-submission").disabled, false);
+  assert.match(ui.find("workshop-submission-result").textContent, /未返回有效的审核回执/);
+  assert.doesNotMatch(ui.find("workshop-submission-result").textContent, /DO_NOT_DISPLAY/);
+  assert.equal(ui.find("workshop-submission-receipts").children.length, 1);
 }
 
 async function checkInstallWhileLeavingPage() {
@@ -293,7 +432,7 @@ function checkIntegration() {
   assert.ok(app.includes("window.ModWorkshop?.enter"));
   assert.ok(app.includes("window.ModWorkshop?.leave"));
   assert.doesNotMatch(source, /innerHTML|outerHTML|insertAdjacentHTML|\beval\s*\(|\bfetch\s*\(|window\.open/);
-  for (const phrase of ["浏览无需登录", "未审核的投稿", "不能保证零风险", "不会自动上传", "人工审核", "分享我的作品"]) {
+  for (const phrase of ["浏览无需登录", "未审核的投稿", "不能保证零风险", "不会自动上传", "人工审核", "分享我的作品", "无需操作 GitHub", "上传服务暂未开通"]) {
     assert.ok(html.includes(phrase), `Missing workshop guidance: ${phrase}`);
   }
   const workshopSection = html.slice(html.indexOf('id="page-workshop"'), html.indexOf('id="page-browse"'));
@@ -306,6 +445,11 @@ function checkIntegration() {
   assert.doesNotMatch(html.match(/<details id="workshop-share"[^>]*>/)[0], /\sopen(?:\s|=|>)/);
   assert.ok(html.indexOf('id="workshop-choose-submission"') < html.indexOf('id="workshop-submit-form"'));
   assert.match(html, /id="workshop-submit-version"[^>]*value="1\.0\.0"/);
+  assert.match(html, /id="workshop-upload-submission"[^>]*type="submit"[^>]*disabled>上传作品/);
+  assert.match(html, /id="workshop-export-submission"[^>]*type="button"/);
+  assert.ok(workshopSection.includes("点击上传会把选中的 ZIP 和作品介绍发送到工坊服务器"));
+  assert.ok(!workshopSection.includes('id="workshop-open-submission"'));
+  assert.doesNotMatch(workshopSection + source, /手动上传|打开投稿页|openLink\("submission"\)/);
 }
 
 (async () => {
@@ -315,6 +459,10 @@ function checkIntegration() {
   await checkTwoStepInstallAndPageLeave();
   await checkFailuresAndAsyncCandidate();
   await checkSubmissionBoundary();
+  await checkUploadRequiresLiveService();
+  await checkUploadReceiptAndExplicitAction();
+  await checkUploadRetryAndReviewRefresh();
+  await checkInvalidUploadReceipt();
   await checkInstallWhileLeavingPage();
-  console.log("Workshop UI safety: 7 checks passed");
+  console.log("Workshop UI safety: 11 checks passed");
 })().catch((error) => { console.error(error); process.exitCode = 1; });

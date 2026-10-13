@@ -628,9 +628,16 @@ def prepare_submission(path: str | Path, metadata: dict, destination: str | Path
                             target.write(block)
                     if count != item["size"] or digest.hexdigest() != item["sha256"]:
                         raise ValueError("投稿来源在复制期间改变。")
-                # Do not forward item history: it may contain local source paths.
-                info = {"name": checked["name"], "tool": "AstralParty Mod Helper", "items": [], "bundle_count": inspection["bundle_count"]}
-                output.writestr("mod_info.json", json.dumps(info, ensure_ascii=False, indent=2).encode("utf-8"))
+                # Retain the reload guard without forwarding local edit history.
+                source_items = (inspection["mod_info"] or {}).get("items", [])
+                needs_ui_reload = any(item.get("kind") == "visual_animation" for item in source_items)
+                info = {"name": checked["name"], "tool": "AstralParty Mod Helper",
+                        "items": [{"kind": "visual_animation"}] if needs_ui_reload else [],
+                        "bundle_count": inspection["bundle_count"]}
+                metadata_entry = zipfile.ZipInfo("mod_info.json")
+                metadata_entry.compress_type = zipfile.ZIP_DEFLATED
+                metadata_entry.external_attr = (stat.S_IFREG | 0o644) << 16
+                output.writestr(metadata_entry, json.dumps(info, ensure_ascii=False, indent=2).encode("utf-8"))
             if _digest(source) != inspection["sha256"]:
                 raise ValueError("投稿来源在复制期间改变。")
         final = inspect_package(temporary_package, forbidden_bundle_names=forbidden_bundle_names)
