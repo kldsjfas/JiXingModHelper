@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import io
 import json
 import ssl
 import time
@@ -13,7 +14,7 @@ from unittest.mock import Mock, patch
 
 from tests.test_workshop import metadata, pack_bytes
 from tools.workshop_github_bridge import (ApiFailure, REPOSITORY, SERVICE_URL, ServiceApi, TrustedHttp, WorkshopBridge,
-                                          GithubApi, approved_submission, authorize_environment, issue_body)
+                                          GithubApi, approved_submission, authorize_environment, issue_body, main)
 
 SUBMISSION = "a" * 32
 PROOF = {"passed": True, "version": "2026-10-13", "evidence": "private-test-record-001",
@@ -497,6 +498,114 @@ class WorkshopGithubBridgeTests(unittest.TestCase):
         github = GithubApi("test-protected-github-token")
         self.assertEqual(github.http._origin_ip, "")
         self.assertEqual(github.uploads._origin_ip, "")
+        self.assertFalse(github.http._review_tunnel)
+        self.assertFalse(github.uploads._review_tunnel)
+
+    def test_review_tunnel_keeps_domain_host_sni_and_certificate_verification(self):
+        hostname = "xn--killer-gx2m.top"
+        service = ServiceApi("private-test-admin-token", review_tunnel_port="18443")
+        context = Mock(check_hostname=True, verify_mode=ssl.CERT_REQUIRED)
+        encrypted_socket, raw_socket = Mock(), Mock()
+        context.wrap_socket.return_value = encrypted_socket
+        with patch("tools.workshop_github_bridge.ssl.create_default_context", return_value=context), patch("tools.workshop_github_bridge.socket.create_connection", return_value=raw_socket) as dialer, patch("tools.workshop_github_bridge.trusted_https_connection") as proxy_factory:
+            connection = service.http._connection()
+            try:
+                self.assertEqual((connection.host, connection.port), (hostname, 443))
+                connection.connect()
+                dialer.assert_called_once_with(("127.0.0.1", 18443), 30, None)
+                context.wrap_socket.assert_called_once_with(raw_socket, server_hostname=hostname)
+                self.assertIs(connection.sock, encrypted_socket)
+                proxy_factory.assert_not_called()
+                connection.putrequest("GET", "/jixing-workshop/v1/admin/submissions/pending")
+                self.assertIn(b"Host: " + hostname.encode(), connection._buffer)
+                self.assertNotIn(b"Host: 127.0.0.1", connection._buffer)
+                self.assertNotIn(b"Host: " + hostname.encode() + b":18443", connection._buffer)
+            finally:
+                connection.close()
+        self.assertTrue(context.check_hostname)
+        self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+
+    def test_review_tunnel_certificate_failure_sends_no_admin_bearer(self):
+        service = ServiceApi("private-test-admin-token", review_tunnel_port="18443")
+        context = Mock(check_hostname=True, verify_mode=ssl.CERT_REQUIRED)
+        context.wrap_socket.side_effect = ssl.SSLCertVerificationError("test-domain-mismatch")
+        raw_socket = Mock()
+        with patch("tools.workshop_github_bridge.ssl.create_default_context", return_value=context), patch("tools.workshop_github_bridge.socket.create_connection", return_value=raw_socket):
+            with self.assertRaisesRegex(RuntimeError, "网络连接失败") as caught:
+                service.http.request("GET", "/v1/admin/submissions/pending")
+        raw_socket.sendall.assert_not_called()
+        self.assertNotIn("private-test-admin-token", str(caught.exception))
+        self.assertNotIn("test-domain-mismatch", str(caught.exception))
+
+    def test_unavailable_review_tunnel_never_falls_back_to_proxy_or_public_origin(self):
+        service = ServiceApi("private-test-admin-token", review_tunnel_port="18443")
+        with patch("tools.workshop_github_bridge.socket.create_connection", side_effect=ConnectionRefusedError("test-tunnel-unavailable")) as dialer, patch("tools.workshop_github_bridge.trusted_https_connection") as proxy_factory:
+            with self.assertRaisesRegex(RuntimeError, "网络连接失败") as caught:
+                service.http.request("GET", "/v1/admin/submissions/pending")
+        dialer.assert_called_once_with(("127.0.0.1", 18443), 30, None)
+        proxy_factory.assert_not_called()
+        self.assertNotIn("private-test-admin-token", str(caught.exception))
+        self.assertNotIn("test-tunnel-unavailable", str(caught.exception))
+
+    def test_review_tunnel_rejects_other_ports_addresses_and_types(self):
+        for value in ("443", "19443", "018443", "+18443", "18443.0", " 18443", "18443 ", "18443\n",
+                      "127.0.0.1:18443", "localhost:18443", "8.8.8.8:18443", None, False, True, 0, 18443, [], {}):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "固定的本机端口"):
+                ServiceApi("test-protected-token", review_tunnel_port=value)
+
+    def test_review_tunnel_cannot_replace_github_or_combine_with_origin_pin(self):
+        for origin in ("https://api.github.com", "https://uploads.github.com", SERVICE_URL + "/extra", "https://example.com"):
+            with self.subTest(origin=origin), self.assertRaisesRegex(ValueError, "固定工坊"):
+                TrustedHttp(origin, "test-protected-token", review_tunnel_port="18443")
+        with self.assertRaisesRegex(ValueError, "同时配置") as caught:
+            ServiceApi("test-protected-token", origin_ip="8.8.8.8", review_tunnel_port="18443")
+        self.assertNotIn("8.8.8.8", str(caught.exception))
+
+    def test_review_tunnel_socket_callback_refuses_altered_source(self):
+        service = ServiceApi("test-protected-token", review_tunnel_port="18443")
+        connection = service.http._connection()
+        try:
+            with patch("tools.workshop_github_bridge.socket.create_connection") as dialer:
+                for address in (("xn--killer-gx2m.top", 18443), ("127.0.0.1", 18443), ("api.github.com", 443)):
+                    with self.subTest(address=address), self.assertRaisesRegex(ValueError, "受信服务来源"):
+                        connection._create_connection(address)
+                dialer.assert_not_called()
+        finally:
+            connection.close()
+
+    def test_review_tunnel_still_refuses_redirects_without_reading_remote_body(self):
+        service = ServiceApi("private-test-admin-token", review_tunnel_port="18443")
+        connection = Mock()
+        response = Mock(status=302)
+        connection.getresponse.return_value = response
+        with patch.object(service.http, "_connection", return_value=connection):
+            with self.assertRaises(ApiFailure) as caught:
+                service.http.request("GET", "/v1/admin/submissions/pending")
+        self.assertEqual(caught.exception.source_host, "xn--killer-gx2m.top")
+        self.assertNotIn("private-test-admin-token", str(caught.exception))
+        response.read.assert_not_called()
+        connection.close.assert_called_once()
+
+    def test_main_reads_fixed_tunnel_setting_only_for_service(self):
+        environment = {"GITHUB_REPOSITORY": REPOSITORY, "GITHUB_EVENT_NAME": "workflow_dispatch",
+                       "GITHUB_REF": "refs/heads/main", "GITHUB_ACTOR": "kldsjfas",
+                       "GITHUB_TOKEN": "test-github-token", "WORKSHOP_ADMIN_SECRET": "test-admin-token",
+                       "WORKSHOP_REVIEW_TUNNEL_PORT": "18443", "WORKSHOP_REVIEW_TUNNEL_HOST": "ignored.example"}
+        with patch("tools.workshop_github_bridge.GithubApi", return_value=self.github) as github_factory, patch("tools.workshop_github_bridge.ServiceApi", return_value=self.service) as service_factory, patch("sys.stdout", new_callable=io.StringIO) as output:
+            self.assertEqual(main(environment), 0)
+        github_factory.assert_called_once_with("test-github-token")
+        service_factory.assert_called_once_with("test-admin-token", origin_ip="", review_tunnel_port="18443")
+        self.assertEqual(json.loads(output.getvalue()), {"synced": 1})
+
+    def test_main_rejects_invalid_tunnel_environment_before_service_request(self):
+        environment = {"GITHUB_REPOSITORY": REPOSITORY, "GITHUB_EVENT_NAME": "workflow_dispatch",
+                       "GITHUB_REF": "refs/heads/main", "GITHUB_ACTOR": "kldsjfas",
+                       "GITHUB_TOKEN": "test-github-token", "WORKSHOP_ADMIN_SECRET": "test-admin-token",
+                       "WORKSHOP_REVIEW_TUNNEL_PORT": "19443"}
+        with patch("tools.workshop_github_bridge.GithubApi", return_value=self.github), patch("tools.workshop_github_bridge.trusted_https_connection") as proxy_factory:
+            with self.assertRaisesRegex(ValueError, "固定的本机端口"):
+                main(environment)
+        proxy_factory.assert_not_called()
 
 
 if __name__ == "__main__":

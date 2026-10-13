@@ -31,6 +31,7 @@ IDENTIFIER = re.compile(r"[0-9a-f]{32}\Z")
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 MAX_JSON_BYTES = 4 * 1024 * 1024
 BLOCK_BYTES = 64 * 1024
+REVIEW_TUNNEL_PORT = 18443
 
 
 class ApiFailure(RuntimeError):
@@ -43,15 +44,23 @@ class ApiFailure(RuntimeError):
 
 
 class TrustedHttp:
-    def __init__(self, origin, token, *, origin_ip=""):
+    def __init__(self, origin, token, *, origin_ip="", review_tunnel_port=""):
         parts = urlsplit(origin)
         if (parts.scheme != "https" or parts.username is not None or parts.password is not None or parts.port or parts.query or parts.fragment
                 or not parts.hostname or "\\" in origin or any(ord(char) <= 32 for char in origin)):
             raise ValueError("桥接只能连接固定的 HTTPS 来源。")
         if not isinstance(token, str) or not token or any(ord(char) <= 32 or ord(char) >= 127 for char in token):
             raise ValueError("缺少受保护的桥接凭证。")
+        if not isinstance(review_tunnel_port, str) or review_tunnel_port not in ("", str(REVIEW_TUNNEL_PORT)):
+            raise ValueError("审核隧道只能使用工作流固定的本机端口。")
+        if review_tunnel_port:
+            if origin != SERVICE_URL:
+                raise ValueError("审核隧道只允许固定工坊服务，不能改变 GitHub 连接。")
+            if origin_ip:
+                raise ValueError("审核隧道与源站直连不能同时配置。")
         self.host, self.prefix, self.token = parts.hostname, parts.path.rstrip("/"), token
         self._origin_ip = ""
+        self._review_tunnel = bool(review_tunnel_port)
         if origin_ip:
             if origin != SERVICE_URL:
                 raise ValueError("源站直连只允许固定工坊服务，不能改变 GitHub 连接。")
@@ -68,18 +77,19 @@ class TrustedHttp:
             self._origin_ip = address.compressed
 
     def _connection(self):
-        if not self._origin_ip:
+        if not self._origin_ip and not self._review_tunnel:
             return trusted_https_connection(self.host, timeout=30)
         connection = http.client.HTTPSConnection(self.host, timeout=30, context=ssl.create_default_context())
 
-        def connect_origin(address, timeout=30, source_address=None):
+        def connect_service(address, timeout=30, source_address=None):
             if address != (self.host, 443):
-                raise ValueError("源站直连不能改变受信服务来源。")
-            return socket.create_connection((self._origin_ip, 443), timeout, source_address)
+                raise ValueError("审核连接不能改变受信服务来源。")
+            target = ("127.0.0.1", REVIEW_TUNNEL_PORT) if self._review_tunnel else (self._origin_ip, 443)
+            return socket.create_connection(target, timeout, source_address)
 
-        # 仅 TCP 使用维护者的 Secret 地址；HTTPSConnection 仍用原域名作 SNI、
-        # 校验证书并生成 Host 请求头。认证请求在完成 TLS 校验后才发送。
-        connection._create_connection = connect_origin
+        # 仅 TCP 走固定隧道或维护者的源站；TLS 仍校验原域名，
+        # SNI、Host 和认证请求都沿用同一个受信服务。
+        connection._create_connection = connect_service
         return connection
 
     def request(self, method, path, value=None, *, file=None, size=0, sha256="", output=None, binary=False):
@@ -152,8 +162,8 @@ class TrustedHttp:
 
 
 class ServiceApi:
-    def __init__(self, secret, *, origin_ip=""):
-        self.http = TrustedHttp(SERVICE_URL, secret, origin_ip=origin_ip)
+    def __init__(self, secret, *, origin_ip="", review_tunnel_port=""):
+        self.http = TrustedHttp(SERVICE_URL, secret, origin_ip=origin_ip, review_tunnel_port=review_tunnel_port)
 
     def pending(self):
         for page in range(101):
@@ -452,7 +462,9 @@ def main(environment=None):
     environment = os.environ if environment is None else environment
     github = GithubApi(environment.get("GITHUB_TOKEN", ""))
     actor, default_branch = authorize_environment(environment, github)
-    service = ServiceApi(environment.get("WORKSHOP_ADMIN_SECRET", ""), origin_ip=environment.get("WORKSHOP_ORIGIN_IP", ""))
+    service = ServiceApi(environment.get("WORKSHOP_ADMIN_SECRET", ""),
+                         origin_ip=environment.get("WORKSHOP_ORIGIN_IP", ""),
+                         review_tunnel_port=environment.get("WORKSHOP_REVIEW_TUNNEL_PORT", ""))
     bridge = WorkshopBridge(service, github, actor=actor, default_branch=default_branch)
     action = environment.get("BRIDGE_ACTION", "sync")
     identifier = environment.get("SUBMISSION_ID", "")
