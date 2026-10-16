@@ -738,6 +738,7 @@ ${row.bundle}`;
     } else if (kind === "dynamic") {
       if (sel.animation_kind === "cri_usm") {
         a.textContent = "导出 USM";
+        a.disabled = sel.exportable === false;
         b.textContent = "仅原始 USM";
         b.disabled = true;
       } else if (sel.frame_names && sel.frame_names.length) {
@@ -2315,13 +2316,14 @@ ${row.bundle}`;
     const expectedSelection = { bundle: state.selection.bundle, name: state.selection.name,
       asset_type: state.selection.asset_type || state.selection.kind };
     const current = () => request === state.replacementRequest && selectionRequest === state.selectionRequest &&
-      key === selectionKey() && state.page === "studio";
+      key === selectionKey();
     state.replacementImporting = true;
     syncStudioImportControls();
     try {
       const content = await readReplacementFile(file);
-      if (!current()) return;
+      if (!current() || state.page !== "studio") return;
       const data = await call("import_replacement_file", { quiet: true }, file.name, content, expectedSelection);
+      // 后端已接受新候选，切页也要同步；否则返回制作页会看见旧图却保存新图。
       if (!current() || !data) return;
       applyReplacement(data);
     } catch (err) {

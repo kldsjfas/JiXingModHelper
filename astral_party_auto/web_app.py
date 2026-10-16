@@ -1206,6 +1206,8 @@ class DesktopApi:
         selection = self.controller.selection
         if not selection:
             raise RuntimeError("请先选择资源。")
+        if selection.get("exportable") is False:
+            raise RuntimeError(selection.get("reason") or "当前资源暂不支持导出。")
         asset_type = selection.get("asset_type") or "texture"
         default_name = self.controller.default_export_filename()
         fmt = None

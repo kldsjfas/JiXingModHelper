@@ -92,6 +92,13 @@ class CriVideoControllerTests(unittest.TestCase):
         self.assertFalse(selected["editable"])
         inspect.assert_not_called()
 
+    def test_unsupported_video_does_not_open_a_save_dialog(self):
+        self.select_video(error=ValueError("外部视频暂不支持"))
+        result = self.api.export_selection()
+        self.assertFalse(result["ok"])
+        self.assertIn("外部视频", result["error"])
+        self.api._pick_path.assert_not_called()
+
     def test_cri_filter_counts_only_real_private_mapping_and_preserves_non_skill_names(self):
         self.controller.typed_index = {
             "dynamic": {"movie.bundle": ["VSkill_Hero124", "UnexpectedMovie", "VSkill_not_video", "Main_fui"]},

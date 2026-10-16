@@ -56,6 +56,7 @@ function loadFrontend() {
     window: { location: { hash: "" }, addEventListener() {} },
     document: {
       readyState: "loading", addEventListener: (type, handler) => documentEvents.set(type, handler),
+      body: makeElement("body"),
       querySelector: (selector) => find(selector.slice(1)), querySelectorAll: () => [],
       getElementById: find, createElement: () => makeElement(),
     },
@@ -66,7 +67,7 @@ function loadFrontend() {
     },
   });
   const source = fs.readFileSync(path.join(__dirname, "../astral_party_auto/webui/app.js"), "utf8");
-  vm.runInContext(source.replace(/\}\)\(\);\s*$/, "globalThis.ui = { state, renderBrowseComparison, renderReplacement, refreshSelectionComparison, importDroppedReplacement, bindReplacementDrop, isPlayableAnimation, canEdit, updateExportButtons };\n})();"), context);
+  vm.runInContext(source.replace(/\}\)\(\);\s*$/, "globalThis.ui = { state, renderBrowseComparison, renderReplacement, refreshSelectionComparison, importDroppedReplacement, bindReplacementDrop, isPlayableAnimation, canEdit, updateExportButtons, showPage, refreshStudio, commitReplacement };\n})();"), context);
   const ui = context.ui;
   ui.state.page = "studio";
   ui.state.selection = texture("Portrait");
@@ -213,6 +214,91 @@ async function checkImportRaces() {
   assert.equal(ui.state.replacement, newest, "A late API response replaced the next resource candidate");
 }
 
+function navigationResponder(ui, importResponse, onCommit = () => {}) {
+  return ({ url }) => {
+    if (url === "/api/import_replacement_file") return importResponse();
+    if (url === "/api/get_studio_state") return { ok: true, data: ui.state.selection };
+    if (url === "/api/get_categories" || url === "/api/get_character_list" || url === "/api/get_logs") return { ok: true, data: [] };
+    if (url === "/api/get_character_labels") return { ok: true, data: { bundles: {}, resources: {} } };
+    if (url === "/api/browse_assets") return { ok: true, data: { items: [{ name: "Portrait", bundle: "sample.bundle" }], total: 1 } };
+    if (url === "/api/commit_replacement") {
+      onCommit();
+      return { ok: true, data: { draft: { items: [{ name: "Portrait", bundle: "sample.bundle", kind: "texture" }] } } };
+    }
+    throw new Error(`Unexpected navigation API: ${url}`);
+  };
+}
+
+async function checkPageNavigationAfterImportSent() {
+  const ui = loadFrontend();
+  const oldCandidate = { name: "old-A.png", preview_data: "data:image/png;base64,QQ==" };
+  const acceptedCandidate = { name: "new-B.png", preview_data: "data:image/png;base64,Qg==" };
+  ui.state.replacement = oldCandidate;
+  let backendCandidate = oldCandidate;
+  const response = deferred();
+  const reached = deferred();
+  let committedCandidate;
+  ui.respond(navigationResponder(ui, () => {
+    backendCandidate = acceptedCandidate;
+    reached.resolve();
+    return response.promise;
+  }, () => { committedCandidate = backendCandidate; }));
+  const importRequest = ui.state.replacementRequest;
+  const pendingImport = ui.importDroppedReplacement(drop([new File(["B"], "new-B.png")]));
+  await reached.promise;
+  ui.showPage("browse");
+  assert.equal(ui.state.replacementRequest, importRequest + 1, "Page navigation invalidated a submitted import request");
+  assert.equal(ui.state.replacement, oldCandidate);
+  response.resolve({ ok: true, data: acceptedCandidate });
+  await pendingImport;
+  assert.equal(ui.state.replacement, backendCandidate, "Successful import was discarded after navigation");
+  assert.equal(ui.state.replacementImporting, false);
+  ui.showPage("studio");
+  await ui.refreshStudio();
+  assert.equal(ui.state.replacement, backendCandidate, "Returning to the studio restored a stale candidate");
+  assert.match(ui.find("studio-replacement").innerHTML, /Qg==/);
+  assert.doesNotMatch(ui.find("studio-replacement").innerHTML, /QQ==/);
+  await ui.commitReplacement();
+  assert.equal(committedCandidate, acceptedCandidate, "Saved bytes did not match the visible candidate");
+}
+
+async function checkPageNavigationBeforeImportSent() {
+  const ui = loadFrontend();
+  const oldCandidate = { name: "old-A.png", preview_data: "data:image/png;base64,QQ==" };
+  ui.state.replacement = oldCandidate;
+  const gate = deferred();
+  ui.waitForRead(gate);
+  ui.respond(navigationResponder(ui, () => { throw new Error("Hidden page started an import"); }));
+  const pendingRead = ui.importDroppedReplacement(drop([new File(["B"], "new-B.png")]));
+  ui.showPage("logs");
+  gate.resolve();
+  await pendingRead;
+  assert.equal(ui.requests.some(({ url }) => url === "/api/import_replacement_file"), false);
+  assert.equal(ui.state.replacement, oldCandidate);
+  assert.equal(ui.state.replacementImporting, false);
+  ui.showPage("studio");
+  await ui.refreshStudio();
+  assert.equal(ui.state.replacement, oldCandidate);
+  assert.match(ui.find("studio-replacement").innerHTML, /QQ==/);
+}
+
+async function checkNewerImportWins() {
+  const ui = loadFrontend();
+  const response = deferred();
+  const reached = deferred();
+  ui.respond(() => { reached.resolve(); return response.promise; });
+  const pendingImport = ui.importDroppedReplacement(drop([new File(["old"], "old.png")]));
+  await reached.promise;
+  ui.state.replacementRequest += 1;
+  ui.state.replacementImporting = true;
+  const newest = { name: "newer.png" };
+  ui.state.replacement = newest;
+  response.resolve({ ok: true, data: { name: "late-old.png" } });
+  await pendingImport;
+  assert.equal(ui.state.replacement, newest, "A superseded import overwrote the latest candidate");
+  assert.equal(ui.state.replacementImporting, true, "A superseded import unlocked the latest request");
+}
+
 async function checkFileOnlyGlobalGuard() {
   const ui = loadFrontend();
   ui.bindReplacementDrop();
@@ -227,20 +313,29 @@ async function checkFileOnlyGlobalGuard() {
 
 async function checkReadOnlySkillVideo() {
   const ui = loadFrontend();
-  ui.state.selection = { asset_type: "dynamic", bundle: "skill.bundle", name: "VSkill_Hero124", animation_kind: "cri_usm", playable: true, editable: false };
+  ui.state.selection = { asset_type: "dynamic", bundle: "skill.bundle", name: "VSkill_Hero124", animation_kind: "cri_usm", playable: true, exportable: true, editable: false };
   assert.equal(ui.isPlayableAnimation(ui.state.selection), true);
   assert.equal(ui.canEdit(ui.state.selection), false);
   ui.updateExportButtons();
   assert.equal(ui.find("export-primary").textContent, "导出 USM");
+  assert.equal(ui.find("export-primary").disabled, false);
   assert.equal(ui.find("export-secondary").disabled, true);
   await ui.importDroppedReplacement(drop([new File(["movie bytes"], "movie.usm")]));
   assert.equal(ui.requests.length, 0);
   ui.state.selection.playable = false;
+  ui.state.selection.exportable = false;
   assert.equal(ui.isPlayableAnimation(ui.state.selection), false);
+  ui.updateExportButtons();
+  assert.equal(ui.find("export-primary").disabled, true, "Unsupported CRI still offered a save dialog");
+  assert.equal(ui.find("export-secondary").disabled, true);
+  ui.state.selection = texture("Portrait");
+  ui.updateExportButtons();
+  assert.equal(ui.find("export-primary").disabled, false, "Unsupported CRI disabled exports for the next resource");
+  assert.equal(ui.find("export-secondary").disabled, false);
 }
 
 async function main() {
-  for (const test of [checkComparison, checkComparisonRaces, checkFileBytesAndText, checkDropRejections, checkImportRaces, checkFileOnlyGlobalGuard, checkReadOnlySkillVideo]) {
+  for (const test of [checkComparison, checkComparisonRaces, checkFileBytesAndText, checkDropRejections, checkImportRaces, checkPageNavigationAfterImportSent, checkPageNavigationBeforeImportSent, checkNewerImportWins, checkFileOnlyGlobalGuard, checkReadOnlySkillVideo]) {
     await test();
     console.log(`PASS: ${test.name}`);
   }
