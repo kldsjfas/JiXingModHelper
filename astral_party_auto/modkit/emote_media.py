@@ -459,13 +459,15 @@ def _sample_preview(total: int, fps: float, limit: int) -> tuple[list[int], list
 
 
 def _decode_stream(ffmpeg: Path, source: Path, output: Path, indices: list[int],
-                   width: int, height: int, pixel_format: str) -> bytes:
+                   width: int, height: int, pixel_format: str, *,
+                   crop_size: tuple[int, int] | None = None) -> bytes:
     # FFmpeg limits expression recursion. A flat sum of 120 eq() terms fails
     # even for a tiny video; bounded groups keep the parser stack shallow.
     groups = ["(" + "+".join(f"eq(n\\,{index})" for index in indices[start:start + 16]) + ")"
               for start in range(0, len(indices), 16)]
     selection = "+".join(groups)
-    filters = f"select={selection},scale={width}:{height}:flags=bilinear"
+    crop = f"crop={crop_size[0]}:{crop_size[1]}:0:0:exact=1," if crop_size else ""
+    filters = f"select={selection},{crop}scale={width}:{height}:flags=bilinear"
     error_path = output.with_suffix(".stderr")
     command = [str(ffmpeg), "-hide_banner", "-loglevel", "error", "-nostdin", "-xerror", "-y",
                "-threads", "1", "-f", "mpegvideo", "-i", str(source), "-an", "-sn", "-dn",
@@ -493,13 +495,18 @@ def _decode_stream(ffmpeg: Path, source: Path, output: Path, indices: list[int],
 
 def read_usm_preview(raw: bytes, *, work_dir: str | Path | None = None,
                      ffmpeg_path: str | Path | None = None,
-                     max_preview_frames: int = MAX_PREVIEW_FRAMES) -> dict:
-    info = cri_emote.inspect_usm_bytes(raw)
+                     max_preview_frames: int = MAX_PREVIEW_FRAMES,
+                     allow_display_crop: bool = False) -> dict:
+    info = cri_emote.inspect_usm_bytes(raw, allow_display_crop=allow_display_crop)
     ffmpeg = find_ffmpeg(ffmpeg_path)
     indices, durations = _sample_preview(info["frames"], info["fps"], max_preview_frames)
     edge = min(MAX_PREVIEW_EDGE, int(math.sqrt(MAX_PREVIEW_PIXELS / len(indices))))
-    scale = min(1, edge / max(info["width"], info["height"]))
-    width, height = max(1, round(info["width"] * scale)), max(1, round(info["height"] * scale))
+    display_width, display_height = info["display_width"], info["display_height"]
+    scale = min(1, edge / max(display_width, display_height))
+    width, height = max(1, round(display_width * scale)), max(1, round(display_height * scale))
+    decode_options = {}
+    if (display_width, display_height) != (info["width"], info["height"]):
+        decode_options["crop_size"] = (display_width, display_height)
     with tempfile.TemporaryDirectory(prefix="emote-preview-", dir=_work_parent(work_dir)) as folder:
         scratch = Path(folder)
         streams = {b"@SFV": scratch / "color.m1v", b"@ALP": scratch / "alpha.m1v"}
@@ -511,8 +518,8 @@ def read_usm_preview(raw: bytes, *, work_dir: str | Path | None = None,
         finally:
             for handle in handles.values():
                 handle.close()
-        colors = _decode_stream(ffmpeg, streams[b"@SFV"], scratch / "color.raw", indices, width, height, "rgb24")
-        alphas = _decode_stream(ffmpeg, streams[b"@ALP"], scratch / "alpha.raw", indices, width, height, "gray")
+        colors = _decode_stream(ffmpeg, streams[b"@SFV"], scratch / "color.raw", indices, width, height, "rgb24", **decode_options)
+        alphas = _decode_stream(ffmpeg, streams[b"@ALP"], scratch / "alpha.raw", indices, width, height, "gray", **decode_options)
         frame_pixels = width * height
         frames = []
         for index in range(len(indices)):
@@ -528,7 +535,8 @@ def read_usm_preview(raw: bytes, *, work_dir: str | Path | None = None,
     return {"animation_kind": "cri_emote", "frames": frames,
             "names": [f"frame_{index + 1}" for index in indices], "durations": durations,
             "total": info["frames"], "total_duration_ms": info["frames"] * 1000 / info["fps"],
-            "fps": info["fps"], "width": info["width"], "height": info["height"],
+            "fps": info["fps"], "width": display_width, "height": display_height,
+            "encoded_width": info["width"], "encoded_height": info["height"],
             "preview_width": width, "preview_height": height, "truncated": len(indices) < info["frames"],
             "has_alpha": True, "preview_available": True, "notice": notice,
             "sha256": info["sha256"]}

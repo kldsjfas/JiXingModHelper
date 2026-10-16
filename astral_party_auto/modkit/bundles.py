@@ -14,6 +14,7 @@ import UnityPy
 from .dynamic import (
     classify_text_asset,
     extract_fairygui_dynamic_names,
+    is_cri_usm_object,
     sequence_groups_from_names,
     text_asset_bytes,
 )
@@ -35,7 +36,9 @@ _TYPE_MAP = {
 }
 
 ASSET_TYPE_KEYS = ("texture", "text", "mesh", "anim", "dynamic")
-INDEX_VERSION = 8
+# 子类型映射只用于快速判型，不新增浏览页一级分类。
+_INDEX_KEYS = (*ASSET_TYPE_KEYS, "cri_usm")
+INDEX_VERSION = 9
 
 BundleDirectories = str | Path | Iterable[str | Path]
 
@@ -140,6 +143,7 @@ def read_bundle_asset_names(bundle_path: str | Path) -> dict[str, list[str]]:
     - sprite：Sprite 对象名字
     - atlas：被 Sprite 引用的 Texture2D 图集名（动画源图，不是动画帧）
     - sequence_frames：可用于序列帧组的非图集贴图/精灵图名字
+    - cri_usm：CRI 影片对象（常见技能演出），不是 Unity AnimationClip
 
     - TextAsset 只收录可读文本到 text；FairyGUI（*_fui）等二进制不会混入 text。
     - dynamic 收集视频、Live2D/Spine/GIF/FairyGUI 等动态 2D 候选，以及序列帧组名。
@@ -153,11 +157,26 @@ def read_bundle_asset_names(bundle_path: str | Path) -> dict[str, list[str]]:
     texture_path_names: dict[int, str] = {}
     sprite_texture_paths: set[int] = set()
     dynamic_seen: set[str] = set()
+    cri_usm_names: list[str] = []
     bundle = Path(bundle_path)
     env = UnityPy.load(bundle.read_bytes(), path=str(bundle.parent))
     for obj in env.objects:
         tn = obj.type.name
         kind = _TYPE_MAP.get(tn)
+
+        if tn == "MonoBehaviour":
+            try:
+                if is_cri_usm_object(obj):
+                    name = str(obj.peek_name() or "")
+                    if name and name not in cri_usm_names:
+                        cri_usm_names.append(name)
+                        if name not in dynamic_seen:
+                            dynamic_seen.add(name)
+                            out["dynamic"].append(name)
+            except Exception:
+                # 单个损坏的脚本对象不应使同包贴图与其它资源漏掉索引。
+                pass
+            continue
 
         # 视频 / 动画控制器不落在 _TYPE_MAP，单独收进 dynamic
         if tn in ("VideoClip", "VideoPlayer", "MovieTexture", "AnimatorController"):
@@ -236,6 +255,7 @@ def read_bundle_asset_names(bundle_path: str | Path) -> dict[str, list[str]]:
     out["sprite"] = sorted(sprite_names)
     out["atlas"] = sorted(atlas_names)
     out["sequence_frames"] = sorted(sequence_frame_names)
+    out["cri_usm"] = sorted(cri_usm_names)
     return out
 
 
@@ -395,7 +415,7 @@ def bundle_source_key(aa_dirs: BundleDirectories) -> str:
 
 
 def _empty_typed_index() -> dict[str, dict[str, list[str]]]:
-    return {k: {} for k in ASSET_TYPE_KEYS}
+    return {k: {} for k in _INDEX_KEYS}
 
 
 def build_asset_index(
@@ -417,7 +437,7 @@ def build_asset_index(
         except Exception:
             names_by_type = {k: [] for k in ASSET_TYPE_KEYS}
         for kind, names in names_by_type.items():
-            if kind not in ASSET_TYPE_KEYS or not names:
+            if kind not in _INDEX_KEYS or not names:
                 continue
             typed[kind][bundle.name] = names
         if progress is not None and not progress(done, total, bundle.name):
@@ -437,7 +457,7 @@ def _save_typed_index(
     payload = {
         "version": INDEX_VERSION,
         "source": source,
-        **{k: typed.get(k, {}) for k in ASSET_TYPE_KEYS},
+        **{k: typed.get(k, {}) for k in _INDEX_KEYS},
     }
     cache.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
@@ -461,7 +481,7 @@ def load_asset_index(
         return typed
     if source_dir is not None and data.get("source") != bundle_source_key(source_dir):
         return typed
-    for kind in ASSET_TYPE_KEYS:
+    for kind in _INDEX_KEYS:
         block = data.get(kind)
         if isinstance(block, dict):
             typed[kind] = {

@@ -245,7 +245,11 @@
 
             <aside class="panel preview-panel">
               <div><span class="eyebrow">预览</span><h2 id="preview-title">还没选资源</h2><p id="preview-description">点中间列表的一项</p></div>
-              <div id="preview-media" class="preview-media"><span>等待选择</span></div>
+              <div id="preview-comparison" class="resource-comparison">
+                <div><h3 id="preview-original-heading" class="is-hidden">游戏原图</h3><div id="preview-media" class="preview-media"><span>等待选择</span></div></div>
+                <div id="preview-modified-card" class="is-hidden"><h3>作品集修改后</h3><div id="preview-modified" class="preview-media"><span>当前作品集无修改</span></div></div>
+              </div>
+              <p id="preview-comparison-notice" class="comparison-status is-hidden" role="status"></p>
               <div class="preview-actions">
                 <button id="go-studio" class="button primary wide" disabled>去制作替换</button>
                 <div class="action-row two-up">
@@ -314,7 +318,7 @@
             </article>
             <div id="studio-image-mode" class="compare-grid">
               <article class="card preview-card"><h3 id="studio-original-heading">游戏原内容</h3><div id="studio-original" class="preview-media tall"></div></article>
-              <article class="card preview-card"><h3 id="studio-replacement-heading">你的替换文件</h3><div id="studio-replacement" class="preview-media tall"><span>点击下方按钮选择文件</span></div></article>
+              <article id="studio-replacement-card" class="card preview-card"><h3 id="studio-replacement-heading">你的替换文件</h3><div id="studio-replacement" class="preview-media tall"><span>点击下方按钮选择文件</span></div><p id="studio-comparison-notice" class="comparison-status" role="status"></p></article>
             </div>
             <article id="studio-text-mode" class="card is-hidden">
               <div class="section-heading"><h3>文字对照编辑</h3><span id="text-format" class="count-badge"></span></div>
@@ -342,6 +346,10 @@
               <span id="animation-guidance"></span>
             </div>
             <p id="studio-notice" class="notice is-hidden" role="status"></p>
+            <div id="studio-import-dropzone" class="replacement-dropzone" aria-describedby="studio-drop-hint">
+              <strong>拖入一个替换文件</strong>
+              <span id="studio-drop-hint">图片、文本或同源动画文件，单个不超过 12 MiB；也可点击下方选择文件。</span>
+            </div>
             <div class="action-row studio-actions">
               <button class="button ghost" data-page-link="browse">← 回浏览</button>
               <button id="choose-replacement" class="button ghost">选择替换文件</button>

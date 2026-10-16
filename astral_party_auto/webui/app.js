@@ -3,6 +3,7 @@
   "use strict";
 
   const PAGE_SIZE = 25;
+  const REPLACEMENT_FILE_LIMIT = 12 * 1024 * 1024;
   const API_TOKEN = new URLSearchParams(window.location.hash.slice(1)).get("token") || "";
   const API_HEADERS = { "X-JiXing-Token": API_TOKEN };
   const PAGE_TITLES = {
@@ -45,6 +46,9 @@
     characterLabels: { bundles: {}, resources: {} },
     selection: null,
     selectionRequest: 0,
+    comparisonRequest: 0,
+    replacementRequest: 0,
+    replacementImporting: false,
     studioRequest: 0,
     draftDetailRequest: 0,
     editorKey: "",
@@ -177,7 +181,7 @@
     const title = $("#page-title");
     if (title) title.textContent = PAGE_TITLES[page];
     document.body.classList.remove("nav-open");
-    if (page === "browse") { refreshBrowse(); renderPreview(); }
+    if (page === "browse") { refreshBrowse(); renderPreview(); refreshSelectionComparison(); }
     if (page === "audio") window.AudioWorkbench?.enter();
     if (page === "workshop") window.ModWorkshop?.enter();
     if (page === "studio") refreshStudio();
@@ -590,9 +594,14 @@ ${row.bundle}`;
     rememberTextEdit();
     const request = ++state.selectionRequest;
     state.studioRequest += 1;
+    state.comparisonRequest += 1;
+    state.replacementRequest += 1;
+    state.replacementImporting = false;
     stopAllAnimations();
     closeLightbox();
     state.replacement = null;
+    state.selection = null;
+    renderPreview();
     window.VisualAnimation?.leave();
     resetEmoteReplacement();
     resetEmotePreview();
@@ -657,6 +666,7 @@ ${row.bundle}`;
     const media = $("#preview-media");
     const go = $("#go-studio");
     disposeAnimation("preview-media");
+    renderBrowseComparison();
     if (!sel) {
       if (title) title.textContent = "还没选资源";
       if (desc) desc.textContent = "点中间列表的一项";
@@ -694,6 +704,7 @@ ${row.bundle}`;
       }
     }
     if (go) go.disabled = (sel.asset_type || sel.kind) === "mesh";
+    if (go) go.textContent = canEdit(sel) ? "去制作替换" : "查看资源详情";
     updateExportButtons();
     updateMultiSelectUI();
   }
@@ -725,7 +736,11 @@ ${row.bundle}`;
       a.textContent = "导出 JSON";
       b.textContent = "导出二进制";
     } else if (kind === "dynamic") {
-      if (sel.frame_names && sel.frame_names.length) {
+      if (sel.animation_kind === "cri_usm") {
+        a.textContent = "导出 USM";
+        b.textContent = "仅原始 USM";
+        b.disabled = true;
+      } else if (sel.frame_names && sel.frame_names.length) {
         a.textContent = "导出 APNG";
         b.textContent = "导出首帧 PNG";
       } else {
@@ -740,6 +755,42 @@ ${row.bundle}`;
 
   function selectionKey(selection = state.selection) {
     return selection ? `${selection.asset_type || selection.kind}::${selection.bundle}::${selection.name}` : "";
+  }
+
+  function renderBrowseComparison() {
+    const selection = state.selection;
+    const visible = (selection?.asset_type || selection?.kind) === "texture";
+    const modified = selection?.comparison?.modified;
+    $("#preview-comparison")?.classList.toggle("has-comparison", visible);
+    $("#preview-original-heading")?.classList.toggle("is-hidden", !visible);
+    $("#preview-modified-card")?.classList.toggle("is-hidden", !visible);
+    const notice = $("#preview-comparison-notice");
+    if (notice) {
+      notice.classList.toggle("is-hidden", !visible);
+      notice.textContent = visible ? selection.comparison?.notice || (modified ? "当前作品集中的修改，可进入制作继续替换。" : "当前作品集尚未修改这张贴图。") : "";
+    }
+    setMedia($("#preview-modified"), visible ? modified?.preview_data : null, visible ? selection.comparison?.notice || "当前作品集无修改" : "等待选择");
+  }
+
+  async function refreshSelectionComparison() {
+    if ((state.selection?.asset_type || state.selection?.kind) !== "texture") return;
+    const key = selectionKey();
+    const selectionRequest = state.selectionRequest;
+    const request = ++state.comparisonRequest;
+    try {
+      // 只读取作品集状态，不刷新游戏资源或清除其他制作入口的候选。
+      const selection = await call("get_studio_state", { quiet: true });
+      if (request !== state.comparisonRequest || selectionRequest !== state.selectionRequest ||
+          key !== selectionKey() || key !== selectionKey(selection)) return;
+      state.selection = { ...state.selection, comparison: selection.comparison };
+      renderBrowseComparison();
+      if (state.page === "studio") renderReplacement();
+    } catch (err) {
+      if (request !== state.comparisonRequest || selectionRequest !== state.selectionRequest || key !== selectionKey()) return;
+      state.selection = { ...state.selection, comparison: { modified: null, notice: `作品集对比未加载：${err.message}` } };
+      renderBrowseComparison();
+      if (state.page === "studio") renderReplacement();
+    }
   }
 
   function resetEmoteReplacement() {
@@ -994,7 +1045,7 @@ ${row.bundle}`;
     const kind = selection.asset_type || selection.kind;
     if (kind === "anim") return selection.playable === true || selection.animation_kind === "sprite_clip";
     return kind === "dynamic" &&
-      (["sequence", "gif", "webp", "apng"].includes(selection.animation_kind) || !!selection.frame_names?.length);
+      (["sequence", "gif", "webp", "apng", "cri_usm"].includes(selection.animation_kind) || !!selection.frame_names?.length);
   }
 
   function isSequenceAnimation(selection) {
@@ -1028,7 +1079,19 @@ ${row.bundle}`;
       cropBtn.disabled = kind !== "texture" || !editable || !state.replacement?.preview_data;
     }
     const saveBtn = $("#commit-replacement");
-    if (saveBtn) saveBtn.disabled = !editable || (kind === "anim" && !state.replacement);
+    if (saveBtn) saveBtn.disabled = state.replacementImporting || !editable || (kind === "anim" && !state.replacement);
+    if (cropBtn && state.replacementImporting) cropBtn.disabled = true;
+    const chooseBtn = $("#choose-replacement");
+    if (chooseBtn) chooseBtn.disabled = state.replacementImporting;
+    const dropzone = $("#studio-import-dropzone");
+    const supportsDrop = canDropReplacement(selection);
+    dropzone?.classList.toggle("is-disabled", !supportsDrop || state.replacementImporting);
+    const hint = $("#studio-drop-hint");
+    if (hint) hint.textContent = state.replacementImporting ? "正在读取替换文件，请稍候…"
+      : !supportsDrop ? "当前资源请使用上方的动画制作入口或下方选择文件按钮。"
+      : kind === "text" ? "拖入一个文本文件，单个不超过 12 MiB；也可点击下方导入文本文件。"
+      : kind === "anim" ? "拖入同源 .animbin，或保持原布局的完整图集，单个不超过 12 MiB。"
+      : "拖入一张静态图片，单个不超过 12 MiB；动图和视频请用上方专用入口。";
   }
 
   function previewFps() {
@@ -1172,6 +1235,7 @@ ${row.bundle}`;
       state.emoteDraftVideoName = "";
     }
     state.selection = sel;
+    renderBrowseComparison();
     if (typeof sel?.emote?.draft_video_name === "string" && state.emoteDraftVideoName !== sel.emote.draft_video_name) {
       state.emoteDraftVideoName = sel.emote.draft_video_name;
       state.emoteDraftRequest += 1;
@@ -1193,6 +1257,10 @@ ${row.bundle}`;
     const animated = isPlayableAnimation(sel);
     const sequence = isSequenceAnimation(sel);
     $("#studio-image-mode").classList.toggle("is-hidden", kind === "text");
+    $("#studio-image-mode").classList.toggle("is-readonly", !editable);
+    $("#studio-replacement-card")?.classList.toggle("is-hidden", !editable);
+    $("#studio-import-dropzone")?.classList.toggle("is-hidden", !editable);
+    $("#commit-replacement")?.classList.toggle("is-hidden", !editable);
     $("#studio-text-mode").classList.toggle("is-hidden", kind !== "text");
     $("#studio-original-heading").textContent = sel.emote ? "原静态封面" : "游戏原内容";
     $("#studio-replacement-heading").textContent = sel.emote ? "你的封面图片" : "你的替换文件";
@@ -1241,10 +1309,10 @@ ${row.bundle}`;
     renderReplacement();
     if (sel.emote) await loadEmotePreview();
     if (animated) {
-      if (!state.replacement) renderAnimationState($("#studio-replacement"), "正在加载作品集动画…");
+      if (editable && !state.replacement) renderAnimationState($("#studio-replacement"), "正在加载作品集动画…");
       const [original, draft] = await Promise.allSettled([
         call("get_animation_preview", { quiet: true }, sel.bundle, sel.name, "original", previewFps()),
-        state.replacement?.animation ? Promise.resolve(state.replacement.animation) :
+        !editable ? Promise.resolve(null) : state.replacement?.animation ? Promise.resolve(state.replacement.animation) :
           call("get_animation_preview", { quiet: true }, sel.bundle, sel.name, "draft", previewFps()),
       ]);
       if (request !== state.studioRequest || key !== selectionKey() || state.page !== "studio") return;
@@ -1254,6 +1322,7 @@ ${row.bundle}`;
       } else {
         renderAnimationState($("#studio-original"), `动画预览未加载：${original.reason.message}`, refreshStudio);
       }
+      if (!editable) return;
       if (state.replacement) renderReplacement();
       else if (draft.status === "fulfilled") renderAnimation($("#studio-replacement"), draft.value, sequence);
       else {
@@ -1265,6 +1334,18 @@ ${row.bundle}`;
   function renderReplacement() {
     const replacement = state.replacement;
     const media = $("#studio-replacement");
+    const texture = (state.selection?.asset_type || state.selection?.kind) === "texture";
+    const modified = texture ? state.selection?.comparison?.modified : null;
+    const heading = $("#studio-replacement-heading");
+    const notice = $("#studio-comparison-notice");
+    if (texture && heading) heading.textContent = replacement ? "新替换图片 · 尚未保存" : modified ? "作品集修改后 · 已保存" : "你的替换图片";
+    if (notice) {
+      notice.classList.toggle("is-hidden", !texture);
+      notice.textContent = !texture ? "" : replacement ? modified
+        ? "当前正在预览新文件，保存后覆盖作品集中这张图片的旧修改。"
+        : "新文件尚未保存；保存后会加入当前作品集。"
+        : state.selection.comparison?.notice || (modified ? "这是当前作品集中保存的修改；可继续选择文件替换。" : "当前作品集尚未修改这张贴图。");
+    }
     if (replacement?.animation) {
       renderAnimation(media, replacement.animation, isSequenceAnimation(state.selection));
     } else {
@@ -1273,7 +1354,7 @@ ${row.bundle}`;
         ? "尚未导入替换。请选择同源 .animbin，或按原布局修改的整张图集。"
         : "尚未导入替换。请选择同源 .animbin 动画数据。"
         : "选择文件后可在这里对照预览";
-      setMedia(media, replacement?.preview_data, replacement?.name || empty);
+      setMedia(media, replacement?.preview_data || (!replacement ? modified?.preview_data : null), replacement?.name || (texture ? state.selection.comparison?.notice || "当前作品集无修改，选择文件后可预览" : empty));
     }
   }
 
@@ -1701,6 +1782,7 @@ ${row.bundle}`;
   }
 
   function bindEvents() {
+    bindReplacementDrop();
     window.VisualAnimation?.init({
       call, toast, renderAnimation, renderAnimationState,
       getSelection: () => state.selection,
@@ -1708,6 +1790,7 @@ ${row.bundle}`;
       onSave(data) {
         if (data?.draft) state.draft = data.draft;
         renderDraftList();
+        refreshSelectionComparison();
       },
     });
     window.ModWorkshop?.init({
@@ -1960,6 +2043,7 @@ ${row.bundle}`;
         renderInstalled();
         renderDashboard();
         toast("换图已保存到作品集");
+        await refreshSelectionComparison();
         await showDraftDetail(state.draftIndex);
       } catch (_) {}
     });
@@ -1974,6 +2058,7 @@ ${row.bundle}`;
         renderInstalled();
         renderDashboard();
         state.draftIndex = -1;
+        await refreshSelectionComparison();
         await refreshPack();
         toast("已从作品集移除");
       } catch (_) {}
@@ -2004,6 +2089,7 @@ ${row.bundle}`;
         renderInstalled();
         renderDashboard();
         state.draftIndex = -1;
+        await refreshSelectionComparison();
         await refreshPack();
         toast("作品集已清空");
       } catch (_) {}
@@ -2112,6 +2198,7 @@ ${row.bundle}`;
       const data = await call("run_migration", { busy: true, busyText: "迁移旧贴图…" });
       state.draft = data.draft || state.draft;
       renderDraftList();
+      await refreshSelectionComparison();
       $("#migration-analysis").textContent = migrationReportText(data.report, true);
       $("#run-migration").disabled = true;
       toast(`迁移完成：${data.report?.added || 0} 张已加入作品集`);
@@ -2158,33 +2245,141 @@ ${row.bundle}`;
     } catch (_) {}
   }
 
+  function canDropReplacement(selection = state.selection) {
+    return canEdit(selection) && ["texture", "text", "anim"].includes(selection?.asset_type || selection?.kind);
+  }
+
+  function isFileDrag(event) {
+    return Array.from(event.dataTransfer?.types || []).includes("Files");
+  }
+
+  function readReplacementFile(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = String(reader.result || "");
+        const separator = result.indexOf(";base64,");
+        if (separator < 0) reject(new Error("无法读取文件，请重新拖入或点击选择文件。"));
+        else resolve(result.slice(separator + 8));
+      };
+      reader.onerror = () => reject(new Error("文件读取失败，请确认文件仍在原位置且可以打开。"));
+      reader.onabort = () => reject(new Error("文件读取已取消。"));
+      reader.readAsDataURL(file);
+    });
+  }
+
+  function applyReplacement(data) {
+    state.replacement = data;
+    if (data.text_content != null) {
+      $("#studio-text").value = data.text_content;
+      configureTextFields(state.selection);
+      updateTextStatus();
+    } else if (state.page === "studio") {
+      renderReplacement();
+    }
+    syncStudioImportControls();
+    toast(`已选择：${data.name}${data.encoding ? `（${data.encoding}）` : ""}`);
+  }
+
+  async function importDroppedReplacement(event) {
+    if (!isFileDrag(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    $("#studio-import-dropzone")?.classList.remove("is-dragover");
+    if (state.page !== "studio" || !canDropReplacement()) {
+      toast("请先选择可替换的图片、文本或动画片段；动图和视频请使用对应制作入口。", true);
+      return;
+    }
+    if (state.busy || state.replacementImporting) {
+      toast("正在处理文件，请稍候再拖入。", true);
+      return;
+    }
+    const items = Array.from(event.dataTransfer.items || []).filter((item) => item.kind === "file");
+    if (items.some((item) => item.webkitGetAsEntry?.()?.isDirectory)) {
+      toast("暂不支持拖入文件夹，请拖入一个文件；序列帧可用“选择 PNG 帧文件夹”。", true);
+      return;
+    }
+    const files = Array.from(event.dataTransfer.files || []);
+    if (files.length !== 1 || items.length > 1) {
+      toast("请一次只拖入一个替换文件。", true);
+      return;
+    }
+    const file = files[0];
+    if (!file.size || file.size > REPLACEMENT_FILE_LIMIT) {
+      toast(file.size ? "拖入文件不能超过 12 MiB，请缩小文件后再试。" : "这个文件是空的，请重新选择。", true);
+      return;
+    }
+    const key = selectionKey();
+    const selectionRequest = state.selectionRequest;
+    const request = ++state.replacementRequest;
+    const expectedSelection = { bundle: state.selection.bundle, name: state.selection.name,
+      asset_type: state.selection.asset_type || state.selection.kind };
+    const current = () => request === state.replacementRequest && selectionRequest === state.selectionRequest &&
+      key === selectionKey() && state.page === "studio";
+    state.replacementImporting = true;
+    syncStudioImportControls();
+    try {
+      const content = await readReplacementFile(file);
+      if (!current()) return;
+      const data = await call("import_replacement_file", { quiet: true }, file.name, content, expectedSelection);
+      if (!current() || !data) return;
+      applyReplacement(data);
+    } catch (err) {
+      if (current()) toast(err.message || "导入失败，请重新选择文件。", true);
+    } finally {
+      if (request === state.replacementRequest) {
+        state.replacementImporting = false;
+        syncStudioImportControls();
+      }
+    }
+  }
+
+  function bindReplacementDrop() {
+    const dropzone = $("#studio-import-dropzone");
+    if (!dropzone) return;
+    // 只拦截文件拖入，文本编辑器原有的文字拖放继续交给浏览器。
+    document.addEventListener("dragover", (event) => { if (isFileDrag(event)) event.preventDefault(); });
+    document.addEventListener("drop", (event) => { if (isFileDrag(event)) event.preventDefault(); });
+    dropzone.addEventListener("dragover", (event) => {
+      if (!isFileDrag(event)) return;
+      event.preventDefault();
+      const accepted = state.page === "studio" && canDropReplacement() && !state.busy && !state.replacementImporting;
+      event.dataTransfer.dropEffect = accepted ? "copy" : "none";
+      dropzone.classList.toggle("is-dragover", accepted);
+    });
+    dropzone.addEventListener("dragleave", (event) => {
+      if (!dropzone.contains(event.relatedTarget)) dropzone.classList.remove("is-dragover");
+    });
+    dropzone.addEventListener("drop", importDroppedReplacement);
+  }
+
   async function chooseReplacement(sequenceFolder = false) {
     const key = selectionKey();
-    if (!canEdit(state.selection)) return;
+    if (!canEdit(state.selection) || state.replacementImporting) return;
+    const selectionRequest = state.selectionRequest;
+    const request = ++state.replacementRequest;
     const clip = (state.selection.asset_type || state.selection.kind) === "anim";
     if (clip) {
       state.replacement = null;
       syncStudioImportControls();
       if (state.page === "studio") renderReplacement();
     }
+    state.replacementImporting = true;
+    syncStudioImportControls();
     try {
       const data = await call("choose_replacement", { busy: true, busyText: "读取替换文件…" }, sequenceFolder);
-      if (!data || key !== selectionKey()) return;
-      state.replacement = data;
-      if (data.text_content != null) {
-        $("#studio-text").value = data.text_content;
-        configureTextFields(state.selection);
-        updateTextStatus();
-      } else if (state.page === "studio") {
-        renderReplacement();
-      }
-      syncStudioImportControls();
-      toast(`已选择：${data.name}${data.encoding ? `（${data.encoding}）` : ""}`);
+      if (!data || request !== state.replacementRequest || selectionRequest !== state.selectionRequest || key !== selectionKey()) return;
+      applyReplacement(data);
     } catch (err) {
-      if (clip && key === selectionKey()) {
+      if (clip && request === state.replacementRequest && selectionRequest === state.selectionRequest && key === selectionKey()) {
         state.replacement = null;
         syncStudioImportControls();
         if (state.page === "studio") renderAnimationState($("#studio-replacement"), `未导入替换：${err.message}`);
+      }
+    } finally {
+      if (request === state.replacementRequest) {
+        state.replacementImporting = false;
+        syncStudioImportControls();
       }
     }
   }
@@ -2388,6 +2583,7 @@ ${row.bundle}`;
           renderInstalled();
           renderDashboard();
           toast("裁剪换图已保存到作品集");
+          await refreshSelectionComparison();
           await showDraftDetail(state.draftIndex);
         },
       });
@@ -2400,6 +2596,7 @@ ${row.bundle}`;
       toast(state.selection?.reason || "此类资源暂不支持替换", true);
       return;
     }
+    if (state.replacementImporting) return;
     if (kind !== "text" && !state.replacement) {
       toast("请先选择替换文件", true);
       return;
@@ -2413,6 +2610,7 @@ ${row.bundle}`;
         state.replacement = null;
         $("#crop-replacement").disabled = true;
         if (state.page === "studio") await refreshStudio();
+        else await refreshSelectionComparison();
       }
       toast("已保存到作品集，可继续预览或手动安装测试");
       renderDraftList();

@@ -7,6 +7,7 @@
 
 「动画」相关有两层，别混：
 - 类型下拉「动画」= Unity AnimationClip（Idle/Walk/Hit 等动作片段，可导出）
+- 技能演出 VSkill 等 CRI USM 影片收在「动态图像」，不属于 AnimationClip。
 - 贴图细分类「角色动作帧」= 序列帧贴图 Fight_000xx / Walk_000xx（一张张图）
 「3D模型」= Mesh 三角面模型，不是动画。
 """

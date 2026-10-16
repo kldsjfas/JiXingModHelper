@@ -79,3 +79,5 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tests/test_visual_animation_ui.js
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tests/test_resource_import_ui.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

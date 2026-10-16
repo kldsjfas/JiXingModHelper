@@ -92,6 +92,7 @@ class DesktopApi:
         self._animation_cache: dict[tuple, dict] = {}
         self._pending_mod_path: Path | None = None
         self._replacement_path: Path | None = None
+        self._replacement_temporary = None
         self._emote_replacement: dict | None = None
         self._emote_candidate_dir = None
         self._emote_preview_cache: dict[tuple, dict] = {}
@@ -496,12 +497,28 @@ class DesktopApi:
         self._image_cache[cache_key] = data_url
         return data_url
 
-    def _selection_payload(self, selection: dict | None = None, *, full_text: bool = False) -> dict | None:
-        selection = selection or self.controller.selection
+    def _selection_payload(
+        self, selection: dict | None = None, *, full_text: bool = False, force_preview: bool = False,
+    ) -> dict | None:
+        selection = selection if selection is not None else self.controller.selection
         if not selection:
             return None
         payload = dict(selection)
         payload["preview_data"] = self._image_data(selection.get("preview"))
+        comparison = self.controller.selection_comparison(selection, force=force_preview)
+        payload["comparison"] = {"modified": None, "notice": ""}
+        if isinstance(comparison, dict):
+            payload["comparison"]["notice"] = comparison.get("notice", "")
+            modified = comparison.get("modified")
+            if isinstance(modified, dict):
+                try:
+                    preview_data = self._image_data(modified.get("preview"))
+                    if preview_data:
+                        payload["comparison"]["modified"] = {**modified, "preview_data": preview_data}
+                    else:
+                        payload["comparison"]["notice"] = "修改图预览文件已失效，请刷新资源重试；原图仍可查看。"
+                except OSError as exc:
+                    payload["comparison"]["notice"] = f"修改图预览暂时无法读取：{exc}。原图仍可查看。"
         if full_text and selection.get("asset_type") == "text" and selection.get("editable", True):
             source = selection.get("original_path") or selection.get("bundle_path")
             payload["original_text"] = self.controller.read_text(source, selection["name"])
@@ -595,7 +612,7 @@ class DesktopApi:
         self._clear_workshop_pending()
         self._clear_emote_candidate()
         self._clear_visual_candidate()
-        self._replacement_path = None
+        self._clear_replacement()
         self.controller.refresh_detection()
         if self.controller.has_game:
             self._append_log(f"已刷新游戏检测：{self.controller.game_exe_display()}")
@@ -861,6 +878,9 @@ class DesktopApi:
             if kind == "sprite_clip":
                 from .modkit.clip_preview import read_clip_preview
                 result = read_clip_preview(path, name)
+            elif kind == "cri_usm":
+                from .modkit.cri_video import read_cri_video_preview
+                result = read_cri_video_preview(path, name, work_dir=DATA_DIR / "skill-video-preview")
             else:
                 result = read_animation_preview(path, name, kind=kind, fps=fps)
             if len(self._animation_cache) >= 4:
@@ -941,7 +961,7 @@ class DesktopApi:
 
     @exposed
     def select_asset(self, asset_type: str, bundle: str, name: str, force: bool = False) -> dict:
-        self._replacement_path = None
+        self._clear_replacement()
         self._clear_emote_candidate()
         self._clear_visual_candidate()
         selection = self.controller.set_selection(
@@ -950,10 +970,11 @@ class DesktopApi:
             asset_type=asset_type,
             force=bool(force),
         )
-        return self._selection_payload(selection) or {}
+        return self._selection_payload(selection, force_preview=bool(force)) or {}
 
     @exposed
     def refresh_selection(self) -> dict | None:
+        self._clear_replacement()
         self._clear_emote_candidate()
         self._clear_visual_candidate()
         if not self.controller.selection:
@@ -965,7 +986,7 @@ class DesktopApi:
             asset_type=sel.get("asset_type") or sel.get("kind") or "texture",
             force=True,
         )
-        return self._selection_payload(selection) or {}
+        return self._selection_payload(selection, force_preview=True) or {}
 
     @exposed
     def get_studio_state(self) -> dict | None:
@@ -1188,7 +1209,10 @@ class DesktopApi:
         asset_type = selection.get("asset_type") or "texture"
         default_name = self.controller.default_export_filename()
         fmt = None
-        if asset_type == "texture":
+        if selection.get("animation_kind") == "cri_usm":
+            if variant != "primary":
+                raise RuntimeError("此资源仅提供原始 USM 导出。")
+        elif asset_type == "texture":
             fmt = "jpg" if variant == "secondary" else "png"
             default_name = str(Path(default_name).with_suffix(f".{fmt}"))
         elif asset_type == "anim" and variant == "secondary":
@@ -1217,7 +1241,7 @@ class DesktopApi:
             raise RuntimeError("请先选择资源。")
         asset_type = selection.get("asset_type") or "texture"
         if asset_type == "anim":
-            self._replacement_path = None
+            self._clear_replacement()
         if not selection.get("editable", True):
             raise RuntimeError(selection.get("reason") or "此资源暂不支持替换。")
         if asset_type in ("texture", "anim"):
@@ -1236,6 +1260,23 @@ class DesktopApi:
         path = self._pick_path("folder" if sequence_folder else "open", file_types=file_types)
         if path is None:
             return None
+        result = self._replacement_payload(selection, path)
+        self._clear_replacement()
+        self._replacement_path = path
+        return result
+
+    def _clear_replacement(self) -> None:
+        self._replacement_path = None
+        temporary = getattr(self, "_replacement_temporary", None)
+        self._replacement_temporary = None
+        if temporary is not None:
+            try:
+                temporary.cleanup()
+            except OSError as error:
+                self._append_log(f"替换文件暂存未能清理，已保留：{temporary.name}（{error}）")
+
+    def _replacement_payload(self, selection: dict, path: Path) -> dict:
+        asset_type = selection.get("asset_type") or "texture"
         if asset_type == "text":
             from .modkit.maker import decode_text_asset_raw
             if path.stat().st_size > 8 * 1024 * 1024:
@@ -1253,13 +1294,41 @@ class DesktopApi:
             animation = self._clip_candidate_preview(selection, path)
         elif asset_type == "texture":
             from .modkit.maker import read_static_image
-            with read_static_image(path):
-                pass
+            try:
+                with read_static_image(path):
+                    pass
+            except OSError as error:
+                raise ValueError("图片无法读取，文件可能损坏。请重新导出 PNG/JPG 后重试。") from error
         preview_data = ""
         if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
             preview_data = self._image_data(path)
-        self._replacement_path = path
         return {"path": str(path), "name": path.name, "size": path.stat().st_size, "preview_data": preview_data, "animation": animation}
+
+    @exposed
+    def import_replacement_file(self, filename: str, content_base64: str, expected_selection: dict) -> dict:
+        selection = self.controller.selection
+        if not selection:
+            raise RuntimeError("请先选择资源，再拖入替换文件。")
+        current = {"bundle": selection.get("bundle", ""), "name": selection.get("name", ""),
+                   "asset_type": selection.get("asset_type") or "texture"}
+        if not isinstance(expected_selection, dict) or expected_selection != current:
+            raise RuntimeError("当前资源已切换，请在新资源上重新拖入文件。")
+        if not selection.get("editable", True):
+            raise RuntimeError(selection.get("reason") or "此资源暂不支持替换。")
+        from .modkit.file_import import stage_dropped_file
+
+        temporary, path = stage_dropped_file(filename, content_base64, current["asset_type"],
+                                             DATA_DIR / "dropped-replacements")
+        try:
+            result = self._replacement_payload(selection, path)
+        except Exception:
+            temporary.cleanup()
+            raise
+        self._clear_replacement()
+        self._replacement_temporary = temporary
+        self._replacement_path = path
+        result["name"] = filename
+        return result
 
     @exposed
     def crop_replacement(self, crop_box: list) -> dict:
@@ -1283,6 +1352,7 @@ class DesktopApi:
         cropped.save(out)
         selection = self.controller.selection or {}
         animation = self._clip_candidate_preview(selection, out) if selection.get("asset_type") == "anim" and selection.get("playable") else None
+        self._clear_replacement()
         self._replacement_path = out
         return {"path": str(out), "name": out.name, "size": out.stat().st_size, "preview_data": self._image_data(out), "animation": animation}
 
@@ -1336,11 +1406,11 @@ class DesktopApi:
                             bundle_name=selection["bundle"],
                         )
                 except Exception:
-                    self._replacement_path = None
+                    self._clear_replacement()
                     raise
             else:
                 raise RuntimeError("3D 模型目前只支持导出。")
-        self._replacement_path = None
+        self._clear_replacement()
         return {"item": item, "draft": self._draft_state()}
 
     @exposed
@@ -1697,7 +1767,20 @@ def _build_server(api: "DesktopApi", api_token: str):
         if method is None or not getattr(method, "_exposed", False):
             return _json_error(404, f"未知接口 {name}")
         try:
-            args = bottle.request.json
+            if name == "import_replacement_file":
+                from .modkit.file_import import MAX_IMPORT_REQUEST_BYTES
+
+                length = bottle.request.content_length
+                if length < 0 or bottle.request.get_header("Transfer-Encoding"):
+                    return _json_error(411, "拖入文件请求需要明确的文件大小。")
+                if length > MAX_IMPORT_REQUEST_BYTES:
+                    return _json_error(413, "拖入文件过大，请使用选择文件按钮。")
+                payload = bottle.request.body.read(MAX_IMPORT_REQUEST_BYTES + 1)
+                if len(payload) > MAX_IMPORT_REQUEST_BYTES:
+                    return _json_error(413, "拖入文件过大，请使用选择文件按钮。")
+                args = json.loads(payload)
+            else:
+                args = bottle.request.json
         except Exception:
             return _json_error(400, "JSON 请求体无效。")
         if not isinstance(args, list):

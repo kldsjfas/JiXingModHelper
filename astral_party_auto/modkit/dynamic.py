@@ -83,7 +83,29 @@ DYNAMIC_KIND_LABELS = {
     "dragonbones": "DragonBones",
     "fairygui": "FairyGUI 资源包",
     "sequence": "序列帧动画",
+    "cri_usm": "CRI 技能 / 过场视频",
 }
+
+
+def is_cri_usm_object(obj) -> bool:
+    """用序列化字段类型识别 CRI 影片，避免把普通脚本或同名动作误收进来。
+
+    只读类型树即可识别，无需在建索引时解开数 MB 的内嵌视频字节。
+    真正预览和导出仍要验证实现类型、USM 容器以及双流布局。
+    """
+    if obj.type.name != "MonoBehaviour":
+        return False
+    node = getattr(getattr(obj, "serialized_type", None), "node", None)
+    if node is None:
+        return False
+    fields = {item.m_Name: item.m_Type for item in node.traverse() if item.m_Level == 1}
+    return all(fields.get(name) == field_type for name, field_type in (
+        ("m_Script", "PPtr<MonoScript>"),
+        ("implementation", "managedReference"),
+        ("movieInfo", "ManaMovieInfo"),
+        ("assetInfo", "MovieAssetInfo"),
+        ("references", "ManagedReferencesRegistry"),
+    ))
 
 
 @dataclass(frozen=True)

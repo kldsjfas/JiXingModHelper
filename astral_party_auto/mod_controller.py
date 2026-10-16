@@ -45,7 +45,7 @@ from .modkit import (
     sorted_sequence_names,
     text_asset_bytes,
 )
-from .modkit.bundles import TextureInfo, iter_bundle_entries, read_bundle_asset_names
+from .modkit.bundles import INDEX_VERSION, TextureInfo, iter_bundle_entries, read_bundle_asset_names
 from .modkit.clip_edit import replace_clip_checked as replace_bundle_animation_raw
 from .modkit.categories import (
     ASSET_TYPES,
@@ -381,6 +381,7 @@ class ModController:
             total = 0
             sequence_count = 0
             fairygui_count = 0
+            video_count = 0
             for bundle, names in block.items():
                 for name in names:
                     if not self._is_dynamic_valid(bundle, name):
@@ -391,10 +392,13 @@ class ModController:
                         sequence_count += 1
                     elif kind == "fairygui":
                         fairygui_count += 1
+                    elif kind == "cri_usm":
+                        video_count += 1
             return [
                 ("all", "全部", total),
                 ("sequence", "序列帧动画组", sequence_count),
                 ("fairygui", "FairyGUI", fairygui_count),
+                ("cri_usm", "视频 / 技能演出", video_count),
             ]
 
         if asset_type != "texture":
@@ -490,6 +494,8 @@ class ModController:
                     if cat_id == "sequence" and kind != "sequence":
                         continue
                     if cat_id == "fairygui" and kind != "fairygui":
+                        continue
+                    if cat_id == "cri_usm" and kind != "cri_usm":
                         continue
                     if q and q not in name.lower() and q not in bundle.lower():
                         continue
@@ -756,6 +762,23 @@ class ModController:
         if asset_type == "dynamic":
             # 用与索引一致的贴图名集合，但排除被 Sprite 引用的 Texture2D 图集。
             names_by_type = read_bundle_asset_names(path)
+            if asset_name in names_by_type.get("cri_usm", []):
+                from .modkit.cri_video import inspect_cri_video_bundle
+
+                try:
+                    video = inspect_cri_video_bundle(path, asset_name)
+                except ValueError as error:
+                    video = {"playable": False, "exportable": False, "width": 0, "height": 0,
+                             "reason": f"暂不支持此 CRI 视频：{error}"}
+                self.selection = {
+                    **video, "kind": "dynamic", "asset_type": "dynamic", "animation_kind": "cri_usm",
+                    "editable": False, "bundle": bundle_name, "bundle_path": str(game_path or path),
+                    "original_path": str(path), "name": asset_name, "preview": "",
+                    "text_preview": video.get("reason", ""), "category": "cri_usm",
+                    "category_label": "视频 / 技能演出", "category_desc": video.get("reason", ""),
+                    "caption": f"技能 / 过场视频 · {asset_name}",
+                }
+                return self.selection
             if asset_name in names_by_type.get("anim", []):
                 return self.set_selection(bundle_name, asset_name, asset_type="anim", force=force)
             texture_names = names_by_type.get("sequence_frames", [])
@@ -950,6 +973,12 @@ class ModController:
         path = self.original_bundle_path(self.selection["bundle"])
         if not path:
             raise RuntimeError("找不到资源包。")
+        if self.selection.get("animation_kind") == "cri_usm":
+            from .modkit.cri_video import export_cri_video_bundle
+
+            out = export_cri_video_bundle(path, self.selection["name"], dest)
+            self.log(f"已导出原始视频：{out}")
+            return out
         out = export_by_type(
             asset_type,
             path,
@@ -964,6 +993,8 @@ class ModController:
         if not self.selection:
             return "export.bin"
         kind = self.selection.get("asset_type") or "texture"
+        if self.selection.get("animation_kind") == "cri_usm":
+            return str(Path(default_export_name(kind, self.selection.get("name") or "video")).with_suffix(".usm"))
         return default_export_name(kind, self.selection.get("name") or "asset")
 
     def draft_preview_paths(self, index: int) -> tuple[Path | None, Path | None]:
@@ -992,6 +1023,73 @@ class ModController:
             except Exception:
                 pass
         return orig, modded
+
+    def selection_comparison(self, selection: dict | None = None, *, force: bool = False) -> dict:
+        """按资源身份查找作品集修改图，不能把同包内的其它修改当成当前贴图。"""
+        selected = selection if selection is not None else self.selection
+        result = {"modified": None, "notice": ""}
+        if not selected or selected.get("asset_type", selected.get("kind")) != "texture":
+            return result
+
+        bundle_name = selected.get("bundle")
+        texture_name = selected.get("name")
+        if not isinstance(bundle_name, str) or not isinstance(texture_name, str) or not texture_name:
+            result["notice"] = "当前贴图的资源信息不完整，请重新选择。"
+            return result
+        if Path(bundle_name).name != bundle_name or not bundle_name.lower().endswith(".bundle"):
+            result["notice"] = "当前贴图的资源包名称无效，请重新选择。"
+            return result
+
+        matches = []
+        has_dynamic_effect = False
+        for index, item in enumerate(self.draft_items):
+            if not isinstance(item, dict):
+                continue
+            kind = item.get("kind")
+            if item.get("source_bundle") == bundle_name and item.get("name") == texture_name:
+                has_dynamic_effect |= kind in ("emote", "visual_animation")
+            if item.get("bundle") != bundle_name:
+                continue
+            is_texture = kind == "texture" and item.get("name") == texture_name
+            frames = item.get("frame_names")
+            is_sequence_frame = (
+                kind == "dynamic" and item.get("animation_kind") == "sequence"
+                and isinstance(frames, list) and texture_name in frames
+            )
+            if is_texture or is_sequence_frame:
+                matches.append((index, item))
+
+        if not matches:
+            result["notice"] = (
+                "作品集中已配置这张图片的动态效果；静态原图未改动，可在制作页查看动态预览。"
+                if has_dynamic_effect else "当前作品集尚未修改这张贴图。"
+            )
+            return result
+        if len(matches) != 1:
+            result["notice"] = "作品集中有多项修改共用这张贴图，请先检查作品集记录。"
+            return result
+
+        draft_index, item = matches[0]
+        try:
+            draft_bundle = self._draft_dir() / bundle_name
+            if not draft_bundle.is_file():
+                result["notice"] = "作品集记录仍在，但草稿资源包缺失；请重新导入修改图。"
+                return result
+            preview, info = self.preview_bundle(draft_bundle, texture_name, tag="draft", force=force)
+            if not preview or not info or info.name != texture_name:
+                result["notice"] = "作品集记录仍在，但草稿中找不到这张贴图；原图仍可查看。"
+                return result
+            result["modified"] = {
+                "preview": str(preview),
+                "width": info.width,
+                "height": info.height,
+                "source": "draft",
+                "label": "作品集修改图" if item.get("kind") == "texture" else "作品集序列帧",
+                "draft_index": draft_index,
+            }
+        except Exception as exc:
+            result["notice"] = f"修改图预览失败：{exc}。原图仍可查看，请检查作品集。"
+        return result
 
     def preview_mod_bundle(
         self, bundle_path: str | Path, texture_name: str | None = None
@@ -1824,7 +1922,7 @@ class ModController:
             data = json.loads(DYNAMIC_VALID_PATH.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return
-        if not isinstance(data, dict) or data.get("source") != source_key:
+        if not isinstance(data, dict) or data.get("source") != source_key or data.get("index_version") != INDEX_VERSION:
             return
         valid = data.get("valid")
         if not isinstance(valid, dict):
@@ -1839,6 +1937,7 @@ class ModController:
         source_key = bundle_source_key(self.aa_dirs) if self.aa_dirs else ""
         payload = {
             "source": source_key,
+            "index_version": INDEX_VERSION,
             "valid": {
                 bundle: sorted(names)
                 for bundle, names in self._valid_dynamic.items()
@@ -1861,6 +1960,8 @@ class ModController:
 
     def _dynamic_kind(self, bundle: str, name: str) -> str:
         """用索引快速判断动态资源子类型：fairygui / sequence / other。"""
+        if name in (self.typed_index.get("cri_usm") or {}).get(bundle, ()):
+            return "cri_usm"
         low = name.lower()
         if "/" in name or low.endswith("_fui") or low.endswith("fui"):
             return "fairygui"

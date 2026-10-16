@@ -169,8 +169,12 @@ def _positive(row: dict, field: str, maximum: int) -> int:
     return value
 
 
-def inspect_usm_bytes(raw: bytes) -> dict:
-    """验证容器和已确认的 MPEG 双流布局；没有视频解码器参与。"""
+def inspect_usm_bytes(raw: bytes, *, allow_display_crop: bool = False) -> dict:
+    """验证 MPEG 双流；只读预览可另外接受宏块边缘的显示裁切。
+
+    导入和替换必须保持默认严格模式。显示裁切不会改变原始视频字节，
+    只允许两个流一致、从左上角移除不足一个宏块的右侧/底部填充。
+    """
     headers, streams, metadata, stages, directory = {}, {}, {}, {}, None
     for chunk in _chunks(raw):
         key = (chunk.tag, chunk.channel)
@@ -244,7 +248,13 @@ def inspect_usm_bytes(raw: bytes) -> dict:
             raise ValueError("此 USM 编码暂未验证；目前仅接收原生 MPEG 颜色与透明度双流。")
         if header.get("alpha_type") != (0 if key[0] == b"@SFV" else 1):
             raise ValueError("USM 透明度布局暂未验证。")
-        if any(header.get(field) != expected for field, expected in (
+        display_width = _positive(header, "disp_width", width)
+        display_height = _positive(header, "disp_height", height)
+        if allow_display_crop:
+            if (header.get("mat_width") != display_width or header.get("mat_height") != display_height
+                    or width - display_width >= 16 or height - display_height >= 16):
+                raise ValueError("只读预览仅支持一致的显示尺寸及不足 16 像素的边缘填充。")
+        elif any(header.get(field) != expected for field, expected in (
                 ("mat_width", width), ("mat_height", height), ("disp_width", width), ("disp_height", height))):
             raise ValueError("USM 视频裁切或材质尺寸布局暂未验证。")
         first = bytes(streams[key][0].payload)
@@ -289,12 +299,14 @@ def inspect_usm_bytes(raw: bytes) -> dict:
                          "mat_width": header.get("mat_width"), "mat_height": header.get("mat_height"),
                          "disp_width": header.get("disp_width"), "disp_height": header.get("disp_height")})
     color, alpha = profiles
-    if any(color[field] != alpha[field] for field in ("width", "height", "frames", "fps_n", "fps_d", "codec")):
+    if any(color[field] != alpha[field] for field in (
+            "width", "height", "frames", "fps_n", "fps_d", "codec", "mat_width", "mat_height", "disp_width", "disp_height")):
         raise ValueError("USM 颜色流与透明度流尺寸、帧数或时序不一致。")
     if [(part.time, part.rate) for part in streams[(b"@SFV", 0)]] != [
             (part.time, part.rate) for part in streams[(b"@ALP", 0)]]:
         raise ValueError("USM 颜色流与透明度流的块时间不一致。")
     return {"format": "usm", "codec": color["codec"], "width": color["width"], "height": color["height"],
+            "display_width": color["disp_width"], "display_height": color["disp_height"],
             "frames": color["frames"], "fps": color["fps"], "duration_ms": round(color["frames"] / color["fps"] * 1000),
             "video_channels": 1, "alpha_channels": 1, "has_alpha": True, "streams": profiles,
             "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest(), "preview_available": False,
