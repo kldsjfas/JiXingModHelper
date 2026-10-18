@@ -4,12 +4,15 @@ from __future__ import annotations
 import gc
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
 import tempfile
 import threading
 import zipfile
+from contextlib import contextmanager
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -1105,6 +1108,40 @@ class ModController:
         except Exception:
             return []
 
+    @contextmanager
+    def _texture_draft_change(self, bundle: Path):
+        old_items = deepcopy(self.draft_items)
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        recovery = Path(tempfile.mkdtemp(prefix="texture-change-", dir=DATA_DIR))
+        previous = recovery / "previous.bundle"
+        existed = bundle.exists()
+        keep_recovery = False
+        try:
+            if existed:
+                shutil.copy2(bundle, previous)
+            (recovery / "recovery.json").write_text(json.dumps({
+                "target": str(bundle), "previously_existed": existed,
+            }, ensure_ascii=False), encoding="utf-8")
+            try:
+                yield
+            except Exception as error:
+                self.draft_items = old_items
+                try:
+                    if existed:
+                        os.replace(previous, bundle)
+                    else:
+                        bundle.unlink(missing_ok=True)
+                except OSError:
+                    keep_recovery = True
+                    raise RuntimeError(f"作品集保存失败，资源未能回退。恢复副本保留在：{recovery}") from error
+                raise
+        finally:
+            if not keep_recovery:
+                try:
+                    shutil.rmtree(recovery)
+                except OSError:
+                    self.log(f"临时目录未能清理，已保留：{recovery}")
+
     def update_draft_texture(
         self,
         index: int,
@@ -1126,25 +1163,26 @@ class ModController:
         backup = DATA_DIR / "backups" / bundle_name
         base = backup if backup.exists() else game_b
         src = out_bundle if out_bundle.exists() else base
-        if item.get("from_anim"):
-            from .modkit.clip_atlas import inspect_clip_atlas, replace_clip_atlas_checked
+        with self._texture_draft_change(out_bundle):
+            if item.get("from_anim"):
+                from .modkit.clip_atlas import inspect_clip_atlas, replace_clip_atlas_checked
 
-            if crop_box is not None:
-                raise RuntimeError("动画完整图集不能裁剪，请保留原图集尺寸和布局。")
-            atlas = inspect_clip_atlas(src, item["from_anim"])
-            if not atlas["atlas_editable"]:
-                raise RuntimeError(atlas["atlas_reason"])
-            if atlas["atlas_name"] != item.get("name"):
-                raise RuntimeError("作品集记录的图集与动画引用不一致，请移除此项后重新选择资源。")
-            replaced = replace_clip_atlas_checked(src, item["from_anim"], image_path, out_bundle)
-        else:
-            replaced = replace_bundle_texture(
-                src, image_path, out_bundle, target_name=item.get("name"), crop_box=crop_box
-            )
-        item["name"] = replaced
-        item["note"] = Path(image_path).name
-        item["at"] = datetime.now().isoformat(timespec="seconds")
-        self._save_draft()
+                if crop_box is not None:
+                    raise RuntimeError("动画完整图集不能裁剪，请保留原图集尺寸和布局。")
+                atlas = inspect_clip_atlas(src, item["from_anim"])
+                if not atlas["atlas_editable"]:
+                    raise RuntimeError(atlas["atlas_reason"])
+                if atlas["atlas_name"] != item.get("name"):
+                    raise RuntimeError("作品集记录的图集与动画引用不一致，请移除此项后重新选择资源。")
+                replaced = replace_clip_atlas_checked(src, item["from_anim"], image_path, out_bundle)
+            else:
+                replaced = replace_bundle_texture(
+                    src, image_path, out_bundle, target_name=item.get("name"), crop_box=crop_box
+                )
+            item["name"] = replaced
+            item["note"] = Path(image_path).name
+            item["at"] = datetime.now().isoformat(timespec="seconds")
+            self._save_draft()
         self.log(f"已更新作品集项：{replaced} ← {Path(image_path).name}")
         return item
 
@@ -1314,21 +1352,22 @@ class ModController:
         # 文字、贴图和动画在同一份草稿上累积，重复编辑也保留其它对象。
         src = out_bundle if out_bundle.exists() else base
         self._check_sequence_overlap(bundle_name, [texture_name] if texture_name else [], "texture", texture_name)
-        replaced = replace_bundle_texture(
-            src, image_path, out_bundle, target_name=texture_name, crop_box=crop_box, match_original_size=True
-        )
-        item = {
-            "kind": "texture",
-            "bundle": bundle_name,
-            "name": replaced,
-            "note": note or Path(image_path).name,
-            "at": datetime.now().isoformat(timespec="seconds"),
-        }
-        self.draft_items = [x for x in self.draft_items if not (
-            x.get("bundle") == item["bundle"] and x.get("name") == item["name"] and x.get("kind") == "texture"
-        )]
-        self.draft_items.append(item)
-        self._save_draft()
+        with self._texture_draft_change(out_bundle):
+            replaced = replace_bundle_texture(
+                src, image_path, out_bundle, target_name=texture_name, crop_box=crop_box, match_original_size=True
+            )
+            item = {
+                "kind": "texture",
+                "bundle": bundle_name,
+                "name": replaced,
+                "note": note or Path(image_path).name,
+                "at": datetime.now().isoformat(timespec="seconds"),
+            }
+            self.draft_items = [x for x in self.draft_items if not (
+                x.get("bundle") == item["bundle"] and x.get("name") == item["name"] and x.get("kind") == "texture"
+            )]
+            self.draft_items.append(item)
+            self._save_draft()
         self.log(f"已加入作品集：{replaced} ← {Path(image_path).name}（共 {len(self.draft_items)} 项）")
         return item
 
@@ -2052,10 +2091,20 @@ class ModController:
         return d
 
     def _save_draft(self) -> None:
-        DRAFT_META.write_text(
-            json.dumps({"name": self.draft_name, "items": self.draft_items}, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        content = json.dumps({"name": self.draft_name, "items": self.draft_items}, ensure_ascii=False, indent=2)
+        DRAFT_META.parent.mkdir(parents=True, exist_ok=True)
+        handle, temporary_name = tempfile.mkstemp(prefix=".draft-pack-", suffix=".tmp", dir=DRAFT_META.parent)
+        os.close(handle)
+        temporary = Path(temporary_name)
+        try:
+            # 磁盘满或进程中断时，不能先截断上一份完整的作品集清单。
+            with temporary.open("w", encoding="utf-8") as stream:
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, DRAFT_META)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def _load_draft(self) -> None:
         if not DRAFT_META.exists():
