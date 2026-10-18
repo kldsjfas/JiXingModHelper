@@ -103,10 +103,11 @@
   const $ = (sel, root = document) => root.querySelector(sel);
   const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
-  // 裁剪弹窗状态：cropState 保存图片几何信息 + 当前框；cropPending 保存确认后的回调
+  // 裁剪框保持目标比例；只平移、缩放图片，最后换算回原图像素坐标。
   let cropState = null;
   let cropPending = null;
   let cropDrag = null;
+  let cropRequest = 0;
 
   function toast(message, isError = false) {
     const region = $("#toast-region");
@@ -164,6 +165,7 @@
 
   function showPage(page) {
     if (!PAGE_TITLES[page]) return;
+    closeCropModal();
     if (state.page === "audio") window.AudioWorkbench?.leave();
     if (state.page === "workshop") window.ModWorkshop?.leave();
     if (state.page === "studio") window.VisualAnimation?.leave();
@@ -591,6 +593,7 @@ ${row.bundle}`;
   }
 
   async function selectResource(bundle, name) {
+    closeCropModal();
     rememberTextEdit();
     const request = ++state.selectionRequest;
     state.studioRequest += 1;
@@ -1679,6 +1682,7 @@ ${row.bundle}`;
   }
 
   async function showDraftDetail(index) {
+    closeCropModal();
     const request = ++state.draftDetailRequest;
     const name = state.draft.items?.[index]?.name || "资源";
     $("#draft-detail-title").textContent = `正在加载 · ${name}`;
@@ -2003,27 +2007,25 @@ ${row.bundle}`;
     });
     window.addEventListener("beforeunload", stopAllAnimations);
 
-    $("#crop-smart")?.addEventListener("click", smartCropBox);
     $("#crop-reset")?.addEventListener("click", resetCropFull);
     $("#crop-cancel")?.addEventListener("click", closeCropModal);
     $("#crop-confirm")?.addEventListener("click", async () => {
       if (!cropState || !cropPending) return;
-      const box = cropState.box.map((v) => Math.round(v));
+      if (!isCropCurrent()) return;
+      const box = cropBoxInPixels(cropState);
       const onConfirm = cropPending.onConfirm;
+      cropPending.onCancel = null;
       closeCropModal();
       try {
         await onConfirm(box);
       } catch (_) {}
     });
-    $("#crop-box")?.addEventListener("pointerdown", (e) => {
-      if (!cropState || e.target.closest(".crop-handle")) return;
-      startCropDrag("move", e);
-    });
-    $$(".crop-handle").forEach((handle) => {
-      handle.addEventListener("pointerdown", (e) => {
-        e.stopPropagation();
-        startCropDrag(handle.dataset.handle, e);
-      });
+    $("#crop-stage")?.addEventListener("pointerdown", startCropDrag);
+    $("#crop-stage")?.addEventListener("wheel", onCropWheel, { passive: false });
+    $("#crop-zoom")?.addEventListener("input", (e) => setCropZoom(Number(e.target.value) / 100));
+    window.addEventListener("resize", resizeCropStage);
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && cropPending) closeCropModal();
     });
 
     $("#draft-name")?.addEventListener("change", async (e) => {
@@ -2387,149 +2389,195 @@ ${row.bundle}`;
   }
 
   // ---------- 裁剪弹窗 ----------
-  function openCropModal({ url, targetW, targetH, onConfirm }) {
+  function openCropModal({ url, targetW, targetH, onConfirm, isCurrent = () => true, onCancel = null }) {
     const modal = $("#crop-modal");
     const img = $("#crop-image");
     if (!modal || !img) return;
-    cropPending = { onConfirm };
-    cropState = null;
+    closeCropModal();
+    const pending = { onConfirm, isCurrent, onCancel, loader: new Image() };
+    cropPending = pending;
     modal.classList.remove("is-hidden");
-    const applyGeometry = () => {
-      const stage = $("#crop-stage");
-      const stageRect = stage.getBoundingClientRect();
-      const imgRect = img.getBoundingClientRect();
+    $("#crop-confirm").disabled = true;
+    $("#crop-reset").disabled = true;
+    $("#crop-zoom").disabled = true;
+    $("#crop-info").textContent = "正在读取图片…";
+    pending.loader.onload = () => {
+      if (cropPending !== pending || !isCropCurrent()) return;
+      const natW = pending.loader.naturalWidth;
+      const natH = pending.loader.naturalHeight;
+      if (!(natW > 0 && natH > 0)) return pending.loader.onerror();
       cropState = {
-        natW: img.naturalWidth,
-        natH: img.naturalHeight,
-        scale: imgRect.width / (img.naturalWidth || 1),
-        offsetX: imgRect.left - stageRect.left,
-        offsetY: imgRect.top - stageRect.top,
-        box: [0, 0, img.naturalWidth, img.naturalHeight],
-        targetW: targetW || 0,
-        targetH: targetH || 0,
+        natW, natH,
+        targetW: Number(targetW) > 0 ? Number(targetW) : 0,
+        targetH: Number(targetH) > 0 ? Number(targetH) : 0,
+        zoom: 1,
       };
-      smartCropBox();
-    };
-    img.onload = applyGeometry;
-    if (img.src === url && img.complete && img.naturalWidth) {
-      // 同一张图重新打开：src 不变不会再触发 onload，等布局刷新后手动跑一次
-      requestAnimationFrame(applyGeometry);
-    } else {
       img.src = url;
-    }
+      resizeCropStage();
+      $("#crop-confirm").disabled = false;
+      $("#crop-reset").disabled = false;
+      $("#crop-stage").focus({ preventScroll: true });
+    };
+    pending.loader.onerror = () => {
+      if (cropPending !== pending) return;
+      closeCropModal();
+      toast("图片读取失败，请重新选择图片后再裁剪", true);
+    };
+    pending.loader.src = url;
   }
 
   function closeCropModal() {
-    $("#crop-modal")?.classList.add("is-hidden");
-    cropState = null;
+    cropRequest += 1;
+    const pending = cropPending;
+    if (!pending && !cropState && !cropDrag) return;
     cropPending = null;
-    cropDrag = null;
+    if (pending?.loader) {
+      pending.loader.onload = null;
+      pending.loader.onerror = null;
+    }
+    $("#crop-modal")?.classList.add("is-hidden");
+    $("#crop-image")?.removeAttribute("src");
+    $("#crop-box")?.classList.add("is-hidden");
+    cropState = null;
+    onCropPointerUp();
+    if (pending?.onCancel) Promise.resolve(pending.onCancel()).catch(() => {});
+  }
+
+  function isCropCurrent() {
+    if (!cropPending) return false;
+    if (cropPending.isCurrent()) return true;
+    closeCropModal();
+    return false;
+  }
+
+  function cropFrameGeometry(stageW, stageH, ratio) {
+    const availableW = Math.max(1, stageW - 56);
+    const availableH = Math.max(1, stageH - 56);
+    const width = Math.min(availableW, availableH * ratio);
+    const height = width / ratio;
+    return { left: (stageW - width) / 2, top: (stageH - height) / 2, width, height };
+  }
+
+  function clampCropImage(geometry) {
+    const { frame, scale, natW, natH } = geometry;
+    geometry.imageX = Math.min(frame.left, Math.max(frame.left + frame.width - natW * scale, geometry.imageX));
+    geometry.imageY = Math.min(frame.top, Math.max(frame.top + frame.height - natH * scale, geometry.imageY));
+  }
+
+  function cropBoxInPixels(geometry) {
+    const { frame, scale, imageX, imageY, natW, natH } = geometry;
+    const width = Math.max(1, Math.min(natW, Math.round(frame.width / scale)));
+    const height = Math.max(1, Math.min(natH, Math.round(frame.height / scale)));
+    const left = Math.max(0, Math.min(natW - width, Math.round((frame.left - imageX) / scale)));
+    const top = Math.max(0, Math.min(natH - height, Math.round((frame.top - imageY) / scale)));
+    return [left, top, left + width, top + height];
+  }
+
+  function resizeCropStage() {
+    if (!cropState || !isCropCurrent()) return;
+    onCropPointerUp();
+    const geometry = cropState;
+    const oldFrame = geometry.frame;
+    const centerX = oldFrame ? (oldFrame.left + oldFrame.width / 2 - geometry.imageX) / geometry.scale : geometry.natW / 2;
+    const centerY = oldFrame ? (oldFrame.top + oldFrame.height / 2 - geometry.imageY) / geometry.scale : geometry.natH / 2;
+    const stage = $("#crop-stage");
+    const ratio = geometry.targetW && geometry.targetH ? geometry.targetW / geometry.targetH : geometry.natW / geometry.natH;
+    geometry.frame = cropFrameGeometry(stage.clientWidth, stage.clientHeight, ratio);
+    geometry.baseScale = Math.max(geometry.frame.width / geometry.natW, geometry.frame.height / geometry.natH);
+    const shortestCropSide = Math.min(geometry.frame.width, geometry.frame.height) / geometry.baseScale;
+    geometry.maxZoom = Math.max(1, Math.min(8, Math.floor(shortestCropSide * 100) / 100));
+    geometry.zoom = Math.min(geometry.maxZoom, geometry.zoom);
+    geometry.scale = geometry.baseScale * geometry.zoom;
+    geometry.imageX = geometry.frame.left + geometry.frame.width / 2 - centerX * geometry.scale;
+    geometry.imageY = geometry.frame.top + geometry.frame.height / 2 - centerY * geometry.scale;
+    renderCropBox();
   }
 
   function renderCropBox() {
     if (!cropState) return;
-    const boxEl = $("#crop-box");
-    if (!boxEl) return;
-    const [l, t, r, b] = cropState.box;
-    const s = cropState.scale;
-    boxEl.style.left = cropState.offsetX + l * s + "px";
-    boxEl.style.top = cropState.offsetY + t * s + "px";
-    boxEl.style.width = (r - l) * s + "px";
-    boxEl.style.height = (b - t) * s + "px";
-  }
-
-  function updateCropInfo() {
-    const info = $("#crop-info");
-    if (!info || !cropState) return;
-    const [l, t, r, b] = cropState.box;
-    const cw = r - l;
-    const ch = b - t;
-    if (cropState.targetW > 0 && cropState.targetH > 0) {
-      info.textContent = `裁切区 ${cw}×${ch}  →  输出为游戏原尺寸 ${cropState.targetW}×${cropState.targetH}`;
-    } else {
-      info.textContent = `原图 ${cropState.natW}×${cropState.natH}  →  裁切 ${cw}×${ch}`;
-    }
-  }
-
-  function smartCropBox() {
-    if (!cropState) return;
-    const { natW, natH, targetW, targetH } = cropState;
-    let box;
-    if (targetW > 0 && targetH > 0) {
-      const srcRatio = natW / natH;
-      const tgtRatio = targetW / targetH;
-      let nw, nh;
-      if (srcRatio > tgtRatio) {
-        nh = natH;
-        nw = Math.max(1, Math.round(natH * tgtRatio));
-      } else {
-        nw = natW;
-        nh = Math.max(1, Math.round(natW / tgtRatio));
-      }
-      const l = Math.max(0, Math.floor((natW - nw) / 2));
-      const t = Math.max(0, Math.floor((natH - nh) / 2));
-      box = [l, t, Math.min(natW, l + nw), Math.min(natH, t + nh)];
-    } else {
-      const side = Math.min(natW, natH);
-      const l = Math.floor((natW - side) / 2);
-      const t = Math.floor((natH - side) / 2);
-      box = [l, t, l + side, t + side];
-    }
-    cropState.box = box;
-    renderCropBox();
-    updateCropInfo();
+    clampCropImage(cropState);
+    const { frame, imageX, imageY, scale, natW, natH, zoom } = cropState;
+    const img = $("#crop-image");
+    img.style.width = natW * scale + "px";
+    img.style.height = natH * scale + "px";
+    img.style.left = imageX + "px";
+    img.style.top = imageY + "px";
+    const box = $("#crop-box");
+    box.style.left = frame.left + "px";
+    box.style.top = frame.top + "px";
+    box.style.width = frame.width + "px";
+    box.style.height = frame.height + "px";
+    box.classList.remove("is-hidden");
+    $("#crop-zoom").max = String(Math.round(cropState.maxZoom * 100));
+    $("#crop-zoom").disabled = cropState.maxZoom <= 1;
+    $("#crop-zoom").value = String(Math.round(zoom * 100));
+    $("#crop-zoom-value").textContent = `${Math.round(zoom * 100)}%`;
+    const [l, t, r, b] = cropBoxInPixels(cropState);
+    const output = cropState.targetW && cropState.targetH ? ` → 游戏原尺寸 ${cropState.targetW}×${cropState.targetH}` : " · 保持原图比例";
+    const pixelHint = Math.min(r - l, b - t) < 8 ? " · 像素较少，边界按整像素取整" : "";
+    $("#crop-info").textContent = `裁切区域 ${r - l}×${b - t}${output}${pixelHint}`;
   }
 
   function resetCropFull() {
-    if (!cropState) return;
-    cropState.box = [0, 0, cropState.natW, cropState.natH];
-    renderCropBox();
-    updateCropInfo();
+    if (!cropState || !isCropCurrent()) return;
+    onCropPointerUp();
+    cropState.zoom = 1;
+    cropState.frame = null;
+    resizeCropStage();
   }
 
-  function startCropDrag(mode, e) {
-    if (!cropState) return;
+  function setCropZoom(zoom, focusX, focusY) {
+    if (!cropState || !isCropCurrent() || !Number.isFinite(zoom)) return;
+    onCropPointerUp();
+    const geometry = cropState;
+    const { frame } = geometry;
+    const x = focusX ?? frame.left + frame.width / 2;
+    const y = focusY ?? frame.top + frame.height / 2;
+    const sourceX = (x - geometry.imageX) / geometry.scale;
+    const sourceY = (y - geometry.imageY) / geometry.scale;
+    geometry.zoom = Math.max(1, Math.min(geometry.maxZoom, zoom));
+    geometry.scale = geometry.baseScale * geometry.zoom;
+    geometry.imageX = x - sourceX * geometry.scale;
+    geometry.imageY = y - sourceY * geometry.scale;
+    renderCropBox();
+  }
+
+  function onCropWheel(e) {
+    if (!cropState || !isCropCurrent()) return;
     e.preventDefault();
-    cropDrag = { mode, startX: e.clientX, startY: e.clientY, startBox: cropState.box.slice() };
+    const stage = $("#crop-stage").getBoundingClientRect();
+    const { frame } = cropState;
+    const x = Math.max(frame.left, Math.min(frame.left + frame.width, e.clientX - stage.left));
+    const y = Math.max(frame.top, Math.min(frame.top + frame.height, e.clientY - stage.top));
+    setCropZoom(cropState.zoom * Math.exp(-e.deltaY * 0.0015), x, y);
+  }
+
+  function startCropDrag(e) {
+    if (!cropState || !isCropCurrent() || (e.button != null && e.button !== 0) || e.isPrimary === false) return;
+    e.preventDefault();
+    onCropPointerUp();
+    cropDrag = { pointerId: e.pointerId, startX: e.clientX, startY: e.clientY, imageX: cropState.imageX, imageY: cropState.imageY };
+    $("#crop-stage").classList.add("is-dragging");
     document.addEventListener("pointermove", onCropPointerMove);
     document.addEventListener("pointerup", onCropPointerUp);
+    document.addEventListener("pointercancel", onCropPointerUp);
+    window.addEventListener("blur", onCropPointerUp);
   }
 
   function onCropPointerMove(e) {
-    if (!cropDrag || !cropState) return;
-    const scale = cropState.scale || 1;
-    const dxN = (e.clientX - cropDrag.startX) / scale;
-    const dyN = (e.clientY - cropDrag.startY) / scale;
-    const natW = cropState.natW;
-    const natH = cropState.natH;
-    const MIN = 8;
-    let [l, t, r, b] = cropDrag.startBox;
-    if (cropDrag.mode === "move") {
-      const w = r - l;
-      const h = b - t;
-      l += dxN;
-      r = l + w;
-      t += dyN;
-      b = t + h;
-      if (l < 0) { r -= l; l = 0; }
-      if (t < 0) { b -= t; t = 0; }
-      if (r > natW) { l -= r - natW; r = natW; }
-      if (b > natH) { t -= b - natH; b = natH; }
-    } else {
-      if (cropDrag.mode.includes("w")) l = Math.min(r - MIN, Math.max(0, l + dxN));
-      if (cropDrag.mode.includes("e")) r = Math.max(l + MIN, Math.min(natW, r + dxN));
-      if (cropDrag.mode.includes("n")) t = Math.min(b - MIN, Math.max(0, t + dyN));
-      if (cropDrag.mode.includes("s")) b = Math.max(t + MIN, Math.min(natH, b + dyN));
-    }
-    cropState.box = [Math.round(l), Math.round(t), Math.round(r), Math.round(b)];
+    if (!cropDrag || !cropState || e.pointerId !== cropDrag.pointerId || !isCropCurrent()) return;
+    cropState.imageX = cropDrag.imageX + e.clientX - cropDrag.startX;
+    cropState.imageY = cropDrag.imageY + e.clientY - cropDrag.startY;
     renderCropBox();
-    updateCropInfo();
   }
 
   function onCropPointerUp() {
     cropDrag = null;
+    $("#crop-stage")?.classList.remove("is-dragging");
     document.removeEventListener("pointermove", onCropPointerMove);
     document.removeEventListener("pointerup", onCropPointerUp);
+    document.removeEventListener("pointercancel", onCropPointerUp);
+    window.removeEventListener("blur", onCropPointerUp);
   }
 
   async function cropReplacement() {
@@ -2550,14 +2598,26 @@ ${row.bundle}`;
       return;
     }
     const sel = state.selection;
+    const replacement = state.replacement;
+    const selectionRequest = state.selectionRequest;
+    const studioRequest = state.studioRequest;
+    const replacementRequest = state.replacementRequest;
+    const page = state.page;
+    const key = selectionKey();
+    const sameCandidate = () => selectionRequest === state.selectionRequest && replacementRequest === state.replacementRequest &&
+      key === selectionKey() && state.replacement === replacement;
+    const current = () => state.page === page && studioRequest === state.studioRequest && sameCandidate();
     openCropModal({
-      url: state.replacement.preview_data,
+      url: replacement.preview_data,
       targetW: sel?.width || 0,
       targetH: sel?.height || 0,
+      isCurrent: current,
       onConfirm: async (box) => {
-        const data = await call("crop_replacement", { busy: true, busyText: "裁剪中…" }, box);
-        state.replacement = { ...state.replacement, ...data };
-        renderReplacement();
+        if (!current()) return;
+        const data = await call("crop_replacement", { busy: true, busyText: "裁剪中…" }, box, replacement.crop_token);
+        if (!sameCandidate()) return;
+        state.replacement = { ...replacement, ...data };
+        if (state.page === "studio") renderReplacement();
         toast(`已裁剪为 ${box[2] - box[0]}×${box[3] - box[1]}`);
       },
     });
@@ -2570,23 +2630,39 @@ ${row.bundle}`;
       toast("动画图集不能裁剪，否则会破坏原来的碎片位置", true);
       return;
     }
+    closeCropModal();
+    const request = cropRequest;
+    const index = state.draftIndex;
+    const item = state.draft.items[index];
+    const detailRequest = state.draftDetailRequest;
+    const sameDetail = () => state.page === "pack" && index === state.draftIndex && detailRequest === state.draftDetailRequest;
+    const current = () => sameDetail() && item === state.draft.items?.[index];
     try {
-      const data = await call("pick_draft_crop_source", { busy: false }, state.draftIndex);
+      const data = await call("pick_draft_crop_source", { busy: false }, index);
       if (!data) return;
+      const cancel = () => call("cancel_draft_crop", { quiet: true }, data.crop_token);
+      if (request !== cropRequest || !current()) {
+        await cancel();
+        return;
+      }
       openCropModal({
         url: data.preview_data,
         targetW: data.target_width,
         targetH: data.target_height,
+        isCurrent: current,
+        onCancel: cancel,
         onConfirm: async (box) => {
-          const res = await call("commit_draft_crop", { busy: true, busyText: "裁剪并保存中…" }, box);
+          if (!current()) return;
+          const res = await call("commit_draft_crop", { busy: true, busyText: "裁剪并保存中…" }, box, data.crop_token);
           state.draft = res.draft;
           state.installed = res.installed || state.installed;
           state.dashboard = res.dashboard || state.dashboard;
           renderInstalled();
           renderDashboard();
+          renderDraftList();
           toast("裁剪换图已保存到作品集");
           await refreshSelectionComparison();
-          await showDraftDetail(state.draftIndex);
+          if (sameDetail()) await showDraftDetail(index);
         },
       });
     } catch (_) {}

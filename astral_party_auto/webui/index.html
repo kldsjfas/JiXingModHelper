@@ -478,20 +478,19 @@
   <div id="crop-modal" class="modal-overlay is-hidden">
     <div class="modal crop-modal">
       <h3>裁剪替换图</h3>
-      <p class="modal-hint">拖动粉框移动位置；拖角上的小圆点调整大小。</p>
-      <div id="crop-stage" class="crop-stage">
-        <img id="crop-image" alt="">
-        <div id="crop-box" class="crop-box">
-          <div class="crop-handle" data-handle="nw"></div>
-          <div class="crop-handle" data-handle="ne"></div>
-          <div class="crop-handle" data-handle="sw"></div>
-          <div class="crop-handle" data-handle="se"></div>
-        </div>
+      <p class="modal-hint">粉框比例已固定。拖动图片调整位置，滚轮或下方滑杆缩放，框内就是保留的画面。</p>
+      <div id="crop-stage" class="crop-stage" tabindex="0" aria-label="裁剪预览，可拖动图片、滚轮缩放">
+        <img id="crop-image" alt="待裁剪图片" draggable="false">
+        <div id="crop-box" class="crop-box is-hidden" aria-hidden="true"></div>
+      </div>
+      <div class="crop-zoom-row">
+        <label for="crop-zoom">缩放</label>
+        <input id="crop-zoom" type="range" min="100" max="800" value="100" step="1" aria-label="图片缩放">
+        <output id="crop-zoom-value" for="crop-zoom">100%</output>
+        <button id="crop-reset" class="button ghost">重置居中</button>
       </div>
       <p id="crop-info" class="modal-hint"></p>
       <div class="action-row">
-        <button id="crop-smart" class="button ghost">贴合原资源比例</button>
-        <button id="crop-reset" class="button ghost">重置为整图</button>
         <button id="crop-cancel" class="button ghost">取消</button>
         <button id="crop-confirm" class="button primary">确认裁剪</button>
       </div>

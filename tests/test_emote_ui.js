@@ -57,9 +57,9 @@ function loadFrontend() {
   const previewResponses = [];
   const context = vm.createContext({
     URLSearchParams, console, setTimeout: () => 0, clearTimeout() {},
-    window: { location: { hash: "" }, addEventListener() {} },
+    window: { location: { hash: "" }, addEventListener() {}, removeEventListener() {} },
     document: {
-      readyState: "loading", addEventListener() {}, querySelectorAll: () => [],
+      readyState: "loading", addEventListener() {}, removeEventListener() {}, querySelectorAll: () => [],
       querySelector: (selector) => find(selector.slice(1)), getElementById: find,
       createElement: () => makeElement(),
     },

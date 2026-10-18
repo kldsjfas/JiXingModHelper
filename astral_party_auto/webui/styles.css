@@ -1507,19 +1507,22 @@ body.nav-open .sidebar {
   position: relative;
   width: 100%;
   height: 420px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
   overflow: hidden;
   background: #0f0b16;
   border: 1px solid var(--line);
   border-radius: 12px;
   user-select: none;
+  touch-action: none;
+  cursor: grab;
 }
 
+.crop-stage.is-dragging { cursor: grabbing; }
+.crop-stage:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+
 .crop-stage img {
-  max-width: 100%;
-  max-height: 100%;
+  position: absolute;
+  max-width: none;
+  max-height: none;
   display: block;
   pointer-events: none;
   user-select: none;
@@ -1528,24 +1531,15 @@ body.nav-open .sidebar {
 .crop-box {
   position: absolute;
   border: 2px solid var(--accent);
-  background: rgba(255, 77, 148, 0.14);
-  cursor: move;
+  box-sizing: border-box;
+  box-shadow: 0 0 0 1600px rgba(10, 7, 15, 0.58);
+  pointer-events: none;
 }
 
-.crop-handle {
-  position: absolute;
-  width: 14px;
-  height: 14px;
-  margin: -7px;
-  border-radius: 50%;
-  background: var(--accent);
-  border: 2px solid #fff;
-}
-
-.crop-handle[data-handle="nw"] { top: 0; left: 0; cursor: nwse-resize; }
-.crop-handle[data-handle="ne"] { top: 0; left: 100%; cursor: nesw-resize; }
-.crop-handle[data-handle="sw"] { top: 100%; left: 0; cursor: nesw-resize; }
-.crop-handle[data-handle="se"] { top: 100%; left: 100%; cursor: nwse-resize; }
+.crop-zoom-row { display: flex; align-items: center; gap: 12px; margin: 12px 0; font-size: 12px; }
+.crop-zoom-row input { flex: 1; min-width: 60px; accent-color: var(--accent); }
+.crop-zoom-row output { min-width: 38px; text-align: right; font-variant-numeric: tabular-nums; }
+.crop-zoom-row .button { min-height: 32px; padding: 5px 10px; }
 
 @media (max-width: 720px) {
   .crop-stage { height: 300px; }

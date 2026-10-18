@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 import UnityPy
-from PIL import Image
+from PIL import Image, ImageOps
 
 
 def _load_bundle(bundle_path: str | Path):
@@ -40,7 +40,12 @@ def read_static_image(image_path: str | Path) -> Image.Image:
     with Image.open(image_path) as source:
         if getattr(source, "n_frames", 1) > 1:
             raise ValueError("普通贴图不会播放多帧图片。请使用动画制作；角色表情请使用动态表情视频功能。")
-        return source.convert("RGBA")
+        # 浏览器会按 EXIF 方向显示照片，裁剪与写包也必须使用相同的坐标系。
+        oriented = ImageOps.exif_transpose(source)
+        try:
+            return oriented.convert("RGBA")
+        finally:
+            oriented.close()
 
 
 def replace_bundle_texture(

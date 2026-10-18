@@ -7,6 +7,7 @@ import hashlib
 import json
 import mimetypes
 import os
+import secrets
 import tempfile
 import threading
 from collections import deque
@@ -93,6 +94,9 @@ class DesktopApi:
         self._pending_mod_path: Path | None = None
         self._replacement_path: Path | None = None
         self._replacement_temporary = None
+        self._replacement_crop_token: str | None = None
+        self._replacement_crop_hash: str | None = None
+        self._replacement_crop_selection: tuple | None = None
         self._emote_replacement: dict | None = None
         self._emote_candidate_dir = None
         self._emote_preview_cache: dict[tuple, dict] = {}
@@ -101,6 +105,9 @@ class DesktopApi:
         self._draft_crop_path: Path | None = None
         self._draft_crop_index: int | None = None
         self._draft_crop_item: dict | None = None
+        self._draft_crop_token: str | None = None
+        self._draft_crop_hash: str | None = None
+        self._draft_crop_game_key = None
         self._migration_source: Path | None = None
         self._migration_plans = []
         self._migration_warnings: list[str] = []
@@ -613,6 +620,7 @@ class DesktopApi:
         self._clear_emote_candidate()
         self._clear_visual_candidate()
         self._clear_replacement()
+        self._clear_draft_crop()
         self.controller.refresh_detection()
         if self.controller.has_game:
             self._append_log(f"已刷新游戏检测：{self.controller.game_exe_display()}")
@@ -1241,6 +1249,7 @@ class DesktopApi:
         selection = self.controller.selection
         if not selection:
             raise RuntimeError("请先选择资源。")
+        selection_key = self._emote_selection_key()
         asset_type = selection.get("asset_type") or "texture"
         if asset_type == "anim":
             self._clear_replacement()
@@ -1260,15 +1269,22 @@ class DesktopApi:
         if sequence_folder and not (asset_type == "dynamic" and selection.get("animation_kind") == "sequence"):
             raise RuntimeError("只有序列帧动画可以选择帧图文件夹。")
         path = self._pick_path("folder" if sequence_folder else "open", file_types=file_types)
+        if selection_key != self._emote_selection_key():
+            self._clear_replacement()
+            raise RuntimeError("当前资源已切换，请重新选择替换文件。")
         if path is None:
             return None
         result = self._replacement_payload(selection, path)
         self._clear_replacement()
         self._replacement_path = path
+        self._bind_replacement_crop(result)
         return result
 
     def _clear_replacement(self) -> None:
         self._replacement_path = None
+        self._replacement_crop_token = None
+        self._replacement_crop_hash = None
+        self._replacement_crop_selection = None
         temporary = getattr(self, "_replacement_temporary", None)
         self._replacement_temporary = None
         if temporary is not None:
@@ -1276,6 +1292,35 @@ class DesktopApi:
                 temporary.cleanup()
             except OSError as error:
                 self._append_log(f"替换文件暂存未能清理，已保留：{temporary.name}（{error}）")
+
+    @staticmethod
+    def _crop_file_hash(path: Path) -> str:
+        with path.open("rb") as stream:
+            return hashlib.file_digest(stream, "sha256").hexdigest()
+
+    def _bind_replacement_crop(self, payload: dict) -> None:
+        if (self.controller.selection or {}).get("asset_type", "texture") != "texture":
+            return
+        if not payload.get("preview_data") or self._replacement_path is None:
+            return
+        self._replacement_crop_token = secrets.token_hex(16)
+        self._replacement_crop_hash = self._crop_file_hash(self._replacement_path)
+        self._replacement_crop_selection = self._emote_selection_key()
+        payload["crop_token"] = self._replacement_crop_token
+
+    @staticmethod
+    def _validated_crop_box(crop_box: list, size: tuple[int, int]) -> tuple[int, int, int, int]:
+        # PIL 会为越界区域补像素，不能把异常坐标当作正常裁剪保存。
+        if not isinstance(crop_box, (list, tuple)) or len(crop_box) != 4:
+            raise ValueError("裁剪区域需要四个整数像素坐标。")
+        if any(isinstance(value, bool) or not isinstance(value, (int, float))
+               or not float(value).is_integer() for value in crop_box):
+            raise ValueError("裁剪坐标必须是整数像素。")
+        left, top, right, bottom = (int(value) for value in crop_box)
+        width, height = size
+        if not (0 <= left < right <= width and 0 <= top < bottom <= height):
+            raise ValueError("裁剪区域超出图片边界或尺寸为空，请重新调整。")
+        return left, top, right, bottom
 
     def _replacement_payload(self, selection: dict, path: Path) -> dict:
         asset_type = selection.get("asset_type") or "texture"
@@ -1330,33 +1375,50 @@ class DesktopApi:
         self._replacement_temporary = temporary
         self._replacement_path = path
         result["name"] = filename
+        self._bind_replacement_crop(result)
         return result
 
     @exposed
-    def crop_replacement(self, crop_box: list) -> dict:
+    def crop_replacement(self, crop_box: list, crop_token: str | None = None) -> dict:
         """裁剪已选的替换图（浏览器端框选后调用）；裁剪结果覆盖为待提交文件。"""
         if self._replacement_path is None:
             raise RuntimeError("请先选择替换文件。")
+        if crop_token is not None and crop_token != getattr(self, "_replacement_crop_token", None):
+            raise RuntimeError("替换图片已变化，请重新打开裁剪。")
+        expected_selection = getattr(self, "_replacement_crop_selection", None)
+        if expected_selection is not None and expected_selection != self._emote_selection_key():
+            raise RuntimeError("当前资源已切换，请重新选择替换图片。")
         if (self.controller.selection or {}).get("asset_type") == "dynamic":
             raise RuntimeError("动画按原帧尺寸适配，不能用静态图片裁剪。")
         if (self.controller.selection or {}).get("asset_type") == "anim":
             raise RuntimeError("动画完整图集不能裁剪，请保留原图集尺寸和布局。")
         if self._replacement_path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
             raise RuntimeError("当前文件不是图片，不能裁剪。")
-        from PIL import Image
-
-        box = tuple(int(v) for v in crop_box)
+        expected_hash = getattr(self, "_replacement_crop_hash", None)
+        if expected_hash is not None and self._crop_file_hash(self._replacement_path) != expected_hash:
+            raise RuntimeError("替换图片已在外部修改，请重新选择后裁剪。")
         from .modkit.maker import read_static_image
         with read_static_image(self._replacement_path) as source:
+            box = self._validated_crop_box(crop_box, source.size)
             cropped = source.crop(box)
         out = DATA_DIR / "crop_preview.png"
         out.parent.mkdir(parents=True, exist_ok=True)
-        cropped.save(out)
+        handle, temporary_name = tempfile.mkstemp(prefix=".crop-", suffix=".png", dir=out.parent)
+        os.close(handle)
+        temporary = Path(temporary_name)
+        try:
+            cropped.save(temporary, format="PNG")
+            os.replace(temporary, out)
+        finally:
+            cropped.close()
+            temporary.unlink(missing_ok=True)
         selection = self.controller.selection or {}
         animation = self._clip_candidate_preview(selection, out) if selection.get("asset_type") == "anim" and selection.get("playable") else None
         self._clear_replacement()
         self._replacement_path = out
-        return {"path": str(out), "name": out.name, "size": out.stat().st_size, "preview_data": self._image_data(out), "animation": animation}
+        result = {"path": str(out), "name": out.name, "size": out.stat().st_size, "preview_data": self._image_data(out), "animation": animation}
+        self._bind_replacement_crop(result)
+        return result
 
     @exposed
     def commit_replacement(self, text_content: str = "", fps: float = 30) -> dict:
@@ -1500,6 +1562,7 @@ class DesktopApi:
 
     @exposed
     def replace_draft_image(self, index: int) -> dict | None:
+        self._clear_draft_crop()
         index = int(index)
         if not (0 <= index < len(self.controller.draft_items)):
             raise RuntimeError("作品集项不存在。")
@@ -1530,12 +1593,18 @@ class DesktopApi:
             raise RuntimeError("动态资源请在制作页更换素材，不能通过普通裁剪修改。")
         if self.controller.draft_items[index].get("from_anim"):
             raise RuntimeError("动画完整图集不能裁剪，请保留原图集尺寸和布局。")
+        expected_item = deepcopy(self.controller.draft_items[index])
+        game_key = getattr(self.controller, "_index_source_key", None)
         path = self._pick_path(
             "open",
             file_types=("图片 (*.png;*.jpg;*.jpeg;*.webp;*.bmp)", "所有文件 (*.*)"),
         )
         if path is None:
             return None
+        if (not (0 <= index < len(self.controller.draft_items))
+                or self.controller.draft_items[index] != expected_item
+                or game_key != getattr(self.controller, "_index_source_key", None)):
+            raise RuntimeError("作品集或游戏目录已变化，请重新选择要裁剪的项目和图片。")
         item = self.controller.draft_items[index]
         target_w = target_h = 0
         orig_bundle = self.controller.original_bundle_path(item.get("bundle", ""))
@@ -1553,28 +1622,48 @@ class DesktopApi:
         self._draft_crop_path = path
         self._draft_crop_index = index
         self._draft_crop_item = deepcopy(item)
+        self._draft_crop_token = secrets.token_hex(16)
+        self._draft_crop_hash = self._crop_file_hash(path)
+        self._draft_crop_game_key = getattr(self.controller, "_index_source_key", None)
         return {
             "path": str(path),
             "name": path.name,
             "preview_data": preview,
             "target_width": target_w,
             "target_height": target_h,
+            "crop_token": self._draft_crop_token,
         }
 
     def _clear_draft_crop(self) -> None:
         self._draft_crop_path = None
         self._draft_crop_index = None
         self._draft_crop_item = None
+        self._draft_crop_token = None
+        self._draft_crop_hash = None
+        self._draft_crop_game_key = None
 
     @exposed
-    def commit_draft_crop(self, crop_box: list | None = None) -> dict:
+    def cancel_draft_crop(self, crop_token: str | None = None) -> bool:
+        if crop_token is not None and crop_token != getattr(self, "_draft_crop_token", None):
+            return False
+        self._clear_draft_crop()
+        return True
+
+    @exposed
+    def commit_draft_crop(self, crop_box: list | None = None, crop_token: str | None = None) -> dict:
         """裁剪换图第二步：用框选区域写入作品集项。"""
         if self._draft_crop_path is None or self._draft_crop_index is None:
             raise RuntimeError("请先选择要裁剪的图片。")
+        if crop_token is not None and crop_token != getattr(self, "_draft_crop_token", None):
+            raise RuntimeError("裁剪图片已变化，请重新打开裁剪。")
         index = self._draft_crop_index
         path = self._draft_crop_path
         expected_item = self._draft_crop_item
+        expected_hash = getattr(self, "_draft_crop_hash", None)
+        expected_game = getattr(self, "_draft_crop_game_key", None)
         self._clear_draft_crop()
+        if expected_game is not None and expected_game != getattr(self.controller, "_index_source_key", None):
+            raise RuntimeError("游戏目录已切换，请重新选择要裁剪的项目和图片。")
         if not (0 <= index < len(self.controller.draft_items)):
             raise RuntimeError("作品集项不存在。")
         if self.controller.draft_items[index] != expected_item:
@@ -1583,7 +1672,11 @@ class DesktopApi:
             raise RuntimeError("动态资源请在制作页更换素材，不能通过普通裁剪修改。")
         if self.controller.draft_items[index].get("from_anim"):
             raise RuntimeError("动画完整图集不能裁剪，请保留原图集尺寸和布局。")
-        box = tuple(int(v) for v in crop_box) if crop_box else None
+        if expected_hash is not None and self._crop_file_hash(path) != expected_hash:
+            raise RuntimeError("裁剪图片已在外部修改，请重新选择。")
+        from .modkit.maker import read_static_image
+        with read_static_image(path) as source:
+            box = self._validated_crop_box(crop_box, source.size)
         item = self.controller.update_draft_texture(index, path, crop_box=box)
         return {
             "item": item,
@@ -1594,6 +1687,7 @@ class DesktopApi:
 
     @exposed
     def remove_draft_item(self, index: int) -> dict:
+        self._clear_draft_crop()
         self.controller.remove_draft_item(int(index))
         return {
             "draft": self._draft_state(),
@@ -1603,6 +1697,7 @@ class DesktopApi:
 
     @exposed
     def clear_draft(self) -> dict:
+        self._clear_draft_crop()
         self.controller.clear_draft()
         return {
             "draft": self._draft_state(),

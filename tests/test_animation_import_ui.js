@@ -18,7 +18,7 @@ function makeElement(id = "") {
     },
     appendChild(child) { this.children.push(child); },
     addEventListener() {},
-    setAttribute() {},
+    setAttribute() {}, removeAttribute() {},
     remove() {},
   };
 }
@@ -34,9 +34,9 @@ function loadFrontend() {
   const context = vm.createContext({
     URLSearchParams, console,
     setTimeout: () => 0, clearTimeout() {},
-    window: { location: { hash: "" } },
+    window: { location: { hash: "" }, removeEventListener() {} },
     document: {
-      readyState: "loading", addEventListener() {},
+      readyState: "loading", addEventListener() {}, removeEventListener() {},
       querySelector: (selector) => find(selector.slice(1)),
       getElementById: find,
       createElement: () => makeElement(),

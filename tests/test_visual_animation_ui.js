@@ -294,9 +294,9 @@ async function checkProductionAppIntegration() {
   const answer = (name, value) => responses.set(name, [...(responses.get(name) || []), value]);
   const context = vm.createContext({
     console, URLSearchParams, setTimeout: () => 0, clearTimeout() {},
-    window: { location: { hash: "" }, addEventListener() {} },
+    window: { location: { hash: "" }, addEventListener() {}, removeEventListener() {} },
     document: {
-      readyState: "loading", addEventListener() {}, body: element("body"),
+      readyState: "loading", addEventListener() {}, removeEventListener() {}, body: element("body"),
       querySelector: (selector) => find(selector.slice(1)), querySelectorAll: () => [],
       getElementById: find, createElement: () => element(""),
     },

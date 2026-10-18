@@ -81,3 +81,5 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tests/test_resource_import_ui.js
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tests/test_crop_ui.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
