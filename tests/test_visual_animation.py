@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 
 from PIL import Image
 
-from astral_party_auto.modkit.visual_animation import VisualAnimationWorkspace, _clear_clip_pixels, animation_identity, pack_frames, sample_frames
+from astral_party_auto.modkit.visual_animation import VisualAnimationWorkspace, _clear_clip_pixels, animation_identity, fit_animation_frames, pack_frames, plan_card_video, sample_frames
 from astral_party_auto.web_app import DesktopApi
 
 
@@ -39,6 +39,69 @@ class AtlasLayoutTests(unittest.TestCase):
         self.assertEqual(sum(durations), 1500)
         self.assertEqual([frame.getpixel((0, 0))[0] for frame in selected], [0, 3, 6])
         self.assertEqual(len(selected), 3)
+
+    def test_large_card_is_scaled_to_fit_without_covering_official_or_other_frames(self):
+        reserved = [[1921, 1, 512, 512]]
+        size, placed = fit_animation_frames((1920, 1920), reserved, (8192, 4096), 12)
+        self.assertLess(size[0], 8192)
+        self.assertAlmostEqual(size[0] / size[1], 2, delta=0.01)
+        self.assertGreaterEqual(len(placed), 2)
+        for rect in placed:
+            self.assertEqual(tuple(rect[2:]), size)
+            self.assertFalse(overlaps(rect, [0, 0, 1920, 1920]))
+            self.assertTrue(all(not overlaps(rect, prior) for prior in reserved))
+
+    def test_normal_card_keeps_original_resolution_and_static_input_is_rejected(self):
+        size, placed = fit_animation_frames((1920, 1920), [], (404, 400), 12)
+        self.assertEqual(size, (404, 400))
+        self.assertEqual(len(placed), 12)
+        with self.assertRaisesRegex(ValueError, "两帧"):
+            fit_animation_frames((1920, 1920), [], (404, 400), 1)
+        with self.assertRaisesRegex(ValueError, "没有足够空间"):
+            fit_animation_frames((4096, 4096), [], (404, 400), 12)
+
+    def test_large_video_card_is_planned_before_decode_within_atlas_and_pixel_budget(self):
+        for source_size in ((1340, 1692), (3500, 2200)):
+            with self.subTest(source_size=source_size):
+                plan = plan_card_video((1920, 1920), [], source_size, 2000)
+                self.assertEqual(plan["fps"], 12)
+                self.assertLess(plan["width"] * plan["height"], source_size[0] * source_size[1])
+                self.assertLessEqual(plan["width"] * plan["height"] * 24, 32_000_000)
+                self.assertEqual(len(pack_frames((1920, 1920), [], (plan["width"], plan["height"]), 24)), 24)
+                self.assertAlmostEqual(plan["width"] / plan["height"], source_size[0] / source_size[1], delta=0.01)
+
+    def test_long_video_sampling_preserves_full_duration_and_never_exceeds_frame_limit(self):
+        plan = plan_card_video((1920, 1920), [], (3500, 2200), 30000)
+        self.assertEqual(plan["fps"], 4)
+        self.assertEqual(120 * 1000 / plan["fps"], 30000)
+        self.assertLessEqual(plan["width"] * plan["height"] * 120, 32_000_000)
+        with self.assertRaisesRegex(ValueError, "太短"):
+            plan_card_video((1920, 1920), [], (1340, 1692), 10)
+
+    def test_short_video_still_obeys_single_frame_limit_with_an_almost_empty_atlas(self):
+        plan = plan_card_video((512, 512), [], (3500, 2200), 100)
+        self.assertLessEqual(plan["width"] * plan["height"], 4_194_304)
+        self.assertEqual(round(100 * plan["fps"] / 1000), 2)
+
+
+class VisualSelectionTests(unittest.TestCase):
+    def test_configuration_reference_is_editable_even_with_a_new_resource_name(self):
+        controller = Mock(draft_items=[])
+        workspace = VisualAnimationWorkspace(controller)
+        workspace.context = Mock(return_value={"tables": {"Card": {"targets": [{"name": "NewVersionCardImage"}]},
+                                                          "Skin": {"targets": []}}})
+        self.assertTrue(workspace.selection("NewVersionCardImage")["editable"])
+        self.assertFalse(workspace.selection("UT_Ordinary_Icon")["recognized"])
+
+    def test_known_card_variants_keep_explanations_when_resources_are_unavailable(self):
+        workspace = VisualAnimationWorkspace(Mock())
+        workspace.context = Mock(side_effect=ValueError("请加载当前卡面资源"))
+        for name in ("UT_HandCard_1", "UT_Hero_Card2_101", "UT_Hero_ThinCard_101", "UT_CardFront_9", "UT_IAltArt_1"):
+            with self.subTest(name=name):
+                result = workspace.selection(name)
+                self.assertTrue(result["recognized"])
+                self.assertFalse(result["editable"])
+                self.assertIn("加载", result["reason"])
 
 
 class VisualCandidateApiTests(unittest.TestCase):

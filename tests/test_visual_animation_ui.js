@@ -106,7 +106,7 @@ function checkMarkup() {
 
 async function checkSupportedScope() {
   const ui = loadUi();
-  for (const value of [null, selection("map", { visual_animation: { editable: false } }),
+  for (const value of [null, selection("map", { visual_animation: null }),
     selection("text", { asset_type: "text" }), selection("mesh", { asset_type: "mesh" }), selection("emoji", { emote: { editable: true } })]) {
     await ui.refresh(value);
     assert.equal(ui.find("visual-animation-settings").classList.contains("is-hidden"), true);
@@ -117,6 +117,69 @@ async function checkSupportedScope() {
   await ui.refresh(selection());
   assert.equal(ui.find("visual-animation-settings").classList.contains("is-hidden"), false);
   assert.equal(ui.find("visual-animation-import").disabled, false);
+  assert.equal(ui.find("visual-animation-save").disabled, true);
+}
+
+async function checkUnavailableResourceStaysVisible() {
+  const ui = loadUi();
+  const unavailable = selection("Card_A", { visual_animation: {
+    editable: false, draft: true, reason: "当前卡面配置缺少可用的图片地址。",
+  } });
+  await ui.refresh(unavailable);
+  assert.equal(ui.find("visual-animation-settings").classList.contains("is-hidden"), false);
+  assert.equal(ui.find("visual-animation-import").disabled, true);
+  assert.equal(ui.find("visual-animation-save").disabled, true);
+  assert.match(ui.find("visual-animation-reason").textContent, /缺少可用的图片地址/);
+  assert.doesNotMatch(ui.find("visual-animation-status").textContent, /导入后|可以先播放/);
+  assert.match(ui.rendered.at(-1).message, /暂不可用/);
+  await ui.choose();
+  await ui.save();
+  assert.deepEqual(ui.requests, [], "Unavailable resource requested import, save or saved preview");
+
+  await ui.refresh(selection("Card_A", { visual_animation: { editable: false } }));
+  assert.match(ui.find("visual-animation-reason").textContent, /暂时无法制作动态效果/);
+  await ui.refresh(selection("Card_A"));
+  assert.equal(ui.find("visual-animation-settings").classList.contains("is-hidden"), false);
+  assert.equal(ui.find("visual-animation-import").disabled, false);
+  assert.equal(ui.find("visual-animation-save").disabled, true);
+  assert.match(ui.find("visual-animation-status").textContent, /导入后先检查/);
+  ui.responses.push({ name: "recovered.gif", animation: animation("recovered") });
+  await ui.choose();
+  assert.equal(ui.find("visual-animation-save").disabled, false);
+}
+
+async function checkUnavailableRefreshInvalidatesCandidates() {
+  const ui = loadUi();
+  await ui.refresh(selection("Card_A"));
+  ui.responses.push({ name: "old.gif", animation: animation("old") });
+  await ui.choose();
+  await ui.refresh(selection("Card_A", { visual_animation: {
+    editable: false, reason: "游戏资源已变化，请刷新索引。",
+  } }));
+  assert.equal(ui.state.candidate, null);
+  assert.equal(ui.state.savedAnimation, null);
+  assert.equal(ui.find("visual-animation-settings").classList.contains("is-hidden"), false);
+  assert.equal(ui.find("visual-animation-save").disabled, true);
+  assert.equal(ui.rendered.at(-1).animation, undefined);
+  const calls = ui.requests.length;
+  await ui.save();
+  assert.equal(ui.requests.length, calls, "Unavailable resource reused a previous candidate");
+
+  await ui.refresh(selection("Card_A"));
+  const late = deferred();
+  ui.responses.push(late.promise);
+  const importing = ui.choose();
+  await ui.refresh(selection("Card_A", { visual_animation: {
+    editable: false, reason: "当前游戏配置无法读取。",
+  } }));
+  late.resolve({ name: "late.gif", animation: animation("late") });
+  await importing;
+  assert.equal(ui.state.candidate, null);
+  assert.equal(ui.find("visual-animation-import").disabled, true);
+  assert.match(ui.find("visual-animation-reason").textContent, /无法读取/);
+  assert.equal(ui.rendered.at(-1).animation, undefined);
+  await ui.refresh(selection("Card_A"));
+  assert.equal(ui.state.candidate, null);
   assert.equal(ui.find("visual-animation-save").disabled, true);
 }
 
@@ -354,13 +417,14 @@ async function checkProductionAppIntegration() {
 
 async function main() {
   checkMarkup();
-  for (const check of [checkSupportedScope, checkCandidateInvalidation, checkSaveReadsActualOutput, checkSaveFailureCannotReuseCandidate,
+  for (const check of [checkSupportedScope, checkUnavailableResourceStaysVisible, checkUnavailableRefreshInvalidatesCandidates,
+    checkCandidateInvalidation, checkSaveReadsActualOutput, checkSaveFailureCannotReuseCandidate,
     checkCommittedSaveWithUnavailablePreview, checkRemovedSavedAnimationIsCleared,
     checkSavedPreviewAndFailure, checkLateImportAndPageLeave, checkLateSavedPreviewCannotReplaceNewCandidate, checkLateSaveCannotReplaceNewSelection,
     checkProductionAppIntegration]) {
     await check();
   }
-  console.log("PASS: 动态卡面/立绘仅在已核对资源显示；取消、失败、切资源、切页和迟到响应清空候选；保存显示实际回读并更新作品集。");
+  console.log("PASS: 动态卡面/立绘入口显示可用状态和原因；不可用资源禁止导入、保存及预览请求；取消、失败、切资源、切页和迟到响应清空候选；保存显示实际回读并更新作品集。");
 }
 
 main().catch((error) => { console.error(error); process.exitCode = 1; });

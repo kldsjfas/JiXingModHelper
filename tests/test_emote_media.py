@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from PIL import Image
 
@@ -30,7 +30,7 @@ def save_animation(path, *, durations=(100, 300), size=(80, 40), kind="GIF"):
     frames[0].save(path, format=kind, **options)
 
 
-def save_video(folder, kind):
+def save_video(folder, kind, *, frame_count=6, frame_rate=10):
     options = {
         "mp4": ["-c:v", "mpeg4", "-pix_fmt", "yuv420p", "-f", "mp4"],
         "webm": ["-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-lossless", "1", "-auto-alt-ref", "0", "-f", "webm"],
@@ -40,15 +40,16 @@ def save_video(folder, kind):
     }
     raw, source = Path(folder) / "fixture.rgba", Path(folder) / ("fixture." + kind)
     with raw.open("wb") as output:
-        for index in range(6):
-            frame = Image.new("RGBA", (96, 64), (220, 20, 20, 0 if kind in ("webm", "mov", "mkv") else 255))
+        for index in range(frame_count):
+            background = (220, 20, 20, 0) if kind in ("webm", "mov", "mkv") else (20, 20, 220, 255)
+            frame = Image.new("RGBA", (96, 64), background)
             for y in range(16, 48):
                 for x in range(24 + index, 64 + index):
                     frame.putpixel((x, y), (220, 20, 20, 255))
             output.write(frame.tobytes())
     subprocess.run([shutil.which("ffmpeg"), "-v", "error", "-nostdin", "-y", "-threads", "1",
-                    "-f", "rawvideo", "-pixel_format", "rgba", "-video_size", "96x64", "-framerate", "10",
-                    "-i", str(raw), "-frames:v", "6", *options[kind], str(source)],
+                    "-f", "rawvideo", "-pixel_format", "rgba", "-video_size", "96x64", "-framerate", str(frame_rate),
+                    "-i", str(raw), "-frames:v", str(frame_count), *options[kind], str(source)],
                    capture_output=True, check=True, timeout=20,
                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     raw.unlink()
@@ -272,6 +273,80 @@ class EmoteMediaTests(unittest.TestCase):
                 self.assertEqual(probe.call_count, 1)
                 process.assert_not_called()
             self.assertEqual([path.name for path in Path(folder).iterdir()], ["input.video"])
+
+    def test_card_output_is_planned_from_real_duration_before_large_target_is_validated(self):
+        from astral_party_auto.modkit.visual_animation import plan_card_video
+        probe = {"streams": [{"width": 96, "height": 64, "duration": "2", "codec_name": "h264", "pix_fmt": "yuv420p"}],
+                 "format": {"format_name": "mov,mp4"}}
+        counted = {"streams": [{"nb_read_frames": "24"}]}
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "input.video"
+            source.write_bytes(b"video")
+            for card_size in ((1340, 1692), (3500, 2200)):
+                with self.subTest(card_size=card_size):
+                    planned = []
+
+                    def planner(duration):
+                        self.assertEqual(duration, 2000)
+                        result = plan_card_video((1920, 1920), [], card_size, duration)
+                        planned.append(result)
+                        return result
+
+                    def write_decoded(command, *_args):
+                        result = planned[0]
+                        output = Path(command[-1])
+                        with output.open("wb") as decoded:
+                            decoded.truncate(result["width"] * result["height"] * 4 * 24)
+
+                    with patch.object(emote_media, "find_ffmpeg", return_value=Path("ffmpeg")), \
+                            patch.object(emote_media, "find_ffprobe", return_value=Path("ffprobe")), \
+                            patch.object(emote_media, "_probe_result", side_effect=[probe, counted]), \
+                            patch.object(emote_media, "_logged_process", side_effect=write_decoded):
+                        frames, info = emote_media.adapt_video_source(
+                            source, {"width": card_size[0], "height": card_size[1], "fps": 12},
+                            work_dir=folder, output_planner=planner)
+                    self.assertEqual(len(frames), 24)
+                    self.assertEqual(frames[0].size, (planned[0]["width"], planned[0]["height"]))
+                    self.assertEqual(info["duration_ms"], info["source_duration_ms"])
+                    self.assertLessEqual(info["width"] * info["height"] * len(frames), emote_media.MAX_OUTPUT_PIXELS)
+            self.assertEqual([path.name for path in Path(folder).iterdir()], ["input.video"])
+
+    def test_card_planner_does_not_bypass_original_video_decode_limits(self):
+        probe = {"streams": [{"width": 3500, "height": 2200, "duration": "2"}],
+                 "format": {"format_name": "mov,mp4"}}
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "input.video"
+            source.write_bytes(b"video")
+            planner = Mock(return_value={"width": 320, "height": 200, "fps": 12})
+            with patch.object(emote_media, "find_ffmpeg", return_value=Path("ffmpeg")), \
+                    patch.object(emote_media, "find_ffprobe", return_value=Path("ffprobe")), \
+                    patch.object(emote_media, "_probe_result", return_value=probe), \
+                    patch.object(emote_media, "_logged_process") as decode:
+                with self.assertRaisesRegex(ValueError, "单帧超过"):
+                    emote_media.adapt_video_source(source, {"width": 3500, "height": 2200, "fps": 12},
+                                                   work_dir=folder, output_planner=planner)
+            planner.assert_not_called()
+            decode.assert_not_called()
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg/FFprobe is not installed")
+    def test_real_two_second_mp4_fits_large_card_targets_and_keeps_motion_and_duration(self):
+        from astral_party_auto.modkit.visual_animation import plan_card_video
+        with tempfile.TemporaryDirectory() as folder:
+            source = save_video(folder, "mp4", frame_count=24, frame_rate=12)
+            original = source.read_bytes()
+            for card_size in ((1340, 1692), (3500, 2200)):
+                with self.subTest(card_size=card_size):
+                    frames, info = emote_media.adapt_video_source(
+                        source, {"width": card_size[0], "height": card_size[1], "fps": 12}, work_dir=folder,
+                        output_planner=lambda duration: plan_card_video((1920, 1920), [], card_size, duration))
+                    self.assertEqual((len(frames), info["source_frames"]), (24, 24))
+                    self.assertAlmostEqual(info["source_duration_ms"], 2000)
+                    self.assertAlmostEqual(info["duration_ms"], info["source_duration_ms"])
+                    self.assertTrue(frames[0].tobytes() != frames[-1].tobytes(), "视频采样应保留画面变化")
+                    self.assertEqual(frames[0].getpixel((0, 0))[3], 0)
+                    self.assertLessEqual(info["width"] * info["height"] * len(frames), emote_media.MAX_OUTPUT_PIXELS)
+            self.assertEqual(source.read_bytes(), original)
+            self.assertEqual([path.name for path in Path(folder).iterdir()], ["fixture.mp4"])
 
     @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg is not installed")
     def test_real_gif_conversion_and_final_dual_stream_preview(self):

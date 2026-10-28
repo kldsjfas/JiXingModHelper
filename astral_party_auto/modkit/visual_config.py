@@ -1,4 +1,4 @@
-"""只编辑 Card/Skin 的静态图片地址，同步列表与字典镜像。"""
+"""编辑卡面和立绘的图片地址，保留玩法字段及配置镜像。"""
 from __future__ import annotations
 
 import os
@@ -19,7 +19,9 @@ _RESOURCE_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,255}\Z")
 _MOVIECLIP_URL = re.compile(r"ui://xuaw6o8jjm[A-Za-z0-9]{1,48}\Z")
 _USAGES = {
     "Card": {6: "卡面", 7: "卡面（SFW）"},
-    "Skin": {7: "立绘", 8: "立绘（SFW）", 9: "局内立绘", 10: "局内立绘（SFW）"},
+    "Skin": {7: "立绘", 8: "立绘（SFW）", 9: "局内立绘", 10: "局内立绘（SFW）",
+             17: "准备界面卡面", 18: "准备界面卡面（SFW）", 19: "细卡面", 20: "细卡面（SFW）"},
+    "CardAltArt": {3: "异画卡面", 4: "异画卡面（SFW）", 7: "异画卡面前板"},
 }
 
 
@@ -37,6 +39,7 @@ class _Record:
     record_id: int
     raw: bytes
     addresses: dict[int, str]
+    kind: str
 
 
 def _varint(raw: bytes, position: int) -> tuple[int, int]:
@@ -108,7 +111,7 @@ def _identifier(rows: list[_Field], number: int = 1, *, allow_default: bool = Fa
 
 
 def _table_name(table: str) -> str:
-    if not isinstance(table, str) or table not in _USAGES:
+    if not isinstance(table, str) or table not in ("Card", "Skin"):
         raise ValueError("仅支持 Card 卡面与 Skin 立绘配置。")
     return table
 
@@ -124,7 +127,8 @@ def _address(name: str, *, allow_empty: bool = False) -> str:
 
 def _record(raw: bytes, table: str) -> _Record:
     rows = _fields(raw)
-    record_id = _identifier(rows, 1 if table == "Card" else 3, allow_default=table == "Skin")
+    identifier_field = {"Card": 1, "Skin": 3, "CardAltArt": 2}[table]
+    record_id = _identifier(rows, identifier_field, allow_default=table == "Skin")
     if table == "Skin":
         _known(rows, 1, 5)  # Index 为 0 时可以省略。
     addresses = {}
@@ -139,7 +143,10 @@ def _record(raw: bytes, table: str) -> _Record:
         addresses[number] = _address(name, allow_empty=True)
     if table == "Skin" and record_id == 0 and not addresses:
         raise ValueError("默认立绘记录缺少图片字段，无法识别此配置结构。")
-    return _Record(record_id, raw, addresses)
+    if table == "CardAltArt":
+        for number in (5, 6):
+            _known(rows, number, 2)
+    return _Record(record_id, raw, addresses, table)
 
 
 def _parent(raw: bytes, table: str) -> tuple[int, dict[int, _Record]]:
@@ -153,15 +160,15 @@ def _parent(raw: bytes, table: str) -> tuple[int, dict[int, _Record]]:
         if row.number != 2:
             continue
         if row.wire != 2:
-            raise ValueError("Skin 立绘列表类型不匹配。")
+            raise ValueError("卡面或立绘子列表类型不匹配。")
         record = _record(row.value, table)
         if record.record_id in records:
-            raise ValueError("Skin 立绘列表含重复皮肤编号。")
+            raise ValueError("卡面或立绘子列表含重复编号。")
         records[record.record_id] = record
         if len(records) > MAX_RECORDS:
             raise ValueError("图片配置记录数量超出处理范围。")
     if not records:
-        raise ValueError("Skin 角色缺少立绘子记录，无法识别此配置结构。")
+        raise ValueError("卡面或立绘缺少子记录，无法识别此配置结构。")
     return parent_id, records
 
 
@@ -170,55 +177,60 @@ def _inspect(raw: bytes, table: str):
     if not isinstance(raw, bytes) or not raw or len(raw) > MAX_CONFIG_BYTES:
         raise ValueError(f"{table} 图片配置为空或超过 16 MB。")
     rows = _fields(raw)
-    parents, mirrors, records = {}, {}, {}
-    item_ids = set()
-    for row in rows:
-        if row.number not in (1, 2):
-            continue
-        if row.wire != 2:
-            raise ValueError(f"{table} 图片集合类型不匹配。")
-        if row.number == 1:
-            parent_id, children = _parent(row.value, table)
-            if parent_id in parents:
-                raise ValueError(f"{table} 图片列表含重复记录编号。")
-            # 默认/怪物皮肤没有道具编号。0 只能在各自父记录内唯一，
-            # 其它非零道具编号仍必须在整张表唯一。
-            child_ids = {record_id for record_id in children if record_id}
-            if item_ids.intersection(child_ids):
-                raise ValueError(f"{table} 图片列表含重复记录编号。")
-            item_ids.update(child_ids)
-            parents[parent_id] = row.value
-            records.update({(parent_id, record_id): record for record_id, record in children.items()})
-        else:
-            entry = _fields(row.value)
-            key = _identifier(entry)
-            value = _known(entry, 2, 2, required=True)
-            parent_id, _ = _parent(value.value, table)
-            if key != parent_id or key in mirrors:
-                raise ValueError(f"{table} 字典的记录编号不一致或重复。")
-            mirrors[key] = value.value
-        if len(parents) > MAX_RECORDS or len(mirrors) > MAX_RECORDS or len(records) > MAX_RECORDS:
-            raise ValueError("图片配置记录数量超出处理范围。")
-    if not parents or parents != mirrors:
-        raise ValueError(f"{table} 图片列表与字典镜像不一致，未修改。")
-    return rows, records, len(parents)
+    records, parent_count = {}, 0
+    sections = [(1, 2, table)] + ([(7, 8, "CardAltArt")] if table == "Card" else [])
+    for list_field, dict_field, kind in sections:
+        parents, mirrors, item_ids = {}, {}, set()
+        for row in rows:
+            if row.number not in (list_field, dict_field):
+                continue
+            if row.wire != 2:
+                raise ValueError(f"{table} 图片集合类型不匹配。")
+            if row.number == list_field:
+                parent_id, children = _parent(row.value, kind)
+                if parent_id in parents:
+                    raise ValueError(f"{table} 图片列表含重复记录编号。")
+                child_ids = {record_id for record_id in children if record_id}
+                if item_ids.intersection(child_ids):
+                    raise ValueError(f"{table} 图片列表含重复记录编号。")
+                item_ids.update(child_ids)
+                parents[parent_id] = row.value
+                for record_id, record in children.items():
+                    key = (parent_id, record_id) if kind == table else (kind, parent_id, record_id)
+                    records[key] = record
+            else:
+                entry = _fields(row.value)
+                key = _identifier(entry)
+                value = _known(entry, 2, 2, required=True)
+                parent_id, _ = _parent(value.value, kind)
+                if key != parent_id or key in mirrors:
+                    raise ValueError(f"{table} 字典的记录编号不一致或重复。")
+                mirrors[key] = value.value
+            if len(parents) > MAX_RECORDS or len(mirrors) > MAX_RECORDS or len(records) > MAX_RECORDS:
+                raise ValueError("图片配置记录数量超出处理范围。")
+        if parents != mirrors or (kind == table and not parents):
+            raise ValueError(f"{table} 图片列表与字典镜像不一致，未修改。")
+        parent_count += len(parents)
+    return rows, records, parent_count
 
 
 def inspect_visual_config(raw: bytes, table: str) -> dict:
     """按精确资源名合并可编辑卡面/立绘；头像及其它配置不进入目标列表。"""
     _, records, parent_count = _inspect(raw, table)
     targets = {}
-    for (parent_id, record_id), record in records.items():
+    for key, record in records.items():
+        parent_id, record_id = key[-2:]
         for number, name in record.addresses.items():
             if not name:
                 continue
-            target = targets.setdefault(name, {"ids": set(), "fields": set(), "parents": set()})
+            target = targets.setdefault(name, {"ids": set(), "fields": set(), "parents": set(), "usages": set()})
             target["ids"].add(record_id if record_id else f"{parent_id}:0")
             target["parents"].add(parent_id)
             target["fields"].add(number)
+            target["usages"].add(_USAGES[record.kind][number])
     return {"table": table, "parent_count": parent_count, "record_count": len(records),
             "targets": [{"name": name,
-                         "usage": " / ".join(_USAGES[table][number] for number in sorted(target["fields"])),
+                         "usage": " / ".join(sorted(target["usages"])),
                          "record_ids": sorted(i for i in target["ids"] if isinstance(i, int))
                                        + sorted(i for i in target["ids"] if isinstance(i, str)),
                          "parent_ids": sorted(target["parents"]),
@@ -230,20 +242,59 @@ def _replace_message(row: _Field, value: bytes) -> bytes:
     return row.raw if row.value == value else row.tag + _encode_varint(len(value)) + value
 
 
-def _replace_record(raw: bytes, table: str, old: bytes, new: bytes) -> bytes:
-    return b"".join(_replace_message(row, new)
-                    if row.number in _USAGES[table] and row.value == old else row.raw
-                    for row in _fields(raw))
+def _replace_record(raw: bytes, kind: str, old: bytes, new: bytes, original: _Record | None = None) -> bytes:
+    rows = _fields(raw)
+    changed_fields = {row.number for row in rows if row.number in _USAGES[kind] and row.value == old}
+    videos = {5, 6} if kind == "CardAltArt" and changed_fields.intersection((3, 4)) else set()
+    original_fields = {row.number: row for row in _fields(original.raw)} if original else {}
+    remaining_animation = any(row.number in (3, 4) and row.number not in changed_fields and row.value.startswith(b"ui://")
+                              for row in rows)
+    if videos and not new.startswith(b"ui://") and not remaining_animation and original is not None:
+        if ({row.number for row in rows if row.number in videos} != set(original_fields).intersection(videos)
+                or any(original.addresses.get(number, "").encode("utf-8") != new for number in changed_fields)):
+            raise ValueError("异画视频的恢复来源与当前动画不一致，未修改。")
+    output = []
+    for row in rows:
+        if row.number in changed_fields:
+            output.append(_replace_message(row, new))
+        elif row.number in videos:
+            if new.startswith(b"ui://"):
+                # 普通侧视频字段同时决定 SFW 的播放路径，切成逐帧需停用两侧。
+                output.append(_replace_message(row, b""))
+            elif remaining_animation:
+                if row.value:
+                    raise ValueError("异画动画仍在使用，但视频配置已被外部改变。")
+                output.append(row.raw)
+            elif original is not None:
+                saved_video = original_fields.get(row.number)
+                if saved_video is None or row.value:
+                    raise ValueError("异画视频的恢复来源与当前动画不一致，未修改。")
+                output.append(saved_video.raw)
+            elif row.value:
+                output.append(row.raw)
+            else:
+                raise ValueError("恢复异画卡面需要原始视频配置，未修改。")
+        else:
+            output.append(row.raw)
+    return b"".join(output)
 
 
-def _replace_parent(raw: bytes, table: str, old: bytes, new: bytes) -> bytes:
-    if table == "Card":
-        return _replace_record(raw, table, old, new)
-    return b"".join(_replace_message(row, _replace_record(row.value, table, old, new))
-                    if row.number == 2 else row.raw for row in _fields(raw))
+def _replace_parent(raw: bytes, kind: str, old: bytes, new: bytes, originals: dict) -> bytes:
+    parent_id, _ = _parent(raw, kind)
+    if kind == "Card":
+        return _replace_record(raw, kind, old, new, originals.get((parent_id, parent_id)))
+    output = []
+    for row in _fields(raw):
+        if row.number == 2:
+            record = _record(row.value, kind)
+            key = (parent_id, record.record_id) if kind == "Skin" else (kind, parent_id, record.record_id)
+            output.append(_replace_message(row, _replace_record(row.value, kind, old, new, originals.get(key))))
+        else:
+            output.append(row.raw)
+    return b"".join(output)
 
 
-def replace_visual_address(raw: bytes, table: str, old_name: str, new_name: str) -> bytes:
+def replace_visual_address(raw: bytes, table: str, old_name: str, new_name: str, *, original_raw: bytes | None = None) -> bytes:
     """同步修改精确匹配的所有合法叶字段；保留所有非目标字段的原字节。"""
     old_name, new_name = _address(old_name), _address(new_name)
     rows, records, _ = _inspect(raw, table)
@@ -252,16 +303,22 @@ def replace_visual_address(raw: bytes, table: str, old_name: str, new_name: str)
     if old_name == new_name:
         return raw
     old, new = old_name.encode("utf-8"), new_name.encode("utf-8")
+    originals = _inspect(original_raw, table)[1] if original_raw is not None else {}
+    sections = {1: (table, False), 2: (table, True)}
+    if table == "Card":
+        sections.update({7: ("CardAltArt", False), 8: ("CardAltArt", True)})
     output = []
     for row in rows:
-        if row.number == 1:
-            body = _replace_parent(row.value, table, old, new)
-        elif row.number == 2:
-            body = b"".join(_replace_message(field, _replace_parent(field.value, table, old, new))
-                            if field.number == 2 else field.raw for field in _fields(row.value))
-        else:
+        section = sections.get(row.number)
+        if section is None:
             output.append(row.raw)
             continue
+        kind, mirrored = section
+        if mirrored:
+            body = b"".join(_replace_message(field, _replace_parent(field.value, kind, old, new, originals))
+                            if field.number == 2 else field.raw for field in _fields(row.value))
+        else:
+            body = _replace_parent(row.value, kind, old, new, originals)
         output.append(_replace_message(row, body))
     changed = b"".join(output)
     _, saved_records, _ = _inspect(changed, table)
@@ -291,7 +348,7 @@ def _objects(env) -> dict:
 
 @_release_readers
 def replace_visual_config_bundle(source: str | Path, out: str | Path, table: str,
-                                 old: str, new: str) -> dict:
+                                 old: str, new: str, *, restore_from: str | Path | None = None) -> dict:
     """保存前回读验证；仅允许输出草稿，不覆盖输入资源包。"""
     table = _table_name(table)
     source, out = Path(source), Path(out)
@@ -302,7 +359,11 @@ def replace_visual_config_bundle(source: str | Path, out: str | Path, table: str
     original_objects = _objects(env)
     target_key = (target.assets_file.name, target.path_id)
     data = target.read()
-    changed = replace_visual_address(text_asset_bytes(data), table, old, new)
+    original_raw = None
+    if restore_from is not None:
+        original_env = _load_bundle(Path(restore_from))
+        original_raw = text_asset_bytes(_config_asset(original_env, table).read())
+    changed = replace_visual_address(text_asset_bytes(data), table, old, new, original_raw=original_raw)
     data.m_Script = changed.decode("utf-8", errors="surrogateescape") if isinstance(data.m_Script, str) else changed
     data.save()
     payload = env.file.save()

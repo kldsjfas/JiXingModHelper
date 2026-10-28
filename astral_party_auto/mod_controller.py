@@ -704,8 +704,10 @@ class ModController:
             }
             if cat == "emoji":
                 self.selection["emote"] = self.emote_workspace.selection(info.name)
-            elif info.name.startswith(("UT_HandCard_", "UT_Hero_Card_", "UT_Hero_InGameCard_", "UT_Monster_Card_")):
-                self.selection["visual_animation"] = self.visual_animation_workspace.selection(info.name)
+            else:
+                dynamic = self.visual_animation_workspace.selection(info.name)
+                if dynamic.get("recognized") or dynamic.get("editable"):
+                    self.selection["visual_animation"] = dynamic
             return self.selection
 
         if asset_type == "text":

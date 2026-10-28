@@ -85,20 +85,26 @@ def _legacy_aa_dir_for_exe(exe_path: str | Path) -> Path:
     return data_dir.joinpath(*AA_SUBPATH)
 
 
+def _client_cache_dir_for_exe(exe_path: str | Path) -> Path:
+    exe = Path(exe_path)
+    return exe.parent / f"{exe.stem}_Data" / "com.unity.addressables" / "AssetBundles"
+
+
 def bundle_dirs_for_exe(
     exe_path: str | Path,
     *,
     user_profile: str | Path | None = None,
 ) -> tuple[Path, ...]:
-    """按优先级返回资源目录：热更新缓存优先，Steam/TapTap 基础包兜底。"""
+    """优先读取客户端数据目录缓存，再回退用户缓存与安装时的基础包。"""
+    client_cache_dir = _client_cache_dir_for_exe(exe_path)
     hot_update_dir = hot_update_dir_for_exe(exe_path, user_profile=user_profile)
     legacy_dir = _legacy_aa_dir_for_exe(exe_path)
-    directories = []
-    if hot_update_dir.is_dir():
-        directories.append(hot_update_dir)
-    if legacy_dir.is_dir():
-        directories.append(legacy_dir)
-    return tuple(directories) or (legacy_dir,)
+    directories = tuple(
+        directory
+        for directory in _normalize_bundle_dirs((client_cache_dir, hot_update_dir, legacy_dir))
+        if directory.is_dir()
+    )
+    return directories or (legacy_dir,)
 
 
 def aa_dir_for_exe(
@@ -292,13 +298,16 @@ def extract_texture_png(
 
 
 def _latest_catalog_path(cache_root: Path) -> Path | None:
-    catalogs = list(cache_root.parent.glob("catalog_*.json"))
-    if not catalogs:
-        return None
-    try:
-        return max(catalogs, key=lambda path: path.stat().st_mtime_ns)
-    except OSError:
-        return None
+    # 新版可将资源文件缓存迁到客户端，但 catalog 仍留在用户目录。
+    # 此处只查当前目录的相邻 catalog，由调用方按资源目录顺序继续回退。
+    catalogs = []
+    for path in cache_root.parent.glob("catalog_*.json"):
+        try:
+            if path.is_file():
+                catalogs.append((path.stat().st_mtime_ns, path.name, path))
+        except OSError:
+            continue
+    return max(catalogs)[2] if catalogs else None
 
 
 def _active_catalog_bundle_names(cache_root: Path) -> set[str] | None:
@@ -325,8 +334,16 @@ def _active_catalog_bundle_names(cache_root: Path) -> set[str] | None:
 
 def _normalize_bundle_dirs(directories: BundleDirectories) -> tuple[Path, ...]:
     if isinstance(directories, (str, Path)):
-        return (Path(directories),)
-    return tuple(Path(directory) for directory in directories)
+        directories = (directories,)
+    unique = []
+    seen = set()
+    for directory in directories:
+        path = Path(directory)
+        key = os.path.normcase(str(path.resolve()))
+        if key not in seen:
+            seen.add(key)
+            unique.append(path)
+    return tuple(unique)
 
 
 def _active_names_for_dirs(directories: tuple[Path, ...]) -> set[str] | None:
@@ -385,10 +402,45 @@ def iter_bundle_files(aa_dirs: BundleDirectories) -> Iterable[Path]:
     return [entry.path for entry in iter_bundle_entries(aa_dirs)]
 
 
+def _bundle_inventory_key(entries: Iterable[BundleEntry]) -> str:
+    entries = list(entries)
+    entries_by_folder: dict[Path, list[BundleEntry]] = {}
+    for entry in entries:
+        entries_by_folder.setdefault(entry.path.parent, []).append(entry)
+    file_stamps = {}
+    for folder, siblings in entries_by_folder.items():
+        if len(siblings) < 2:
+            continue
+        names = {entry.path.name for entry in siblings}
+        try:
+            # Windows 目录枚举带有普通文件的长度和时间，避免逐个查询数千个基础包。
+            with os.scandir(folder) as files:
+                for item in files:
+                    if item.name not in names:
+                        continue
+                    try:
+                        file_stamps[folder / item.name] = item.stat()
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    inventory = hashlib.sha256()
+    for entry in entries:
+        try:
+            stamp = file_stamps.get(entry.path) or entry.path.stat()
+            details = (entry.name, str(entry.path), stamp.st_size, stamp.st_mtime_ns)
+        except OSError:
+            details = (entry.name, str(entry.path), "missing")
+        inventory.update(json.dumps(details, ensure_ascii=False).encode("utf-8"))
+        inventory.update(b"\n")
+    return inventory.hexdigest()
+
+
 def bundle_source_key(aa_dirs: BundleDirectories) -> str:
-    """把官方版本标识与实际资源目录内容一起用于索引失效。"""
+    """把官方版本标识与实际生效的资源文件信息一起用于索引失效。"""
+    directories = _normalize_bundle_dirs(aa_dirs)
     parts = []
-    for aa in _normalize_bundle_dirs(aa_dirs):
+    for aa in directories:
         catalog_path = _latest_catalog_path(aa)
         if catalog_path is not None:
             hash_path = catalog_path.with_suffix(".hash")
@@ -411,6 +463,7 @@ def bundle_source_key(aa_dirs: BundleDirectories) -> str:
         except OSError:
             directory_stamp = 0
         parts.append(f"directory|{aa}|{directory_stamp}")
+    parts.append(f"bundles|{_bundle_inventory_key(iter_bundle_entries(directories))}")
     return "||".join(parts)
 
 
