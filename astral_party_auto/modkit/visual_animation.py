@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import math
 from datetime import datetime
 import copy
@@ -15,9 +14,9 @@ from .animation import _load_bundle, _preview, _read_replacement, _release_reade
 from .bundles import bundle_source_key
 from .dynamic import text_asset_bytes
 from .emote_config import _objects
-from .catalog_mods import active_catalog_path, atomic_bytes
+from .catalog_mods import atomic_bytes
 from .emote_workspace import item_bundle_names
-from .visual_catalog import MAX_CATALOG_BYTES, visual_bundle_locations
+from .visual_catalog import VisualCatalogSource, find_visual_catalog_source
 
 MAX_ATLAS_EDGE = 4096
 MAX_MOVIE_FRAMES = 120
@@ -225,11 +224,15 @@ class VisualAnimationWorkspace:
         self._context = None
         self._source_key = None
 
-    def _locations(self) -> dict:
-        path = active_catalog_path(self.controller.aa_dirs)
-        if path.stat().st_size > MAX_CATALOG_BYTES:
-            raise ValueError("卡面资源目录超过 32 MB。")
-        return visual_bundle_locations(json.loads(path.read_text(encoding="utf-8-sig")))
+    def _catalog_source(self) -> VisualCatalogSource:
+        executable = getattr(self.controller, "game_executable", None)
+        if not isinstance(executable, (str, Path)):
+            executable = None
+        return find_visual_catalog_source(self.controller.aa_dirs, executable)
+
+    def _locations(self, source: VisualCatalogSource | None = None) -> dict:
+        source = source or self._catalog_source()
+        return source.read(self.controller.original_bundle_path).locations
 
     def _bundle_for(self, key: str, kind: str, locations: dict | None = None) -> str:
         expected = "UnityEngine.Texture2D" if key == "Common_atlas0" else "UnityEngine.TextAsset"
@@ -246,10 +249,11 @@ class VisualAnimationWorkspace:
         from .fairygui_movieclip import inspect_movieclip_package
         from .visual_config import inspect_visual_config
         self.controller._require_game()
-        key = bundle_source_key(self.controller.aa_dirs)
+        catalog_source = self._catalog_source()
+        key = (bundle_source_key(self.controller.aa_dirs), catalog_source.fingerprint())
         if self._source_key == key and self._context is not None:
             return self._context
-        locations = self._locations()
+        locations = self._locations(catalog_source)
         config_names = {locations[key] for key in ("GameData_CN", "GameData_INT") if key in locations}
         if len(config_names) != 1:
             raise ValueError("当前目录缺少唯一的卡面配置，请更新游戏资源后刷新检测。")
@@ -269,7 +273,8 @@ class VisualAnimationWorkspace:
         env = _load_bundle(originals[config_name])
         tables = {name: inspect_visual_config(text_asset_bytes(_object(env, "TextAsset", name).read()), name) for name in ("Card", "Skin")}
         self._context = {"config_bundle": config_name, "ui_bundle": ui_name, "atlas_bundle": atlas_name,
-                         "originals": originals, "base_size": atlas.size, "package_id": package["package_id"], "tables": tables}
+                         "originals": originals, "base_size": atlas.size, "package_id": package["package_id"], "tables": tables,
+                         "catalog_source": {"path": str(catalog_source.path), "kind": catalog_source.kind}}
         self._source_key = key
         return self._context
 
@@ -415,6 +420,7 @@ class VisualAnimationWorkspace:
         if size != source_size:
             notice += f"原卡面 {source_size[0]} × {source_size[1]}，动画已等比缩小，由游戏按显示框缩放。"
         return {"item": item, "staged": {context["config_bundle"]: config_output, context["ui_bundle"]: ui_output, context["atlas_bundle"]: atlas_output},
+                "catalog_source_key": self._source_key,
                 "fingerprints": fingerprints, "output_hashes": {str(path): _digest(path) for path in (config_output, ui_output, atlas_output)},
                 "draft_items": draft_items, "source_paths": {name: str(path) for name, path in sources.items()},
                 "animation": preview, "notice": notice}
@@ -424,6 +430,8 @@ class VisualAnimationWorkspace:
         if candidate["item"]["name"] != selection["name"] or candidate["item"]["source_bundle"] != selection["bundle"]:
             raise ValueError("当前选择已改变，请重新导入动图。")
         context = self.context()
+        if candidate.get("catalog_source_key") != self._source_key:
+            raise ValueError("卡面目录来源在制作后发生变化，请刷新检测并重新导入动图。")
         if self.controller.draft_items != candidate["draft_items"] or any(
                 str(self._source(name, context)) != path for name, path in candidate["source_paths"].items()):
             raise ValueError("作品集已改变，请重新导入动图。")

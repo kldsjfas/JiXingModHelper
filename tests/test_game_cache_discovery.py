@@ -15,6 +15,7 @@ from astral_party_auto.modkit.bundles import (
     bundle_file_map,
     bundle_source_key,
     hot_update_dir_for_exe,
+    unity_catalog_roots_for_exe,
 )
 from astral_party_auto.modkit.catalog_mods import active_catalog_path
 
@@ -29,6 +30,8 @@ class GameCacheDiscoveryTests(unittest.TestCase):
         self.executable.write_bytes(b"")
         self.profile = self.root / "profile"
         self.data = self.executable.parent / "AstralParty_CN_Data"
+        self.data.mkdir()
+        (self.data / "app.info").write_text("feimo\nAstralParty_CN\n", encoding="utf-8")
         self.client_cache = self.data / "com.unity.addressables" / "AssetBundles"
         self.user_cache = hot_update_dir_for_exe(self.executable, user_profile=self.profile)
         self.base = self.data / "StreamingAssets" / "aa" / "StandaloneWindows64"
@@ -63,6 +66,18 @@ class GameCacheDiscoveryTests(unittest.TestCase):
             directory.mkdir(parents=True)
         self.assertEqual(self.directories(), (self.client_cache, self.user_cache, self.base))
         self.assertEqual(aa_dir_for_exe(self.executable, user_profile=self.profile), self.client_cache)
+
+    def test_catalog_roots_keep_user_metadata_without_resource_subdirectory(self):
+        self.client_cache.mkdir(parents=True)
+        self.base.mkdir(parents=True)
+        self.user_cache.parent.mkdir(parents=True)
+        catalog = self.user_cache.parent / "catalog_3.3.0.json"
+        catalog.write_text("{}", encoding="utf-8")
+        self.assertFalse(self.user_cache.exists())
+        self.assertEqual(self.directories(), (self.client_cache, self.base))
+        self.assertEqual(unity_catalog_roots_for_exe(self.executable, user_profile=self.profile),
+                         (self.client_cache.parent, self.user_cache.parent))
+        self.assertTrue((unity_catalog_roots_for_exe(self.executable, user_profile=self.profile)[1] / catalog.name).is_file())
 
     def test_client_only_cache_uses_executable_stem_for_each_client(self):
         for client in ("AstralParty", "吉星派对"):

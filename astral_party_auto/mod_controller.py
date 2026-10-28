@@ -78,6 +78,7 @@ class ModController:
     def __init__(self, log: Callable[[str], None]):
         self.log = log
         self.game_install = None
+        self.game_executable: Path | None = None
         self.aa_dir: Path | None = None
         self.aa_dirs: tuple[Path, ...] = ()
         self.manager: ModManager | None = None
@@ -182,6 +183,7 @@ class ModController:
                 return False
             self.aa_dirs = directories
             self.aa_dir = directories[0]
+            self.game_executable = executable.resolve()
             self.manager = ModManager(directories, DATA_DIR)
             return True
 
@@ -198,6 +200,7 @@ class ModController:
             )
             connected = connect(other)
         if not connected:
+            self.game_executable = None
             self.aa_dir = None
             self.aa_dirs = ()
             self.manager = None
