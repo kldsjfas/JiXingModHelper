@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from datetime import datetime
 import copy
 from pathlib import Path
@@ -13,14 +14,15 @@ from PIL import Image
 from .animation import _load_bundle, _preview, _read_replacement, _release_readers
 from .bundles import bundle_source_key
 from .dynamic import text_asset_bytes
-from .emote_addressables import _catalog_parts
-from .emote_catalog import discover_emote_locations
 from .emote_config import _objects
 from .catalog_mods import active_catalog_path, atomic_bytes
 from .emote_workspace import item_bundle_names
+from .visual_catalog import MAX_CATALOG_BYTES, visual_bundle_locations
 
 MAX_ATLAS_EDGE = 4096
 MAX_MOVIE_FRAMES = 120
+_VISUAL_PREFIXES = ("UT_HandCard", "UT_Hero_Card", "UT_Hero_ThinCard", "UT_Hero_InGameCard",
+                    "UT_Monster_Card", "UT_CardFront", "UT_IAltArt")
 
 
 def animation_identity(texture_name: str) -> str:
@@ -79,6 +81,51 @@ def sample_frames(frames: list, durations: list, count: int) -> tuple[list, list
     if max(times) > 60000 or sum(times) > 30000:
         raise ValueError("动态素材最长支持 30 秒。")
     return [frames[index] for index in indices], times
+
+
+def fit_animation_frames(base_size: tuple[int, int], occupied: list[list[int]],
+                         source_size: tuple[int, int], count: int, *,
+                         minimum_frames: int = 2) -> tuple[tuple[int, int], list[list[int]]]:
+    """先保留原分辨率；大图无法容纳两帧时，等比缩小动画画布。"""
+    width, height = source_size
+    if min(width, height) <= 0:
+        raise ValueError("卡面尺寸或动画帧数无效。")
+    if count < 2:
+        raise ValueError("至少需要两帧动画。")
+    scale = min(1.0, (MAX_ATLAS_EDGE - 2) / max(width, height))
+    previous = None
+    while True:
+        size = (max(1, round(width * scale)), max(1, round(height * scale)))
+        if size == previous:
+            break
+        placements = pack_frames(base_size, occupied, size, min(count, MAX_MOVIE_FRAMES))
+        if len(placements) >= minimum_frames:
+            return size, placements
+        previous = size
+        scale *= 0.8
+        if max(size) <= 16:
+            break
+    raise ValueError("当前图集已没有足够空间制作动画，请移除其它动态作品或新建作品集。")
+
+
+def plan_card_video(base_size: tuple[int, int], occupied: list[list[int]],
+                    source_size: tuple[int, int], duration_ms: float) -> dict:
+    """按实际时长先规划图集画布和帧率，不解码完整尺寸的中间帧。"""
+    from .emote_media import MAX_OUTPUT_PIXELS, MAX_VIDEO_FRAME_PIXELS
+    if not math.isfinite(duration_ms) or duration_ms <= 0:
+        raise ValueError("视频时长无效。")
+    count = min(MAX_MOVIE_FRAMES, max(2, math.floor(duration_ms * 12 / 1000 + 0.5)))
+    fps = min(60.0, count * 1000 / duration_ms)
+    count = math.floor(duration_ms * fps / 1000 + 0.5)
+    if count < 2:
+        raise ValueError("视频太短，无法保留两帧动画，请延长素材后重试。")
+    pixel_budget = min(MAX_VIDEO_FRAME_PIXELS, MAX_OUTPUT_PIXELS // count)
+    scale = min(1.0, math.sqrt(pixel_budget / (source_size[0] * source_size[1])))
+    bounded_size = (max(1, math.floor(source_size[0] * scale)), max(1, math.floor(source_size[1] * scale)))
+    size, _ = fit_animation_frames(base_size, occupied, bounded_size, count, minimum_frames=count)
+    if size[0] * size[1] > MAX_VIDEO_FRAME_PIXELS or size[0] * size[1] * count > MAX_OUTPUT_PIXELS:
+        raise ValueError("动画输出超过解码像素限制，请缩短视频或腾出图集空间。")
+    return {"width": size[0], "height": size[1], "fps": fps}
 
 
 def _clear_clip_pixels(atlas: Image.Image, package: dict, clip: dict, base_size: tuple[int, int]) -> None:
@@ -178,23 +225,22 @@ class VisualAnimationWorkspace:
         self._context = None
         self._source_key = None
 
-    def _bundle_for(self, key: str, kind: str) -> str:
-        catalog = json.loads(active_catalog_path(self.controller.aa_dirs).read_text(encoding="utf-8-sig"))
-        _, _, buckets, entries = _catalog_parts(catalog)
-        matches = [ids for _, name, ids in buckets if name == key]
-        if len(matches) != 1 or len(matches[0]) != 1:
-            raise ValueError(f"当前目录没有唯一的资源地址：{key}")
-        entry = entries[matches[0][0]]
-        if catalog["m_resourceTypes"][entry[6]].get("m_ClassName") != kind or entry[2] < 0:
-            raise ValueError("公共资源的加载方式已变化。")
-        names = []
-        for dependency in buckets[entry[2]][2]:
-            name = catalog["m_InternalIds"][entries[dependency][0]].replace("\\", "/").rsplit("/", 1)[-1]
-            if self.controller.original_bundle_path(name) is not None:
-                names.append(name)
-        if len(names) != 1:
-            raise ValueError("公共资源包含未验证的额外依赖。")
-        return names[0]
+    def _locations(self) -> dict:
+        path = active_catalog_path(self.controller.aa_dirs)
+        if path.stat().st_size > MAX_CATALOG_BYTES:
+            raise ValueError("卡面资源目录超过 32 MB。")
+        return visual_bundle_locations(json.loads(path.read_text(encoding="utf-8-sig")))
+
+    def _bundle_for(self, key: str, kind: str, locations: dict | None = None) -> str:
+        expected = "UnityEngine.Texture2D" if key == "Common_atlas0" else "UnityEngine.TextAsset"
+        if kind != expected:
+            raise ValueError("卡面资源类型不匹配。")
+        name = (locations if locations is not None else self._locations()).get(key)
+        if name is None:
+            raise ValueError(f"当前目录缺少资源地址：{key}")
+        if self.controller.original_bundle_path(name) is None:
+            raise ValueError(f"卡面所需资源尚未下载到本机：{key}。请先进入游戏加载相关界面，再刷新检测。")
+        return name
 
     def context(self) -> dict:
         from .fairygui_movieclip import inspect_movieclip_package
@@ -203,9 +249,13 @@ class VisualAnimationWorkspace:
         key = bundle_source_key(self.controller.aa_dirs)
         if self._source_key == key and self._context is not None:
             return self._context
-        config_name = discover_emote_locations(self.controller.aa_dirs)["config_bundle"]
-        ui_name = self._bundle_for("Common_fui", "UnityEngine.TextAsset")
-        atlas_name = self._bundle_for("Common_atlas0", "UnityEngine.Texture2D")
+        locations = self._locations()
+        config_names = {locations[key] for key in ("GameData_CN", "GameData_INT") if key in locations}
+        if len(config_names) != 1:
+            raise ValueError("当前目录缺少唯一的卡面配置，请更新游戏资源后刷新检测。")
+        config_name = next(iter(config_names))
+        ui_name = self._bundle_for("Common_fui", "UnityEngine.TextAsset", locations)
+        atlas_name = self._bundle_for("Common_atlas0", "UnityEngine.Texture2D", locations)
         originals = {name: self.controller.original_bundle_path(name) for name in (config_name, ui_name, atlas_name)}
         if any(path is None for path in originals.values()):
             raise ValueError("缺少原始配置或公共界面资源。")
@@ -224,18 +274,20 @@ class VisualAnimationWorkspace:
         return self._context
 
     def selection(self, name: str) -> dict:
+        recognized = isinstance(name, str) and name.startswith(_VISUAL_PREFIXES)
         try:
             context = self.context()
             targets = [(table, target) for table, info in context["tables"].items()
                        for target in info["targets"] if target["name"] == name]
             if not targets:
-                return {"editable": False, "reason": "此资源尚无经过核对的原生动态播放入口。"}
+                return {"editable": False, "recognized": recognized,
+                        "reason": "当前游戏配置没有引用这张卡面，可能是尚未加载的资源或旧版图片。请进入游戏加载对应卡牌后刷新检测与索引。"}
             draft = next((item for item in self.controller.draft_items if item.get("kind") == "visual_animation" and item.get("name") == name), None)
-            return {"editable": True, "experimental": True, "tables": [table for table, _ in targets],
+            return {"editable": True, "recognized": True, "experimental": True, "tables": [table for table, _ in targets],
                     "label": "动态卡面" if targets[0][0] == "Card" else "动态立绘", "draft": bool(draft),
                     "reason": "使用游戏原生逐帧播放，保留玩法与拥有状态。共享同一图片的界面会一起改变；游戏内效果需实测。"}
         except (OSError, ValueError, KeyError) as exc:
-            return {"editable": False, "reason": str(exc)}
+            return {"editable": False, "recognized": recognized, "reason": str(exc)}
 
     def _selection(self) -> tuple[dict, dict]:
         selection = self.controller.selection or {}
@@ -298,20 +350,25 @@ class VisualAnimationWorkspace:
         if existing:
             raw = remove_movieclip(raw, item_id=item_id)
             package = inspect_movieclip_package(raw)
-        size = (selection["width"], selection["height"])
+        source_size = (selection["width"], selection["height"])
+        occupied = [row["rect"] for row in package["sprites"] if row["id"].startswith("jm")]
+        decoded_size = source_size
+        video_info = None
         kind = detect_emote_media(source)
         if kind == "video":
-            frames, details = adapt_video_source(source, {"width": size[0], "height": size[1], "fps": 12}, work_dir=folder)
-            durations = [1000 / 12] * len(frames)
+            frames, video_info = adapt_video_source(
+                source, {"width": source_size[0], "height": source_size[1], "fps": 12}, work_dir=folder,
+                output_planner=lambda duration: plan_card_video(context["base_size"], occupied, source_size, duration))
+            decoded_size = (video_info["width"], video_info["height"])
+            total_ms = round(video_info["source_duration_ms"])
+            durations = [round((index + 1) * total_ms / len(frames)) - round(index * total_ms / len(frames))
+                         for index in range(len(frames))]
         elif kind == "usm":
             raise ValueError("卡面和立绘目前使用逐帧图片，请导入 GIF、APNG、WebP 或普通视频。")
         else:
             frames, durations, _ = _read_replacement(source)
         original_count = len(frames)
-        occupied = [row["rect"] for row in package["sprites"] if row["id"].startswith("jm")]
-        placements = pack_frames(context["base_size"], occupied, size, min(len(frames), MAX_MOVIE_FRAMES))
-        if len(placements) < 2:
-            raise ValueError("当前图集放不下两张完整尺寸的动画帧，请选择尺寸较小的资源或移除其它动态作品。")
+        size, placements = fit_animation_frames(context["base_size"], occupied, decoded_size, len(frames))
         frames, durations = sample_frames(frames, durations, len(placements))
         placements = placements[:len(frames)]
         atlas = Image.new("RGBA", (MAX_ATLAS_EDGE, MAX_ATLAS_EDGE))
@@ -345,13 +402,18 @@ class VisualAnimationWorkspace:
         item = {"kind": "visual_animation", "bundle": context["config_bundle"], "name": selection["name"],
                 "source_bundle": selection["bundle"], "extra_bundles": [context["ui_bundle"], context["atlas_bundle"]],
                 "tables": support["tables"], "movieclip_url": url, "frame_count": len(frames), "duration_ms": sum(durations),
-                "width": size[0], "height": size[1], "note": source.name, "at": datetime.now().isoformat(timespec="seconds")}
+                "width": size[0], "height": size[1], "source_width": source_size[0], "source_height": source_size[1],
+                "note": source.name, "at": datetime.now().isoformat(timespec="seconds")}
         if any(_digest(Path(path)) != digest for path, digest in fingerprints.items()):
             raise ValueError("素材或草稿在制作过程中改变，请重新导入。")
         preview = self.preview(selection["name"], ui_output, atlas_output)
         notice = f"输出 {len(frames)} 帧 · {sum(durations) / 1000:.2f} 秒 · {size[0]} × {size[1]}。"
         if len(frames) < original_count:
             notice += "已按图集剩余空间抽帧。"
+        if video_info is not None:
+            notice += f"视频按实际时长采样为 {video_info['fps']:.2f} 帧/秒，忽略音轨。"
+        if size != source_size:
+            notice += f"原卡面 {source_size[0]} × {source_size[1]}，动画已等比缩小，由游戏按显示框缩放。"
         return {"item": item, "staged": {context["config_bundle"]: config_output, context["ui_bundle"]: ui_output, context["atlas_bundle"]: atlas_output},
                 "fingerprints": fingerprints, "output_hashes": {str(path): _digest(path) for path in (config_output, ui_output, atlas_output)},
                 "draft_items": draft_items, "source_paths": {name: str(path) for name, path in sources.items()},
@@ -405,7 +467,8 @@ class VisualAnimationWorkspace:
             write_atlas(self._source(context["atlas_bundle"], context), atlas_output, atlas)
             for position, table in enumerate(item["tables"]):
                 destination = config_output if position == len(item["tables"]) - 1 else folder / f"config-{position}.bundle"
-                replace_visual_config_bundle(config_source, destination, table, item["movieclip_url"], item["name"])
+                replace_visual_config_bundle(config_source, destination, table, item["movieclip_url"], item["name"],
+                                             restore_from=context["originals"][context["config_bundle"]])
                 config_source = destination
             active = set().union(*(item_bundle_names(row) for row in items)) if items else set()
             staged = {context["config_bundle"]: config_output, context["ui_bundle"]: ui_output, context["atlas_bundle"]: atlas_output}

@@ -72,7 +72,7 @@ function loadUi() {
     },
   });
   const source = fs.readFileSync(path.join(__dirname, "../astral_party_auto/webui/app.js"), "utf8");
-  const hooks = "state, bindEvents, openCropModal, closeCropModal, cropFrameGeometry, cropBoxInPixels, setCropZoom, resetCropFull, resizeCropStage, startCropDrag, onCropPointerMove, cropReplacement, cropReplaceDraft";
+  const hooks = "state, bindEvents, showPage, refreshPack, showDraftDetail, openCropModal, closeCropModal, cropFrameGeometry, cropBoxInPixels, setCropZoom, resetCropFull, resizeCropStage, startCropDrag, onCropPointerMove, cropReplacement, cropReplaceDraft";
   vm.runInContext(source.replace(/\}\)\(\);\s*$/, `globalThis.ui = { ${hooks}, get geometry() { return cropState; }, get pending() { return cropPending; } };\n})();`), context);
   const ui = context.ui;
   ui.bindEvents();
@@ -246,10 +246,96 @@ async function checkEntryPointSessions() {
   assert.equal(ui.state.draft.items[0].name, "saved-after-leave", "Saved draft was discarded after navigation");
 }
 
+async function checkDraftRefreshRaces() {
+  const oldDraft = { items: [{ kind: "texture", name: "A" }, { kind: "texture", name: "B" }] };
+  {
+    const { ui, loaders, requests, responses } = loadUi();
+    ui.state.page = "pack";
+    ui.state.draft = oldDraft;
+    ui.state.draftIndex = 0;
+    const late = deferred();
+    responses.push(late.promise);
+    const refreshing = ui.refreshPack();
+    ui.showPage("dashboard");
+    ui.openCropModal({ url: "new-page-crop", onConfirm() {} });
+    loaders.at(-1).finish(800, 600);
+    late.resolve(oldDraft);
+    await refreshing;
+    assert.ok(ui.pending, "An old pack refresh closed the new page's crop modal");
+    assert.equal(requests.length, 1, "A refresh after leaving the pack requested an unrelated detail");
+  }
+  {
+    const { ui, responses } = loadUi();
+    ui.state.page = "pack";
+    ui.state.draft = oldDraft;
+    const late = deferred();
+    responses.push(late.promise);
+    const refreshing = ui.refreshPack();
+    const savedDraft = { items: [{ kind: "texture", name: "newly-saved" }] };
+    ui.state.draft = savedDraft;
+    late.resolve(oldDraft);
+    await refreshing;
+    assert.equal(ui.state.draft, savedDraft, "A late read replaced a successful save's new draft");
+  }
+  {
+    const { ui, requests, responses } = loadUi();
+    ui.state.page = "pack";
+    ui.state.draft = oldDraft;
+    ui.state.draftIndex = 0;
+    const late = deferred();
+    responses.push(late.promise);
+    const refreshing = ui.refreshPack();
+    responses.push({ item: oldDraft.items[1] });
+    await ui.showDraftDetail(1);
+    late.resolve({ items: [...oldDraft.items] });
+    await refreshing;
+    assert.equal(ui.state.draftIndex, 1);
+    assert.equal(requests.filter((request) => request.url === "/api/get_draft_detail").length, 1,
+      "Refresh reloaded the detail after the user had selected another item");
+  }
+  {
+    const { ui, loaders, responses } = loadUi();
+    ui.state.page = "pack";
+    ui.state.draft = oldDraft;
+    ui.state.draftIndex = 0;
+    const late = deferred();
+    responses.push(late.promise);
+    const refreshing = ui.refreshPack();
+    responses.push({ preview_data: "new-crop", target_width: 400, target_height: 400, crop_token: "new-token" });
+    await ui.cropReplaceDraft();
+    loaders.at(-1).finish(800, 600);
+    late.resolve({ items: [...oldDraft.items] });
+    await refreshing;
+    assert.ok(ui.pending, "A background pack refresh canceled a newly opened crop on the same page");
+    assert.equal(ui.state.draft, oldDraft, "Refresh changed item identities under an active crop");
+  }
+  {
+    const { ui, responses } = loadUi();
+    ui.state.page = "pack";
+    ui.state.draft = oldDraft;
+    const first = deferred();
+    responses.push(first.promise);
+    const refreshing = ui.refreshPack();
+    const newerDraft = { name: "latest", items: [] };
+    responses.push(newerDraft);
+    await ui.refreshPack();
+    first.resolve(oldDraft);
+    await refreshing;
+    assert.equal(ui.state.draft, newerDraft, "The oldest of two refreshes won");
+    // An ordinary refresh still updates both the list and the selected preview.
+    ui.state.draftIndex = 0;
+    responses.push(oldDraft, { item: oldDraft.items[0] });
+    await ui.refreshPack();
+    assert.equal(ui.state.draft, oldDraft);
+    assert.equal(ui.state.draftIndex, 0);
+  }
+}
+
 (async () => {
   await checkGeometryAndGestures();
   checkAspectMatrix();
   await checkLoadingAndCancellation();
   await checkEntryPointSessions();
-  console.log("PASS: 固定比例、拖图/缩放边界、32组横竖/小图、像素坐标、缩放/视窗重置、取消加载、两入口令牌与迟到回调。");
+  await checkDraftRefreshRaces();
+  console.log("PASS: 固定裁剪几何/加载取消/两入口令牌；作品集刷新不覆盖新保存、不干扰离页或新裁剪、不重载已切换的详情。");
 })().catch((error) => { console.error(error); process.exitCode = 1; });

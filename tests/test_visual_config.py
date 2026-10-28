@@ -62,6 +62,19 @@ def fixture(name):
     return table(rows, extra=message(3, NAME) + UNKNOWN)
 
 
+def alt_art_table(*, image="UT_Alt_Image", sfw="UT_Alt_Sfw", front="UT_CardFront_Test", video="VAlt_Test", video_sfw="VAlt_Sfw"):
+    child = (fixed(1, 1) + fixed(2, 90001) + message(3, image) + message(4, sfw)
+             + message(5, video) + message(6, video_sfw) + message(7, front)
+             + message(8, "Material_Test") + UNKNOWN)
+    row = parent(10001, [child], extra=UNKNOWN)
+    return (fixture("Card") + message(7, row)
+            + message(8, fixed(1, 10001) + message(2, row) + UNKNOWN))
+
+
+def alt_record(raw):
+    return config._inspect(raw, "Card")[1][("CardAltArt", 10001, 90001)]
+
+
 class VisualAddressTests(unittest.TestCase):
     def test_inspection_groups_exact_names_with_usage_and_record_ids(self):
         for name in ("Card", "Skin"):
@@ -189,6 +202,73 @@ class VisualAddressTests(unittest.TestCase):
             config.inspect_visual_config(fixture("Card"), "Card")
         with mock.patch.object(config, "MAX_RECORDS", 1), self.assertRaises(ValueError):
             config.inspect_visual_config(fixture("Skin"), "Skin")
+
+
+class ExtendedCardAddressTests(unittest.TestCase):
+    def test_ready_and_thin_images_are_discovered_without_editing_profile_photos(self):
+        addresses = {17: "UT_Hero_Card2_101", 18: "UT_Hero_Card2_101_Sfw",
+                     19: "UT_Hero_ThinCard_101", 20: "UT_Hero_ThinCard_101_Sfw"}
+        source = table([(101, parent(101, [skin(100101001, addresses, extra=message(14, NAME) + UNKNOWN)]))])
+        targets = config.inspect_visual_config(source, "Skin")["targets"]
+        self.assertEqual({row["name"] for row in targets}, set(addresses.values()))
+        for name in addresses.values():
+            changed = config.replace_visual_address(source, "Skin", name, ANIMATION_URL)
+            self.assertEqual(config.replace_visual_address(changed, "Skin", ANIMATION_URL, name), source)
+            self.assertEqual(changed.count(NAME.encode()), source.count(NAME.encode()))
+
+    def test_alt_art_images_and_overlay_are_discovered_in_both_mirrors(self):
+        source = alt_art_table()
+        targets = config.inspect_visual_config(source, "Card")["targets"]
+        names = {target["name"] for target in targets}
+        self.assertTrue({"UT_Alt_Image", "UT_Alt_Sfw", "UT_CardFront_Test"} <= names)
+        self.assertNotIn("VAlt_Test", names)
+        self.assertNotIn("Material_Test", names)
+
+    def test_sfw_animation_disables_shared_video_route_and_restores_original_bytes(self):
+        source = alt_art_table()
+        changed = config.replace_visual_address(source, "Card", "UT_Alt_Sfw", ANIMATION_URL)
+        values = {row.number: row.value for row in config._fields(alt_record(changed).raw)}
+        self.assertEqual(values[3], b"UT_Alt_Image")
+        self.assertEqual(values[4], ANIMATION_URL.encode())
+        self.assertEqual((values[5], values[6]), (b"", b""))
+        self.assertEqual(values[8], b"Material_Test")
+        restored = config.replace_visual_address(changed, "Card", ANIMATION_URL, "UT_Alt_Sfw", original_raw=source)
+        self.assertEqual(restored, source)
+        with self.assertRaisesRegex(ValueError, "原始视频"):
+            config.replace_visual_address(changed, "Card", ANIMATION_URL, "UT_Alt_Sfw")
+
+    def test_video_returns_only_after_last_background_animation_is_removed(self):
+        source = alt_art_table()
+        second_url = "ui://xuaw6o8jjmSecond"
+        changed = config.replace_visual_address(source, "Card", "UT_Alt_Image", ANIMATION_URL)
+        changed = config.replace_visual_address(changed, "Card", "UT_Alt_Sfw", second_url)
+        remaining = config.replace_visual_address(changed, "Card", ANIMATION_URL, "UT_Alt_Image", original_raw=source)
+        values = {row.number: row.value for row in config._fields(alt_record(remaining).raw)}
+        self.assertEqual((values[5], values[6]), (b"", b""))
+        self.assertEqual(values[4], second_url.encode())
+        self.assertEqual(config.replace_visual_address(remaining, "Card", second_url, "UT_Alt_Sfw", original_raw=source), source)
+
+    def test_overlay_animation_keeps_video_and_material_fields(self):
+        source = alt_art_table()
+        changed = config.replace_visual_address(source, "Card", "UT_CardFront_Test", ANIMATION_URL)
+        before = {row.number: row.raw for row in config._fields(alt_record(source).raw)}
+        after = {row.number: row.raw for row in config._fields(alt_record(changed).raw)}
+        self.assertEqual({number: value for number, value in before.items() if number != 7},
+                         {number: value for number, value in after.items() if number != 7})
+        self.assertEqual(config.replace_visual_address(changed, "Card", ANIMATION_URL, "UT_CardFront_Test"), source)
+
+    def test_alt_art_mirror_changes_and_wrong_restore_sources_are_rejected(self):
+        source = alt_art_table()
+        rows = config._fields(source)
+        changed_mirror = b"".join(row.raw if row.number != 8 else config._replace_message(row, row.value + fixed(20, 1)) for row in rows)
+        # 修改包装层未知字段不影响镜像；修改镜像内的原记录才应拒绝。
+        self.assertEqual(config.inspect_visual_config(changed_mirror, "Card")["record_count"], 4)
+        corrupted = source.replace(message(5, "VAlt_Test"), message(5, "VAlt_Fake"), 1)
+        with self.assertRaisesRegex(ValueError, "镜像"):
+            config.inspect_visual_config(corrupted, "Card")
+        changed = config.replace_visual_address(source, "Card", "UT_Alt_Image", ANIMATION_URL)
+        with self.assertRaisesRegex(ValueError, "恢复来源"):
+            config.replace_visual_address(changed, "Card", ANIMATION_URL, "UT_Alt_Image", original_raw=alt_art_table(image="UT_Wrong"))
 
 
 class _Asset:

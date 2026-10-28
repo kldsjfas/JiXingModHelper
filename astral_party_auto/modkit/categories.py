@@ -28,8 +28,8 @@ ASSET_TYPE_LABEL = {tid: label for tid, label in ASSET_TYPES}
 # (id, 中文名, 说明, 前缀元组) — 自上而下优先 startswith；仅贴图用
 CATEGORY_RULES: list[tuple[str, str, str, tuple[str, ...]]] = [
     # —— 卡牌 / 角色 ——
-    ("hand_card", "手牌 / 技能卡", "对局打出的卡 UT_HandCard，约 404×400", ("UT_HandCard",)),
-    ("hero_card", "角色卡面", "角色展示卡 / 细卡", ("UT_Hero_Card", "UT_Hero_ThinCard", "UT_Hero_Card2", "UT_CardFront")),
+    ("hand_card", "手牌 / 技能卡", "对局打出的卡与异画卡面", ("UT_HandCard", "UT_IAltArt")),
+    ("hero_card", "角色卡面", "角色展示卡 / 细卡 / 局内卡面", ("UT_Hero_Card", "UT_Hero_ThinCard", "UT_Hero_InGameCard", "UT_CardFront")),
     ("hero_bust", "角色半身像", "大图半身", ("UT_Hero_Bust",)),
     ("standing", "立绘小图", "StandingPainting 图标", ("UT_Item_StandingPainting",)),
     ("hero_photo", "角色头像 / 升级图", "Profile / RolePhoto / LevelUp", ("UT_Hero_ProfilePhoto", "UT_Hero_RolePhoto", "UT_Hero_LevelUp")),

@@ -1,7 +1,9 @@
 """固定裁剪界面的 API 回归；所有图片和输出都在隔离目录中。"""
 from __future__ import annotations
 
+import base64
 import hashlib
+import io
 import math
 import threading
 import unittest
@@ -77,6 +79,34 @@ class CropApiTests(unittest.TestCase):
         with Image.open(result["path"]) as image:
             self.assertEqual(image.size, (20, 10))
 
+    def test_static_formats_selected_through_all_files_can_be_cropped(self):
+        for suffix, image_format in ((".gif", "GIF"), (".tiff", "TIFF"), (".tga", "TGA")):
+            with self.subTest(format=image_format):
+                source = self.root / ("single-frame" + suffix)
+                with Image.new("RGBA", (12, 8), "red") as image:
+                    image.save(source, format=image_format)
+                self.api._pick_path.return_value = source
+                chosen = self.choose_replacement()
+                self.assertTrue(chosen["preview_data"].startswith("data:image/png;base64,"))
+                cropped = self.unwrap(self.api.crop_replacement([2, 1, 10, 7], chosen["crop_token"]))
+                with Image.open(cropped["path"]) as image:
+                    self.assertEqual(image.size, (8, 6))
+                    self.assertEqual(image.getpixel((0, 0)), (255, 0, 0, 255))
+
+    def test_crop_still_rejects_multiframe_sources_and_nontexture_resources(self):
+        animated = self.root / "animated.gif"
+        with Image.new("RGBA", (12, 8), "red") as first, Image.new("RGBA", (12, 8), "blue") as second:
+            first.save(animated, save_all=True, append_images=[second], duration=100, loop=0)
+        self.api._replacement_path = animated
+        self.assert_rejected(self.api.crop_replacement([0, 0, 8, 8]))
+        self.assertFalse((self.root / "data" / "crop_preview.png").exists())
+        for asset_type in ("text", "anim", "dynamic"):
+            with self.subTest(asset_type=asset_type):
+                self.controller.selection["asset_type"] = asset_type
+                self.api._replacement_path = self.source
+                self.assert_rejected(self.api.crop_replacement([0, 0, 8, 8]))
+                self.assertFalse((self.root / "data" / "crop_preview.png").exists())
+
     def test_replacement_save_failure_preserves_prior_crop(self):
         chosen = self.choose_replacement()
         first = self.unwrap(self.api.crop_replacement([0, 0, 40, 30], chosen["crop_token"]))
@@ -88,6 +118,80 @@ class CropApiTests(unittest.TestCase):
         self.assertEqual(self.api._replacement_path, output)
         self.assertEqual(self.api._replacement_crop_token, first["crop_token"])
         self.assertEqual(list(output.parent.glob(".crop-*.png")), [])
+
+    def replacement_snapshot(self):
+        path = self.api._replacement_path
+        return (path, path.read_bytes(), self.api._replacement_crop_token,
+                self.api._replacement_crop_hash, self.api._replacement_crop_selection,
+                getattr(self.api, "_replacement_temporary", None))
+
+    def test_crop_preview_hash_and_publish_failures_preserve_complete_candidate(self):
+        chosen = self.choose_replacement()
+        current = self.unwrap(self.api.crop_replacement([0, 0, 40, 30], chosen["crop_token"]))
+        expected = self.replacement_snapshot()
+        original_hash = self.api._crop_file_hash
+
+        def fail_result_hash(path):
+            if path != expected[0]:
+                raise OSError("模拟裁后图片读取失败")
+            return original_hash(path)
+
+        failures = (
+            patch.object(self.api, "_image_data", side_effect=OSError("模拟预览读取失败")),
+            patch.object(self.api, "_image_data", return_value=""),
+            patch.object(self.api, "_crop_file_hash", side_effect=OSError("模拟源图读取失败")),
+            patch.object(self.api, "_crop_file_hash", side_effect=fail_result_hash),
+            patch("astral_party_auto.web_app.os.replace", side_effect=PermissionError("模拟候选被占用")),
+        )
+        for failure in failures:
+            with self.subTest(failure=failure), failure:
+                self.assert_rejected(self.api.crop_replacement([1, 2, 21, 12], current["crop_token"]))
+            self.assertEqual(self.replacement_snapshot(), expected)
+            self.assertEqual(list(expected[0].parent.glob(".crop-*.png")), [])
+        retry = self.unwrap(self.api.crop_replacement([1, 2, 21, 12], current["crop_token"]))
+        with Image.open(retry["path"]) as image:
+            self.assertEqual(image.size, (20, 10))
+            self.assertEqual(image.getpixel((0, 0)), (1, 2, 3, 255))
+
+    def test_choose_hash_failure_preserves_old_preview_and_crop_identity(self):
+        chosen = self.choose_replacement()
+        expected = self.replacement_snapshot()
+        replacement = self.root / "other.png"
+        with Image.new("RGBA", (30, 20), "blue") as image:
+            image.save(replacement)
+        self.api._pick_path.return_value = replacement
+        with patch.object(self.api, "_crop_file_hash", side_effect=OSError("模拟素材读取失败")):
+            self.assert_rejected(self.api.choose_replacement())
+        self.assertEqual(self.replacement_snapshot(), expected)
+        self.unwrap(self.api.crop_replacement([0, 0, 20, 10], chosen["crop_token"]))
+
+    def test_drop_hash_failure_cleans_new_staging_and_keeps_old_candidate(self):
+        import base64
+
+        self.choose_replacement()
+        expected = self.replacement_snapshot()
+        payload = base64.b64encode(self.source.read_bytes()).decode("ascii")
+        with patch.object(self.api, "_crop_file_hash", side_effect=OSError("模拟导入读取失败")):
+            result = self.api.import_replacement_file("new.png", payload, dict(self.controller.selection))
+        self.assert_rejected(result)
+        self.assertEqual(self.replacement_snapshot(), expected)
+        self.assertEqual(list((self.root / "data" / "dropped-replacements").iterdir()), [])
+
+    def test_failed_draft_preparation_does_not_leave_a_committable_session(self):
+        failures = (
+            patch.object(self.api, "_static_image_data", side_effect=OSError("模拟预览读取失败")),
+            patch.object(self.api, "_static_image_data", return_value=""),
+            patch.object(self.api, "_crop_file_hash", side_effect=OSError("模拟素材读取失败")),
+        )
+        for failure in failures:
+            self.choose_draft()
+            with self.subTest(failure=failure), failure:
+                self.assert_rejected(self.api.pick_draft_crop_source(0))
+            self.assertEqual((self.api._draft_crop_path, self.api._draft_crop_index,
+                              self.api._draft_crop_item, self.api._draft_crop_token,
+                              self.api._draft_crop_hash, self.api._draft_crop_game_key),
+                             (None, None, None, None, None, None))
+            self.assert_rejected(self.api.commit_draft_crop([0, 0, 20, 10]))
 
     def test_invalid_replacement_boxes_do_not_write_or_change_candidate(self):
         chosen = self.choose_replacement()
@@ -166,6 +270,12 @@ class CropApiTests(unittest.TestCase):
                     image.convert("RGB").save(photo, quality=100, subsampling=0, exif=exif)
                 self.api._pick_path.return_value = photo
                 chosen = self.choose_replacement()
+                self.assertTrue(chosen["preview_data"].startswith("data:image/png;base64,"))
+                with Image.open(io.BytesIO(base64.b64decode(chosen["preview_data"].split(",", 1)[1]))) as preview:
+                    self.assertEqual(preview.size, expected_size)
+                    self.assertIsNone(preview.getexif().get(274))
+                    with Image.open(photo) as original:
+                        self.assertEqual(preview.getpixel((3, 5)), (*original.getpixel(raw_position(3, 5)), 255))
                 with read_static_image(photo) as normalized:
                     self.assertEqual(normalized.size, expected_size)
                 crop = self.unwrap(self.api.crop_replacement([3, 5, 20, 25], chosen["crop_token"]))
@@ -180,6 +290,58 @@ class CropApiTests(unittest.TestCase):
                 self.unwrap(self.api.commit_draft_crop(box, draft["crop_token"]))
                 self.controller.update_draft_texture.assert_called_once_with(0, photo, crop_box=tuple(box))
                 self.controller.update_draft_texture.reset_mock()
+
+    def test_webp_exif_previews_use_the_same_pixels_as_crop(self):
+        mappings = {
+            2: ((80, 60), lambda x, y: (79 - x, y)),
+            3: ((80, 60), lambda x, y: (79 - x, 59 - y)),
+            4: ((80, 60), lambda x, y: (x, 59 - y)),
+            5: ((60, 80), lambda x, y: (y, x)),
+            6: ((60, 80), lambda x, y: (y, 59 - x)),
+            7: ((60, 80), lambda x, y: (79 - y, 59 - x)),
+            8: ((60, 80), lambda x, y: (79 - y, x)),
+        }
+        for orientation, (expected_size, raw_position) in mappings.items():
+            with self.subTest(orientation=orientation):
+                photo = self.root / f"orientation-{orientation}.webp"
+                with Image.open(self.source) as original:
+                    exif = Image.Exif()
+                    exif[274] = orientation
+                    original.save(photo, format="WEBP", lossless=True, exif=exif)
+                self.api._pick_path.return_value = photo
+                chosen = self.choose_replacement()
+                draft = self.choose_draft()
+                self.assertEqual(chosen["preview_data"], draft["preview_data"])
+                with Image.open(io.BytesIO(base64.b64decode(chosen["preview_data"].split(",", 1)[1]))) as preview:
+                    self.assertEqual(preview.format, "PNG")
+                    self.assertEqual(preview.size, expected_size)
+                    self.assertIsNone(preview.getexif().get(274))
+                    for x, y in ((0, 0), (3, 5), (expected_size[0] - 1, expected_size[1] - 1)):
+                        raw_x, raw_y = raw_position(x, y)
+                        self.assertEqual(preview.getpixel((x, y)), (raw_x, raw_y, raw_x + raw_y, 255))
+                    crop = self.unwrap(self.api.crop_replacement([3, 5, 20, 25], chosen["crop_token"]))
+                    with Image.open(crop["path"]) as cropped:
+                        self.assertEqual(cropped.tobytes(), preview.crop((3, 5, 20, 25)).tobytes())
+
+    def test_gray16_previews_and_crop_keep_the_displayed_brightness(self):
+        import struct
+
+        values = [0, 1, 127, 128, 129, 255, 256, 257, 258, 32767, 32768, 65534, 65535]
+        expected = [0, 0, 0, 0, 0, 0, 1, 1, 1, 127, 128, 255, 255]
+        source = self.root / "gray16.png"
+        with Image.frombytes("I;16", (len(values), 1), struct.pack("<13H", *values)) as image:
+            image.save(source)
+        self.api._pick_path.return_value = source
+        chosen = self.choose_replacement()
+        draft = self.choose_draft()
+        self.assertEqual(chosen["preview_data"], draft["preview_data"])
+        with Image.open(io.BytesIO(base64.b64decode(chosen["preview_data"].split(",", 1)[1]))) as preview:
+            self.assertEqual(preview.size, (13, 1))
+            self.assertEqual([preview.getpixel((x, 0)) for x in range(13)],
+                             [(value, value, value, 255) for value in expected])
+            crop = self.unwrap(self.api.crop_replacement([0, 0, 13, 1], chosen["crop_token"]))
+            with Image.open(crop["path"]) as cropped:
+                self.assertEqual(cropped.tobytes(), preview.tobytes())
 
     def test_draft_passes_validated_original_pixel_box_to_controller(self):
         chosen = self.choose_draft()

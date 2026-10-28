@@ -224,6 +224,15 @@ def prepare_catalog_change(aa_dirs: tuple[Path, ...], data_dir: Path, previous: 
         return None
     target = active_catalog_path(aa_dirs)
     bundle_root = aa_dirs[0].resolve()
+    if old is not None:
+        recorded_root = old.get("bundle_root") if isinstance(old, dict) else None
+        if not isinstance(recorded_root, str) or not Path(recorded_root).is_absolute():
+            raise ValueError("独立表情 catalog 的原资源目录记录不合法。")
+        recorded_root = Path(recorded_root).resolve()
+        if recorded_root not in {directory.resolve() for directory in aa_dirs}:
+            raise ValueError("独立表情 catalog 的原资源目录不在当前游戏目录中，请保留备份并检查游戏位置。")
+        # 新版本可能先发现客户端缓存；已安装地址仍引用原目录，不能迁移它们。
+        bundle_root = recorded_root
     if not bundle_root.is_dir():
         raise ValueError("独立表情目标资源目录不存在。")
     current_digest = file_sha256(target, MAX_CATALOG_BYTES)
@@ -231,7 +240,7 @@ def prepare_catalog_change(aa_dirs: tuple[Path, ...], data_dir: Path, previous: 
     backup_root = data_dir / "catalog_backups"
     if old is not None:
         if (not isinstance(old, dict) or type(old.get("version")) is not int or old.get("version") != 1
-                or old.get("target") != str(target) or old.get("bundle_root") != str(bundle_root)
+                or old.get("target") != str(target)
                 or old.get("official_hash") != version_hash or old.get("applied_sha256") != current_digest):
             raise ValueError("游戏 catalog 已更新或被其他工具修改，不能用旧备份覆盖；请先检查更新或恢复副本。")
         baseline_digest = old.get("baseline_sha256", "")

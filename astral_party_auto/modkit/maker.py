@@ -8,10 +8,11 @@ import shutil
 import tempfile
 import zipfile
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 
 import UnityPy
-from PIL import Image, ImageOps
+from PIL import Image, ImageCms, ImageOps
 
 
 def _load_bundle(bundle_path: str | Path):
@@ -35,6 +36,39 @@ def _write_bundle_atomic(out: Path, payload: bytes) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _static_image_rgba(image: Image.Image) -> Image.Image:
+    """把有效的嵌入色彩配置转为 sRGB；无配置或损坏配置沿用普通像素。"""
+    rgba = image.convert("RGBA")
+    profile_bytes = image.info.get("icc_profile")
+    if profile_bytes:
+        try:
+            source_profile = ImageCms.ImageCmsProfile(BytesIO(profile_bytes))
+            color_space = source_profile.profile.xcolor_space.strip()
+            if color_space == "RGB" and image.mode != "CMYK":
+                colors = rgba.convert("RGB")
+            elif color_space == "CMYK" and image.mode == "CMYK":
+                colors = image.copy()
+            elif color_space == "GRAY" and image.mode in {"1", "L", "LA"}:
+                colors = image.convert("L")
+            else:
+                colors = None
+            if colors is not None:
+                with colors:
+                    converted = ImageCms.profileToProfile(
+                        colors, source_profile, ImageCms.createProfile("sRGB"), outputMode="RGB"
+                    )
+                with rgba.getchannel("A") as alpha:
+                    converted.putalpha(alpha)
+                rgba.close()
+                rgba = converted
+        except (ImageCms.PyCMSError, OSError, TypeError, ValueError):
+            # 图片本身仍可用时，不能因未知或损坏的配置文件阻止导入。
+            pass
+    # 返回值是最终像素；旧 ICC / EXIF 不能再让浏览器二次变色或旋转。
+    rgba.info.clear()
+    return rgba
+
+
 def read_static_image(image_path: str | Path) -> Image.Image:
     """普通贴图只接收单帧图片，避免把动画悄悄截成第一帧。"""
     with Image.open(image_path) as source:
@@ -43,7 +77,15 @@ def read_static_image(image_path: str | Path) -> Image.Image:
         # 浏览器会按 EXIF 方向显示照片，裁剪与写包也必须使用相同的坐标系。
         oriented = ImageOps.exif_transpose(source)
         try:
-            return oriented.convert("RGBA")
+            if oriented.mode.startswith("I;16") or (oriented.mode == "I" and source.format == "PNG"):
+                # Pillow 直接转 RGBA 会把 16 位灰度中大于 255 的值截成白色。
+                # 和浏览器解码 PNG 一样，使用每个通道的高 8 位。
+                with oriented.convert("I") as integers:
+                    with integers.point(lambda value: value / 256) as reduced:
+                        with reduced.convert("L") as grayscale:
+                            grayscale.info = oriented.info.copy()
+                            return _static_image_rgba(grayscale)
+            return _static_image_rgba(oriented)
         finally:
             oriented.close()
 

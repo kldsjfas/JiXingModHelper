@@ -1,4 +1,6 @@
 """静态贴图入口不能把多帧图片悄悄变成单帧。"""
+import base64
+import io
 import threading
 import unittest
 from pathlib import Path
@@ -64,7 +66,11 @@ class StaticImageImportTests(unittest.TestCase):
         self.api._pick_path = Mock(return_value=path)
         result = self.api.choose_replacement()
         self.assertTrue(result["ok"], result.get("error"))
-        self.assertEqual(result["data"]["preview_data"], "preview")
+        preview_data = result["data"]["preview_data"]
+        self.assertTrue(preview_data.startswith("data:image/png;base64,"))
+        with Image.open(io.BytesIO(base64.b64decode(preview_data.split(",", 1)[1]))) as preview:
+            self.assertEqual(preview.size, (4, 4))
+            self.assertEqual(preview.getpixel((0, 0)), (255, 0, 0, 255))
         self.assertEqual(self.api._replacement_path, path)
 
 

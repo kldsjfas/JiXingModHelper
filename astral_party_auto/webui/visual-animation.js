@@ -13,9 +13,13 @@
     return selection ? `${selection.asset_type || selection.kind || ""}\n${selection.bundle || ""}\n${selection.name || ""}` : "";
   }
 
-  function supported(selection = state.selection) {
+  function hasSettings(selection = state.selection) {
     return (selection?.asset_type || selection?.kind) === "texture" && !selection?.emote
-      && selection?.visual_animation?.editable === true;
+      && Boolean(selection?.visual_animation);
+  }
+
+  function supported(selection = state.selection) {
+    return hasSettings(selection) && selection.visual_animation.editable === true;
   }
 
   function current(request, key) {
@@ -31,24 +35,26 @@
   function render() {
     const panel = $("visual-animation-settings");
     if (!panel || !bridge) return;
-    panel.classList.toggle("is-hidden", !supported());
+    panel.classList.toggle("is-hidden", !hasSettings());
+    const editable = supported();
     const locked = state.working || state.loading;
-    $("visual-animation-import").disabled = !supported() || locked;
-    $("visual-animation-save").disabled = !supported() || locked || !state.candidate;
-    $("visual-animation-reason").textContent = state.selection?.visual_animation?.reason || "";
+    $("visual-animation-import").disabled = !editable || locked;
+    $("visual-animation-save").disabled = !editable || locked || !state.candidate;
+    $("visual-animation-reason").textContent = state.selection?.visual_animation?.reason
+      || (hasSettings() && !editable ? "当前图片暂时无法制作动态效果。" : "");
     const status = $("visual-animation-status");
-    status.textContent = state.error || (state.working ? "正在制作并检查动画，请稍等…"
+    status.textContent = !editable ? "" : state.error || (state.working ? "正在制作并检查动画，请稍等…"
       : state.loading ? "正在读取作品集里的动画…"
       : state.candidate ? `${state.candidate.name || "已导入动画"}。${state.candidate.notice || "可以先播放，再保存到作品集。"}`
       : state.savedAnimation ? "正在显示作品集保存后的实际动态效果。"
       : "导入后先检查播放效果，保存只更新作品集。安装后请在游戏里测试。" );
     status.classList.toggle("is-error", Boolean(state.error));
     const media = $("visual-animation-preview");
-    const animation = state.candidate?.animation || state.savedAnimation;
+    const animation = editable ? state.candidate?.animation || state.savedAnimation : null;
     $("visual-animation-preview-label").textContent = state.candidate ? "待保存的动态效果"
       : state.savedAnimation ? "作品集中的动态效果" : "你的动态效果";
     if (hasFrames(animation)) bridge.renderAnimation(media, animation);
-    else bridge.renderAnimationState(media, state.working ? "正在制作动画…"
+    else bridge.renderAnimationState(media, !editable ? "动态制作暂不可用，具体原因见上方说明。" : state.working ? "正在制作动画…"
       : state.loading ? "正在读取动画…" : state.error || "导入动图或视频后，在这里播放和逐帧检查。");
   }
 

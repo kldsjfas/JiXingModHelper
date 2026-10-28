@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import hmac
 import hashlib
+import io
 import json
 import mimetypes
 import os
@@ -503,6 +504,16 @@ class DesktopApi:
             self._image_cache.clear()
         self._image_cache[cache_key] = data_url
         return data_url
+
+    @staticmethod
+    def _static_image_data(path: Path) -> str:
+        """静态素材按写包时的方向与色彩解码，避免浏览器对原格式的解释差异。"""
+        from .modkit.maker import read_static_image
+
+        with read_static_image(path) as image, io.BytesIO() as output:
+            image.save(output, format="PNG", icc_profile=None, exif=b"")
+            encoded = base64.b64encode(output.getvalue()).decode("ascii")
+        return "data:image/png;base64," + encoded
 
     def _selection_payload(
         self, selection: dict | None = None, *, full_text: bool = False, force_preview: bool = False,
@@ -1275,9 +1286,8 @@ class DesktopApi:
         if path is None:
             return None
         result = self._replacement_payload(selection, path)
-        self._clear_replacement()
-        self._replacement_path = path
-        self._bind_replacement_crop(result)
+        crop_state = self._prepare_replacement_crop(result, path)
+        self._accept_replacement(path, crop_state)
         return result
 
     def _clear_replacement(self) -> None:
@@ -1298,15 +1308,22 @@ class DesktopApi:
         with path.open("rb") as stream:
             return hashlib.file_digest(stream, "sha256").hexdigest()
 
-    def _bind_replacement_crop(self, payload: dict) -> None:
+    def _prepare_replacement_crop(self, payload: dict, path: Path) -> tuple:
         if (self.controller.selection or {}).get("asset_type", "texture") != "texture":
-            return
-        if not payload.get("preview_data") or self._replacement_path is None:
-            return
-        self._replacement_crop_token = secrets.token_hex(16)
-        self._replacement_crop_hash = self._crop_file_hash(self._replacement_path)
-        self._replacement_crop_selection = self._emote_selection_key()
-        payload["crop_token"] = self._replacement_crop_token
+            return None, None, None
+        if not payload.get("preview_data"):
+            return None, None, None
+        source_hash = self._crop_file_hash(path)
+        token = secrets.token_hex(16)
+        payload["crop_token"] = token
+        return token, source_hash, self._emote_selection_key()
+
+    def _accept_replacement(self, path: Path, crop_state: tuple, temporary=None) -> None:
+        """预览与裁剪身份全部准备成功后，再替换当前候选。"""
+        self._clear_replacement()
+        self._replacement_path = path
+        self._replacement_temporary = temporary
+        self._replacement_crop_token, self._replacement_crop_hash, self._replacement_crop_selection = crop_state
 
     @staticmethod
     def _validated_crop_box(crop_box: list, size: tuple[int, int]) -> tuple[int, int, int, int]:
@@ -1333,6 +1350,7 @@ class DesktopApi:
                 raise RuntimeError("选中的文件不是可编辑的纯文本。")
             return {"path": str(path), "name": path.name, "text_content": text}
         animation = None
+        preview_data = ""
         if asset_type == "dynamic":
             from .modkit.animation import read_adapted_replacement
             source = selection.get("original_path") or selection.get("bundle_path")
@@ -1340,14 +1358,11 @@ class DesktopApi:
         elif asset_type == "anim":
             animation = self._clip_candidate_preview(selection, path)
         elif asset_type == "texture":
-            from .modkit.maker import read_static_image
             try:
-                with read_static_image(path):
-                    pass
+                preview_data = self._static_image_data(path)
             except OSError as error:
                 raise ValueError("图片无法读取，文件可能损坏。请重新导出 PNG/JPG 后重试。") from error
-        preview_data = ""
-        if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
+        if asset_type != "texture" and path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
             preview_data = self._image_data(path)
         return {"path": str(path), "name": path.name, "size": path.stat().st_size, "preview_data": preview_data, "animation": animation}
 
@@ -1368,14 +1383,12 @@ class DesktopApi:
                                              DATA_DIR / "dropped-replacements")
         try:
             result = self._replacement_payload(selection, path)
+            crop_state = self._prepare_replacement_crop(result, path)
         except Exception:
             temporary.cleanup()
             raise
-        self._clear_replacement()
-        self._replacement_temporary = temporary
-        self._replacement_path = path
         result["name"] = filename
-        self._bind_replacement_crop(result)
+        self._accept_replacement(path, crop_state, temporary)
         return result
 
     @exposed
@@ -1392,8 +1405,8 @@ class DesktopApi:
             raise RuntimeError("动画按原帧尺寸适配，不能用静态图片裁剪。")
         if (self.controller.selection or {}).get("asset_type") == "anim":
             raise RuntimeError("动画完整图集不能裁剪，请保留原图集尺寸和布局。")
-        if self._replacement_path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
-            raise RuntimeError("当前文件不是图片，不能裁剪。")
+        if ((self.controller.selection or {}).get("asset_type") or "texture") != "texture":
+            raise RuntimeError("当前资源不是静态图片，不能裁剪。")
         expected_hash = getattr(self, "_replacement_crop_hash", None)
         if expected_hash is not None and self._crop_file_hash(self._replacement_path) != expected_hash:
             raise RuntimeError("替换图片已在外部修改，请重新选择后裁剪。")
@@ -1408,16 +1421,17 @@ class DesktopApi:
         temporary = Path(temporary_name)
         try:
             cropped.save(temporary, format="PNG")
+            preview = self._image_data(temporary)
+            if not preview:
+                raise RuntimeError("裁剪预览无法读取，请重试。")
+            result = {"path": str(out), "name": out.name, "size": temporary.stat().st_size,
+                      "preview_data": preview, "animation": None}
+            crop_state = self._prepare_replacement_crop(result, temporary)
             os.replace(temporary, out)
         finally:
             cropped.close()
             temporary.unlink(missing_ok=True)
-        selection = self.controller.selection or {}
-        animation = self._clip_candidate_preview(selection, out) if selection.get("asset_type") == "anim" and selection.get("playable") else None
-        self._clear_replacement()
-        self._replacement_path = out
-        result = {"path": str(out), "name": out.name, "size": out.stat().st_size, "preview_data": self._image_data(out), "animation": animation}
-        self._bind_replacement_crop(result)
+        self._accept_replacement(out, crop_state)
         return result
 
     @exposed
@@ -1615,15 +1629,16 @@ class DesktopApi:
                     target_w, target_h = info.width, info.height
             except Exception:
                 pass
-        from .modkit.maker import read_static_image
-        with read_static_image(path):
-            pass
-        preview = self._image_data(path)
+        preview = self._static_image_data(path)
+        if not preview:
+            raise RuntimeError("裁剪预览无法读取，请重新选择图片。")
+        source_hash = self._crop_file_hash(path)
+        crop_token = secrets.token_hex(16)
         self._draft_crop_path = path
         self._draft_crop_index = index
         self._draft_crop_item = deepcopy(item)
-        self._draft_crop_token = secrets.token_hex(16)
-        self._draft_crop_hash = self._crop_file_hash(path)
+        self._draft_crop_token = crop_token
+        self._draft_crop_hash = source_hash
         self._draft_crop_game_key = getattr(self.controller, "_index_source_key", None)
         return {
             "path": str(path),

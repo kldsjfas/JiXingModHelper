@@ -50,6 +50,7 @@
     replacementRequest: 0,
     replacementImporting: false,
     studioRequest: 0,
+    packRequest: 0,
     draftDetailRequest: 0,
     editorKey: "",
     textEdits: new Map(),
@@ -171,6 +172,7 @@
     if (state.page === "studio") window.VisualAnimation?.leave();
     rememberTextEdit();
     state.studioRequest += 1;
+    state.packRequest += 1;
     state.draftDetailRequest += 1;
     stopAllAnimations();
     closeLightbox();
@@ -1662,10 +1664,20 @@ ${row.bundle}`;
   }
 
   async function refreshPack() {
+    const request = ++state.packRequest;
+    const previousDraft = state.draft;
+    const detailRequest = state.draftDetailRequest;
+    const cropRevision = cropRequest;
+    let draft;
     try {
-      state.draft = (await call("get_draft", { quiet: true })) || state.draft;
+      draft = await call("get_draft", { quiet: true });
     } catch (_) {}
+    // 读取期间可能已经离页、完成一次保存，或开始另一张图的裁剪。
+    if (request !== state.packRequest || state.page !== "pack" ||
+        previousDraft !== state.draft || cropRevision !== cropRequest) return;
+    state.draft = draft || previousDraft;
     renderDraftList();
+    if (detailRequest !== state.draftDetailRequest) return;
     if (state.draftIndex >= 0 && state.draftIndex < (state.draft.items || []).length) {
       await showDraftDetail(state.draftIndex);
     } else {

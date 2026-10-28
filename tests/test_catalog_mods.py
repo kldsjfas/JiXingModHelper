@@ -112,6 +112,129 @@ class CatalogModTests(unittest.TestCase):
         self.manager.restore_all()
         self.assertEqual(self.catalog.read_bytes(), self.baseline)
 
+    def test_existing_overlay_keeps_original_cache_after_new_cache_is_discovered(self):
+        source, item = self.make_mod()
+        self.manager.install_mod(source, "One")
+        applied_catalog = self.catalog.read_bytes()
+        client_cache = self.root / "client-cache" / "AssetBundles"
+        client_cache.mkdir(parents=True)
+        self.manager = ModManager((client_cache, self.hot, self.base), self.root / "data")
+
+        self.manager.disable_mod("One")
+        self.assertEqual(self.catalog.read_bytes(), self.baseline)
+        self.assertFalse((self.hot / item["bundle_name"]).exists())
+        self.assertEqual(self.manager._load_state()["catalog_overlay"]["bundle_root"], str(self.hot.resolve()))
+        self.manager.enable_mod("One")
+        self.assertEqual(self.catalog.read_bytes(), applied_catalog)
+        self.assertEqual((self.hot / item["bundle_name"]).read_bytes(), b"NEW_VIDEO")
+        self.assertEqual(list(client_cache.iterdir()), [])
+        self.manager.uninstall_mod("One")
+        self.assertEqual(self.catalog.read_bytes(), self.baseline)
+        self.assertFalse((self.hot / item["bundle_name"]).exists())
+        self.assertEqual((self.hot / "config.bundle").read_bytes(), b"HOT_ORIGINAL_CONFIG")
+        self.assertNotIn("catalog_overlay", self.manager._load_state())
+        self.assertEqual(list(client_cache.iterdir()), [])
+        self.manager.install_mod(source, "Fresh")
+        self.assertEqual((client_cache / item["bundle_name"]).read_bytes(), b"NEW_VIDEO")
+        self.assertEqual(self.manager._load_state()["catalog_overlay"]["bundle_root"], str(client_cache.resolve()))
+        self.manager.restore_all()
+        self.assertEqual(self.catalog.read_bytes(), self.baseline)
+        self.assertEqual(list(client_cache.iterdir()), [])
+
+    def test_restore_all_after_cache_discovery_change_restores_original_files(self):
+        source, item = self.make_mod()
+        self.manager.install_mod(source, "One")
+        client_cache = self.root / "client-cache" / "AssetBundles"
+        client_cache.mkdir(parents=True)
+        self.manager = ModManager((client_cache, self.hot, self.base), self.root / "data")
+
+        self.manager.restore_all()
+        self.assertEqual(self.catalog.read_bytes(), self.baseline)
+        self.assertFalse((self.hot / item["bundle_name"]).exists())
+        self.assertEqual((self.hot / "config.bundle").read_bytes(), b"HOT_ORIGINAL_CONFIG")
+        self.assertEqual(self.manager._load_state(), {"mods": {}})
+        self.assertEqual(list(client_cache.iterdir()), [])
+
+    def test_reinstall_and_additional_mod_use_existing_overlay_cache(self):
+        first, first_item = self.make_mod("first")
+        replacement, _ = self.make_mod("replacement", content=b"UPDATED_VIDEO")
+        second, second_item = self.make_mod("second", 120102008)
+        self.manager.install_mod(first, "One")
+        client_cache = self.root / "client-cache" / "AssetBundles"
+        client_cache.mkdir(parents=True)
+        self.manager = ModManager((client_cache, self.hot, self.base), self.root / "data")
+
+        self.manager.install_mod(replacement, "One")
+        self.manager.install_mod(second, "Two")
+        self.assertEqual((self.hot / first_item["bundle_name"]).read_bytes(), b"UPDATED_VIDEO")
+        self.assertEqual((self.hot / second_item["bundle_name"]).read_bytes(), b"NEW_VIDEO")
+        self.assertEqual(self.manager._load_state()["catalog_overlay"]["bundle_root"], str(self.hot.resolve()))
+        self.assertEqual(list(client_cache.iterdir()), [])
+        self.manager.restore_all()
+        self.assertEqual(self.catalog.read_bytes(), self.baseline)
+        self.assertFalse((self.hot / first_item["bundle_name"]).exists())
+        self.assertFalse((self.hot / second_item["bundle_name"]).exists())
+
+    def test_old_overlay_root_outside_current_directories_is_not_used(self):
+        source, _ = self.make_mod()
+        self.manager.install_mod(source, "One")
+        # 同一相邻 catalog 可见，但旧资源目录已不在本次允许范围内。
+        client_cache = self.hot.parent / "ClientAssetBundles"
+        client_cache.mkdir()
+        self.manager = ModManager((client_cache, self.base), self.root / "data")
+        before = self.snapshot()
+        for operation in (lambda: self.manager.disable_mod("One"), lambda: self.manager.uninstall_mod("One"),
+                          self.manager.restore_all):
+            with self.subTest(operation=operation), self.assertRaisesRegex(ValueError, "原资源目录"):
+                operation()
+            self.assertEqual(self.snapshot(), before)
+            self.assertEqual(list(client_cache.iterdir()), [])
+
+    def test_new_cache_with_changed_catalog_still_refuses_old_overlay(self):
+        source, _ = self.make_mod()
+        self.manager.install_mod(source, "One")
+        client_cache = self.root / "client-cache" / "AssetBundles"
+        client_cache.mkdir(parents=True)
+        new_catalog = client_cache.parent / "catalog_2.json"
+        new_catalog.write_bytes(self.baseline)
+        new_catalog.with_suffix(".hash").write_bytes(b"NEXT_OFFICIAL_VERSION")
+        self.manager = ModManager((client_cache, self.hot, self.base), self.root / "data")
+        before = self.snapshot()
+        for operation in (lambda: self.manager.disable_mod("One"), lambda: self.manager.uninstall_mod("One"),
+                          self.manager.restore_all):
+            with self.subTest(operation=operation), self.assertRaisesRegex(ValueError, "catalog"):
+                operation()
+            self.assertEqual(self.snapshot(), before)
+            self.assertEqual(new_catalog.read_bytes(), self.baseline)
+            self.assertEqual(list(client_cache.iterdir()), [])
+
+    def test_malformed_overlay_root_cannot_redirect_file_operations(self):
+        source, _ = self.make_mod()
+        self.manager.install_mod(source, "One")
+        original_state = self.manager._load_state()
+        for recorded_root in (None, 1, "AssetBundles", ""):
+            with self.subTest(recorded_root=recorded_root):
+                state = copy.deepcopy(original_state)
+                state["catalog_overlay"]["bundle_root"] = recorded_root
+                self.manager._save_state(state)
+                before = self.snapshot()
+                with self.assertRaisesRegex(ValueError, "原资源目录"):
+                    self.manager.restore_all()
+                self.assertEqual(self.snapshot(), before)
+
+    def test_equivalent_recorded_cache_path_is_resolved_before_comparison(self):
+        source, item = self.make_mod()
+        self.manager.install_mod(source, "One")
+        state = self.manager._load_state()
+        state["catalog_overlay"]["bundle_root"] = str(self.hot / ".." / "AssetBundles")
+        self.manager._save_state(state)
+        self.manager.disable_mod("One")
+        self.assertFalse((self.hot / item["bundle_name"]).exists())
+        self.manager.enable_mod("One")
+        self.assertEqual(self.manager._load_state()["catalog_overlay"]["bundle_root"], str(self.hot.resolve()))
+        self.manager.restore_all()
+        self.assertEqual(self.catalog.read_bytes(), self.baseline)
+
     def test_overlapping_addresses_refuse_without_mutation(self):
         first, item = self.make_mod("first")
         second, _ = self.make_mod("second", content=b"OTHER_VIDEO")
