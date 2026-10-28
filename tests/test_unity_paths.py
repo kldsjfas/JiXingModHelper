@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import os
+import ctypes
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from astral_party_auto.modkit.bundles import bundle_dirs_for_exe, hot_update_dir_for_exe
 from astral_party_auto.modkit.unity_paths import local_low_dir, read_unity_identity, unity_catalog_roots_for_exe
@@ -25,6 +27,23 @@ class UnityIdentityPathTests(unittest.TestCase):
         data.mkdir(exist_ok=True)
         (data / "app.info").write_text(f"{company}\n{product}\n", encoding="utf-8")
         return executable, data
+
+    def known_folder_api(self, directory, *, result=0):
+        path_buffer = ctypes.create_unicode_buffer(str(directory))
+
+        def query(_folder_id, flags, _token, output):
+            if flags != 0x00004000:
+                return ctypes.c_long(0x80070003).value
+            ctypes.cast(output, ctypes.POINTER(ctypes.c_void_p))[0] = ctypes.cast(path_buffer, ctypes.c_void_p)
+            return result
+
+        query_folder = Mock(side_effect=query)
+        free_path = Mock()
+        libraries = {"shell32": SimpleNamespace(SHGetKnownFolderPath=query_folder),
+                     "ole32": SimpleNamespace(CoTaskMemFree=free_path)}
+        load_library = patch("astral_party_auto.modkit.unity_paths.ctypes.WinDLL",
+                             side_effect=lambda name, **_kwargs: libraries[name])
+        return load_library, query_folder, free_path
 
     def test_renamed_executable_keeps_the_product_cache_identity(self):
         executable, data = self.installation("MyLauncherName.exe", "feimo", "AstralParty_CN")
@@ -102,6 +121,29 @@ class UnityIdentityPathTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "known folder unavailable"):
                 hot_update_dir_for_exe(executable)
             self.assertEqual(bundle_dirs_for_exe(executable), (base,))
+
+    @unittest.skipUnless(os.name == "nt", "Windows Known Folder API")
+    def test_known_folder_query_does_not_require_or_create_the_directory(self):
+        missing = self.root / "Not created" / "LocalLow"
+        load_library, query_folder, free_path = self.known_folder_api(missing)
+        self.assertFalse(missing.exists())
+        with load_library:
+            self.assertEqual(local_low_dir(), missing)
+        self.assertEqual(query_folder.call_args.args[1], 0x00004000)
+        self.assertFalse(query_folder.call_args.args[1] & 0x00008000, "Must not request KF_FLAG_CREATE")
+        free_path.assert_called_once()
+        self.assertFalse(missing.exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows Known Folder API")
+    def test_hresult_failure_frees_returned_buffer_without_guessing_a_path(self):
+        missing = self.root / "Unavailable LocalLow"
+        load_library, _query_folder, free_path = self.known_folder_api(
+            missing, result=ctypes.c_long(0x80070003).value)
+        with load_library, patch.dict(os.environ, {"USERPROFILE": str(self.root / "wrong-profile")}):
+            with self.assertRaisesRegex(ValueError, "HRESULT 0x80070003"):
+                local_low_dir()
+        free_path.assert_called_once()
+        self.assertFalse(missing.exists())
 
     @unittest.skipUnless(os.name == "nt", "Windows Known Folder API")
     def test_real_windows_local_low_query_returns_an_absolute_directory(self):

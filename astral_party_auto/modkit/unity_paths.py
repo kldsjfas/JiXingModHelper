@@ -8,6 +8,7 @@ from pathlib import Path
 
 MAX_APP_INFO_BYTES = 8192
 _LOCAL_APP_DATA_LOW = "A520A1A4-1780-4FF6-BD18-167343C5AF16"
+_KF_FLAG_DONT_VERIFY = 0x00004000
 _RESERVED_NAMES = {"CON", "PRN", "AUX", "NUL", *(f"COM{number}" for number in range(1, 10)),
                    *(f"LPT{number}" for number in range(1, 10))}
 
@@ -59,7 +60,8 @@ def _local_low_dir_from_windows() -> Path:
         get_folder.restype = ctypes.c_long
         allocator.CoTaskMemFree.argtypes = [ctypes.c_void_p]
         allocator.CoTaskMemFree.restype = None
-        result = get_folder(ctypes.byref(folder_id), 0, None, ctypes.byref(result_path))
+        # 这里只查询位置；新用户还没有 LocalLow 目录时也不应失败或创建目录。
+        result = get_folder(ctypes.byref(folder_id), _KF_FLAG_DONT_VERIFY, None, ctypes.byref(result_path))
         try:
             if result != 0 or not result_path.value:
                 raise ValueError(f"Windows 无法定位 LocalLow 已知文件夹（HRESULT 0x{result & 0xffffffff:08X}）。")

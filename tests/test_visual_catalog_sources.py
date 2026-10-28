@@ -22,7 +22,7 @@ class VisualCatalogSourceTests(unittest.TestCase):
     def setUp(self):
         self.temporary = TemporaryDirectory(prefix="jixing-catalog-source-")
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
         self.executable = self.root / "game" / "AstralParty_CN.exe"
         self.executable.parent.mkdir()
         self.executable.write_bytes(b"fixture")

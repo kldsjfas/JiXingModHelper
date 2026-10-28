@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.3.8-preview.1 - 2026-10-28（目录兼容与诊断试用）
+## 1.3.8-preview.2 - 2026-10-28（目录兼容与诊断试用）
 
 - 从当前客户端的 `app.info` 读取 Unity 公司名与产品名，并通过 Windows 已知文件夹接口定位 LocalLow，不再猜测产品目录。
 - 卡面单独查找热更新元数据，即使 `AssetBundles` 子目录不存在也不会漏掉父目录中的 catalog。
