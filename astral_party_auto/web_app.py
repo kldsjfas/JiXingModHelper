@@ -640,6 +640,12 @@ class DesktopApi:
         return self._dashboard_state()
 
     @exposed
+    def get_resource_diagnostics(self) -> dict:
+        from .modkit.resource_diagnostics import resource_diagnostics
+
+        return resource_diagnostics(self.controller, __version__)
+
+    @exposed
     def launch_game(self) -> dict:
         self.controller.launch_game("CN")
         return self._dashboard_state()
@@ -1127,8 +1133,13 @@ class DesktopApi:
         if cache is None:
             self._emote_preview_cache = cache = {}
         if key not in cache:
-            from .modkit.emote_media import preview_emote_media
-            animation = preview_emote_media(path, video_name, work_dir=DATA_DIR / "emote-preview-work")
+            media_type = (independent or {}).get("media_type") or self.controller.emote_workspace.context().get("video_types", {}).get(video_name)
+            if media_type == "UnityEngine.Material":
+                from .modkit.material_emote import read_material_emote_preview
+                animation = read_material_emote_preview(path, video_name)
+            else:
+                from .modkit.emote_media import preview_emote_media
+                animation = preview_emote_media(path, video_name, work_dir=DATA_DIR / "emote-preview-work")
             if not animation.get("frames"):
                 raise ValueError("动态表情没有解码出画面，请重新预览。")
             if len(cache) >= 4:
@@ -1144,8 +1155,12 @@ class DesktopApi:
     @exposed
     def choose_emote_file(self, video_name: str) -> dict | None:
         self._clear_emote_candidate()
-        self.controller.emote_workspace._selected_id()
+        identifier = self.controller.emote_workspace._selected_id()
+        self.controller.emote_workspace.require_independent(video_name)
         selection_key = self._emote_selection_key()
+        context = self.controller.emote_workspace.context()
+        catalog_source_key = context.get("source_key")
+        media_type = context.get("video_types", {}).get(video_name)
         _, original = self.controller.emote_workspace.video_bundle(video_name)
         path = self._pick_path("open", file_types=(
             "动图或视频 (*.gif;*.apng;*.png;*.webp;*.mp4;*.webm;*.mov;*.mkv;*.avi;*.usm)",
@@ -1162,17 +1177,30 @@ class DesktopApi:
         self._emote_candidate_dir = tempfile.TemporaryDirectory(prefix="import-", dir=parent)
         folder = Path(self._emote_candidate_dir.name)
         try:
-            from .modkit.emote_media import prepare_emote_media
-            output = folder / path.with_suffix(".usm").name
-            prepared = prepare_emote_media(path, original, video_name, output, work_dir=folder)
+            if media_type == "UnityEngine.Material":
+                from .modkit.material_emote import prepare_material_emote
+                from .modkit.emote_addressables import independent_emote_identity
+                output = folder / independent_emote_identity(identifier)["bundle_name"]
+                prepared = prepare_material_emote(path, original, video_name, output,
+                                                   emote_id=identifier, work_dir=folder)
+            else:
+                from .modkit.emote_media import prepare_emote_media
+                output = folder / path.with_suffix(".usm").name
+                prepared = prepare_emote_media(path, original, video_name, output, work_dir=folder)
             if selection_key != self._emote_selection_key():
                 raise ValueError("表情已经变化，请重新选择素材。")
+            if catalog_source_key != self.controller.emote_workspace.context().get("source_key"):
+                raise ValueError("表情资源目录在转换期间变化，请重新导入。")
             if source_hash != self._emote_file_hash(path) or reference_hash != self._emote_file_hash(original, 128 * 1024 * 1024):
                 raise ValueError("转换期间素材或原表情发生变化，请重新选择。")
             converted = Path(prepared["path"])
+            converted_limit = 128 * 1024 * 1024 if media_type == "UnityEngine.Material" else 64 * 1024 * 1024
             self._emote_replacement = {"path": converted, "video_name": video_name,
                                        "independent": True,
-                                       "selection": selection_key, "sha256": self._emote_file_hash(converted),
+                                       "catalog_source_key": catalog_source_key,
+                                       "media_type": media_type,
+                                       "selection": selection_key, "sha256": self._emote_file_hash(converted, converted_limit),
+                                       "max_bytes": converted_limit,
                                        "source_path": path, "source_sha256": source_hash,
                                        "reference_path": original, "reference_sha256": reference_hash}
             return {**prepared, "name": path.name, "source_name": path.name, "independent": True,
@@ -1193,7 +1221,9 @@ class DesktopApi:
                 if not candidate or candidate["selection"] != self._emote_selection_key() or candidate["video_name"] != video_name:
                     raise ValueError("表情或所选动图已经变化，请重新选择素材。")
                 replacement = candidate["path"]
-                if self._emote_file_hash(replacement) != candidate["sha256"]:
+                if candidate.get("catalog_source_key") != self.controller.emote_workspace.context().get("source_key"):
+                    raise ValueError("表情资源目录已经变化，请重新导入素材。")
+                if self._emote_file_hash(replacement, candidate.get("max_bytes", 64 * 1024 * 1024)) != candidate["sha256"]:
                     raise ValueError("转换成品内容已变化，请重新选择素材。")
                 for label in ("source", "reference"):
                     source_path = candidate.get(f"{label}_path")
@@ -1213,6 +1243,22 @@ class DesktopApi:
     def export_emote_video(self, video_name: str) -> dict | None:
         self.controller.emote_workspace._selected_id()
         _, original = self.controller.emote_workspace.video_bundle(video_name)
+        if self.controller.emote_workspace.context().get("video_types", {}).get(video_name) == "UnityEngine.Material":
+            path = self._pick_path("save", file_types=("表情动图 (*.gif)",), save_filename=f"{video_name}.gif")
+            if path is None:
+                return None
+            from PIL import Image
+            from .modkit.material_emote import read_material_emote_preview
+            animation = read_material_emote_preview(original, video_name)
+            frames = [Image.open(io.BytesIO(base64.b64decode(frame.split(",", 1)[1]))).convert("RGBA")
+                      for frame in animation["frames"]]
+            if not frames:
+                raise ValueError("原表情没有可导出的动画帧。")
+            # GIF 是便于分享的预览；制作与安装仍使用保留透明度的原生材质图集。
+            frames[0].save(path, format="GIF", save_all=True, append_images=frames[1:],
+                           duration=animation["durations"], loop=0, disposal=2)
+            output = Path(path)
+            return {"path": str(output), "name": output.name, "size": output.stat().st_size}
         path = self._pick_path("save", file_types=("表情视频 (*.usm)",), save_filename=f"{video_name}.usm")
         if path is None:
             return None

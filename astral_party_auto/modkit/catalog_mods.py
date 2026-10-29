@@ -120,12 +120,23 @@ def atomic_bytes(target: Path, payload: bytes, *, before_commit=None) -> None:
         pending.unlink(missing_ok=True)
 
 
-def active_catalog_path(aa_dirs: tuple[Path, ...]) -> Path:
+def active_catalog_path(aa_dirs: tuple[Path, ...], executable: str | Path | None = None) -> Path:
+    if executable is not None:
+        from .visual_catalog import find_catalog_source, _checked_message
+
+        source = find_catalog_source(aa_dirs, executable, purpose="表情")
+        if source.kind != "hot_json":
+            raise ValueError(_checked_message(
+                "独立动态表情需要可核对版本的热更新 JSON catalog；内置目录不能代替安装目标。",
+                source.checked_paths))
+        return source.path
     for directory in aa_dirs:
         candidate = _latest_catalog_path(directory)
         if candidate is not None:
             return candidate.resolve()
-    raise ValueError("缺少可验证的本地热更新 catalog，请先启动并更新游戏资源后再制作独立表情。")
+    checked = tuple(str(Path(directory).parent / "catalog_*.json") for directory in aa_dirs)
+    raise ValueError("独立动态表情未找到可验证的热更新 catalog。请保留现有缓存并检查资源诊断。"
+                     + "\n已检查：\n" + "\n".join(checked))
 
 
 def _official_hash(path: Path) -> str:
@@ -216,13 +227,13 @@ class CatalogChange:
 
 
 def prepare_catalog_change(aa_dirs: tuple[Path, ...], data_dir: Path, previous: dict,
-                           proposed: dict, source_for) -> CatalogChange | None:
+                           proposed: dict, source_for, *, executable: str | Path | None = None) -> CatalogChange | None:
     """Check drift and prepare a composed overlay; mutate only proposed metadata."""
     old = previous.get("catalog_overlay")
     emote_mods = [mod for mod in proposed.get("mods", {}).values() if mod.get("catalog_patches")]
     if old is None and not emote_mods:
         return None
-    target = active_catalog_path(aa_dirs)
+    target = active_catalog_path(aa_dirs, executable)
     bundle_root = aa_dirs[0].resolve()
     if old is not None:
         recorded_root = old.get("bundle_root") if isinstance(old, dict) else None

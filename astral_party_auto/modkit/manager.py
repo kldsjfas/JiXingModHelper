@@ -32,12 +32,13 @@ class ModAnalysis:
 
 
 class ModManager:
-    def __init__(self, aa_dirs: BundleDirectories, data_dir: str | Path):
+    def __init__(self, aa_dirs: BundleDirectories, data_dir: str | Path, *, executable: str | Path | None = None):
         if isinstance(aa_dirs, (str, Path)):
             self.aa_dirs = (Path(aa_dirs),)
         else:
             self.aa_dirs = tuple(Path(directory) for directory in aa_dirs)
         self.aa_dir = self.aa_dirs[0]
+        self.game_executable = Path(executable).resolve() if executable is not None else None
         self.data_dir = Path(data_dir)
         self.backup_dir = self.data_dir / "backups"
         self.state_path = self.data_dir / "mods_state.json"
@@ -284,7 +285,8 @@ class ModManager:
         new_names = {name for value in (previous, state) for mod in value.get("mods", {}).values()
                      for name in mod.get("new_bundles", [])}
         regular = set(file_names).difference(new_names)
-        catalog = prepare_catalog_change(self.aa_dirs, self.data_dir, previous, state, self._mod_file_source)
+        catalog = prepare_catalog_change(self.aa_dirs, self.data_dir, previous, state, self._mod_file_source,
+                                         executable=self.game_executable)
         with self._file_transaction(regular, catalog.targets if catalog else (), catalog.installed_hashes if catalog else None,
                                     catalog.deletes if catalog else (), catalog.committed_hashes if catalog else None):
             count = self._apply_effective_files(state, regular)

@@ -83,6 +83,17 @@
             <small id="game-path">自动检测游戏路径中…</small>
           </article>
 
+          <article id="resource-diagnostics" class="card">
+            <div class="section-heading"><div><h2>资源诊断</h2><p>卡面或表情提示找不到资源时，检查当前游戏位置并复制完整诊断信息。</p></div></div>
+            <div class="action-row">
+              <button id="check-resources" class="button ghost" type="button">检查资源</button>
+              <button id="copy-resource-diagnostics" class="button ghost" type="button" disabled>复制诊断信息</button>
+            </div>
+            <p id="resource-diagnostics-status" class="editor-status" role="status" aria-live="polite">按需检查，只在本地显示。</p>
+            <label class="resource-diagnostics-label" for="resource-diagnostics-output">诊断报告</label>
+            <textarea id="resource-diagnostics-output" class="resource-diagnostics-output" readonly spellcheck="false" placeholder="点击「检查资源」生成报告；不会修改或清理游戏资源。"></textarea>
+          </article>
+
           <article class="card guide-card">
             <h2>怎么用</h2>
             <ul>
@@ -291,6 +302,7 @@
               <div class="action-row">
                 <button id="emote-import" class="button ghost" disabled>导入动图或视频…</button>
                 <button id="emote-save" class="button primary" disabled>保存动态表情</button>
+                <button class="button ghost" type="button" data-resource-diagnostics>查看资源诊断</button>
               </div>
               <details id="emote-native-options" class="emote-native-options">
                 <summary>也可使用游戏已有动图</summary>
@@ -314,6 +326,7 @@
               <div class="action-row">
                 <button id="visual-animation-import" class="button ghost" disabled>导入动图或视频…</button>
                 <button id="visual-animation-save" class="button primary" disabled>保存动态卡面 / 立绘</button>
+                <button class="button ghost" type="button" data-resource-diagnostics>查看资源诊断</button>
               </div>
             </article>
             <div id="studio-image-mode" class="compare-grid">

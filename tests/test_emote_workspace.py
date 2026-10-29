@@ -104,7 +104,11 @@ class EmoteWorkspaceTests(unittest.TestCase):
             return SimpleNamespace(objects=[SimpleNamespace(type=SimpleNamespace(name="MonoBehaviour"), peek_name=lambda name=name: name) for name in data.get("videos", {})])
 
         patches = [mock.patch.object(workspace, "bundle_source_key", return_value="active fixture"),
+                   mock.patch.object(workspace, "find_catalog_source", return_value=SimpleNamespace(fingerprint=lambda: "fixture-catalog")),
+                   mock.patch.object(workspace, "active_catalog_path", return_value=self.controller.original / "catalog_3.json"),
+                   mock.patch.object(workspace, "_official_hash", return_value="fixture-official-version"),
                    mock.patch.object(workspace, "discover_emote_locations", return_value=locations),
+                   mock.patch.object(workspace, "inspect_cri_emote_bundle", return_value={"embedded": True}),
                    mock.patch.object(workspace, "inspect_emote_config_bundle", side_effect=lambda path: {"asset_name": "Character", "records": read_json(path)["records"]}),
                    mock.patch.object(workspace, "replace_emote_config_bundle", side_effect=replace_config),
                    mock.patch.object(workspace, "replace_cri_emote_bundle", side_effect=replace_video),

@@ -547,6 +547,61 @@ async function checkExplicitNativeChoicePreviewSurvivesStudioRefresh() {
   assert.doesNotMatch(ui.find("emote-file-status").textContent, /已保存/);
 }
 
+async function checkMaterialSequenceAndIndependentCapability() {
+  const ui = loadFrontend();
+  const selected = emoteSelection();
+  selected.emote.media_kind = "material_sequence";
+  selected.emote.choices[0].media_kind = "material_sequence";
+  selected.emote.choices[1].media_kind = "cri";
+  ui.state.selection = selected;
+  ui.renderEmoteSettings();
+  await selectVideo(ui, "VEmoji_A");
+  assert.equal(ui.find("emote-export").textContent, "导出原动图…");
+  ui.responses.push({ ok: true, data: { path: "D:/exports/VEmoji_A.gif" } });
+  await ui.exportEmoteVideo();
+  assert.deepEqual(ui.requests.at(-1), { url: "/api/export_emote_video", args: ["VEmoji_A"] });
+
+  ui.responses.push({ ok: true, data: { ...validFile("custom.bundle"), media_kind: "material_sequence",
+    video_info: undefined } });
+  await ui.chooseEmoteFile();
+  assert.equal(ui.state.emoteReplacement.media_kind, "material_sequence");
+  assert.match(ui.find("emote-file-status").textContent, /512 × 512/);
+  assert.doesNotMatch(ui.find("emote-file-status").textContent, /USM|颜色流|透明度流/);
+
+  selected.emote.independent_supported = false;
+  selected.emote.independent_reason = "原生动图可绑定，独立资源缺少可验证的当前 catalog。";
+  ui.renderEmoteSettings();
+  assert.equal(ui.state.emoteReplacement, null, "Unsupported independent capability kept a stale custom candidate");
+  assert.equal(ui.find("emote-import").disabled, true);
+  assert.equal(ui.find("emote-video").disabled, false, "Independent import failure blocked native binding");
+  assert.equal(ui.find("emote-export").disabled, false);
+  assert.equal(ui.find("emote-save").disabled, false);
+  assert.match(ui.find("emote-reason").textContent, /当前 catalog/);
+  assert.match(ui.find("emote-guidance").textContent, /游戏已有动图/);
+  const before = ui.requests.length;
+  await ui.chooseEmoteFile();
+  assert.equal(ui.requests.length, before, "Explicitly unsupported import still invoked API");
+  ui.responses.push({ ok: true, data: { item: { video_name: "VEmoji_A" }, draft: { items: [] } } });
+  await ui.saveEmote();
+  assert.deepEqual(ui.requests.findLast((request) => request.url === "/api/save_emote").args, ["VEmoji_A", false]);
+
+  await selectVideo(ui, "VEmoji_B");
+  assert.equal(ui.find("emote-export").textContent, "导出原 USM…");
+  ui.responses.push({ ok: true, data: { path: "D:/exports/VEmoji_B.usm" } });
+  await ui.exportEmoteVideo();
+  assert.deepEqual(ui.requests.at(-1).args, ["VEmoji_B"]);
+
+  selected.emote.independent_supported = true;
+  ui.renderEmoteSettings();
+  const late = deferred();
+  ui.responses.push(late.promise);
+  const importing = ui.chooseEmoteFile();
+  selected.emote.independent_supported = false;
+  late.resolve({ ok: true, data: validFile() });
+  await importing;
+  assert.equal(ui.state.emoteReplacement, null, "Late import crossed an independent capability change");
+}
+
 async function main() {
   checkMarkupContract();
   await checkNativeSelectionAndOrdinaryTexture();
@@ -562,6 +617,7 @@ async function main() {
   await checkIndependentReadbackAfterReentryAndRemoval();
   await checkLateIndependentReadbackCannotCrossResources();
   await checkExplicitNativeChoicePreviewSurvivesStudioRefresh();
+  await checkMaterialSequenceAndIndependentCapability();
   console.log("PASS: 静态表情无须原生下拉即可直接导入独立动图；原版仍显示当前封面/真实原动态；候选按自身来源与模板保存；独立别名保存回读/重新进入/删除/迟到请求正确；暂停逐帧、旧作品共享提醒及普通贴图边界保持可用。");
 }
 

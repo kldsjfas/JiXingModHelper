@@ -15,11 +15,13 @@ from pathlib import Path
 import UnityPy
 
 from .bundles import bundle_source_key
-from .cri_emote import export_cri_emote_bundle, replace_cri_emote_bundle, validate_usm_file, _write_atomic
-from .emote_catalog import discover_emote_locations, emote_id_from_texture
+from .catalog_mods import active_catalog_path, _official_hash
+from .cri_emote import export_cri_emote_bundle, inspect_cri_emote_bundle, replace_cri_emote_bundle, validate_usm_file, _write_atomic
+from .emote_catalog import CRI_VIDEO_TYPE, MATERIAL_VIDEO_TYPE, discover_emote_locations, emote_id_from_texture
 from .emote_config import inspect_emote_config_bundle, replace_emote_config_bundle
 from .emote_labels import emote_label, video_label
 from .maker import export_mod_pack
+from .visual_catalog import find_catalog_source
 
 
 def item_bundle_names(item: dict) -> set[str]:
@@ -66,9 +68,12 @@ class EmoteWorkspace:
 
     def context(self) -> dict:
         self.controller._require_game()
-        source_key = bundle_source_key(self.controller.aa_dirs)
+        executable = getattr(self.controller, "game_executable", None)
+        source = find_catalog_source(self.controller.aa_dirs, executable, purpose="动态表情")
+        source_key = (bundle_source_key(self.controller.aa_dirs), source.fingerprint(),
+                      str(Path(executable).resolve()) if executable is not None else "")
         if source_key != self._source_key:
-            self._locations = discover_emote_locations(self.controller.aa_dirs)
+            self._locations = discover_emote_locations(self.controller.aa_dirs, executable, source=source)
             self._source_key = source_key
             self._video_bundles = {}
         config_name = self._locations["config_bundle"]
@@ -80,12 +85,39 @@ class EmoteWorkspace:
         if key != self._context_key:
             records = inspect_emote_config_bundle(config_path)["records"]
             names = {row["video_name"] for row in records if row["video_name"]}
-            if not names or not names <= self._locations["videos"].keys():
-                raise ValueError("表情配置和视频目录不匹配，请更新游戏后重新制作。")
+            if not names or not names & self._locations["videos"].keys():
+                raise ValueError("表情配置与当前动画地址不匹配，请检查游戏位置和资源诊断。")
             self._context = {"config_bundle": config_name, "config_path": config_path,
-                             "records": records, "videos": self._locations["videos"]}
+                             "records": records, "videos": self._locations["videos"],
+                             "video_types": self._locations.get("video_types", {}), "source_key": source_key}
             self._context_key = key
         return self._context
+
+    def source_key(self) -> tuple:
+        """导入候选绑定目录内容；更换游戏或 catalog 后不能沿用旧候选。"""
+        return self.context()["source_key"]
+
+    def independent_support(self) -> dict:
+        target = None
+        try:
+            executable = getattr(self.controller, "game_executable", None)
+            target = active_catalog_path(self.controller.aa_dirs, executable)
+            _official_hash(target)
+            return {"supported": True, "reason": ""}
+        except (OSError, ValueError) as exc:
+            checked = "\n已检查：\n" + str(target) + "\n" + str(target.with_suffix(".hash")) if target is not None else ""
+            return {"supported": False, "reason": "独立自定义表情暂不可用：" + str(exc) + checked}
+
+    def require_independent(self, video_name: str | None = None) -> None:
+        support = self.independent_support()
+        if not support["supported"]:
+            raise ValueError(support["reason"])
+        if video_name is not None:
+            context = self.context()
+            if video_name not in context["videos"]:
+                raise ValueError("请选择当前游戏目录中已有的动态表情。")
+            if context["video_types"].get(video_name) == MATERIAL_VIDEO_TYPE and len(context["videos"][video_name]) != 1:
+                raise ValueError("此材质表情包含尚未验证的多包依赖，暂不创建独立动画。")
 
     def selection(self, texture_name: str) -> dict:
         identifier = emote_id_from_texture(texture_name)
@@ -97,24 +129,31 @@ class EmoteWorkspace:
             if record is None:
                 raise ValueError("该表情不在已验证的角色表情配置中，当前只能替换静态图片。")
             choices = []
-            native_names = {row["video_name"] for row in context["records"] if row["video_name"]}
+            native_names = {row["video_name"] for row in context["records"]
+                            if row["video_name"] in context["videos"]}
             for name in sorted(native_names):
                 affected = {row["emote_id"] for row in context["records"] if row["video_name"] == name}
                 affected.update(item["emote_id"] for item in self.controller.draft_items
                                 if item.get("kind") == "emote" and item.get("video_name") == name)
                 affected_ids = sorted(affected)
                 choices.append({"name": name, "label": video_label(name), "affected_ids": affected_ids,
-                                "affected_labels": [emote_label(identifier) for identifier in affected_ids]})
+                                "affected_labels": [emote_label(identifier) for identifier in affected_ids],
+                                "resource_type": context["video_types"].get(name, CRI_VIDEO_TYPE),
+                                "media_kind": "material_sequence" if context["video_types"].get(name) == MATERIAL_VIDEO_TYPE else "cri"})
             character = (identifier - 120_000_000) // 1000
             same_character = [name for name in sorted(native_names) if name.startswith(f"VEmoji_{character}_")]
-            default_name = record["video_name"] or next(iter(same_character or sorted(native_names)))
+            default_name = record["video_name"] if record["video_name"] in native_names else next(iter(same_character or sorted(native_names)))
+            independent = self.independent_support()
             draft = next((item for item in self.controller.draft_items
                           if item.get("kind") == "emote" and item.get("emote_id") == identifier), {})
             return {"editable": True, "emote_id": identifier, "video_name": record["video_name"],
-                    "default_video_name": default_name, "independent_supported": True,
+                    "default_video_name": default_name, "independent_supported": independent["supported"],
+                    "independent_reason": independent["reason"],
+                    "resource_type": context["video_types"].get(default_name, CRI_VIDEO_TYPE),
+                    "media_kind": "material_sequence" if context["video_types"].get(default_name) == MATERIAL_VIDEO_TYPE else "cri",
                     "draft_video_name": draft.get("video_name", ""),
                     "draft_independent": draft.get("independent_video", False),
-                    "choices": choices, "reason": "使用游戏原生视频播放；只改变本机资源，不改变表情拥有状态。"}
+                    "choices": choices, "reason": "使用游戏原生动画播放；只改变本机资源，不改变表情拥有状态。"}
         except (OSError, ValueError, KeyError) as exc:
             return {"editable": False, "emote_id": identifier, "reason": str(exc)}
 
@@ -123,6 +162,8 @@ class EmoteWorkspace:
         if video_name not in context["videos"]:
             raise ValueError("请选择当前游戏目录中已有的动态视频。")
         if video_name not in self._video_bundles:
+            resource_type = context["video_types"].get(video_name, CRI_VIDEO_TYPE)
+            object_type = "Material" if resource_type == MATERIAL_VIDEO_TYPE else "MonoBehaviour"
             matches = []
             for bundle_name in context["videos"][video_name]:
                 path = self.controller.original_bundle_path(bundle_name)
@@ -130,7 +171,7 @@ class EmoteWorkspace:
                     raise ValueError("动态视频依赖缺失或资源包过大。")
                 env = UnityPy.load(path.read_bytes(), path=str(path.parent))
                 try:
-                    count = sum(obj.type.name == "MonoBehaviour" and obj.peek_name() == video_name for obj in env.objects)
+                    count = sum(obj.type.name == object_type and obj.peek_name() == video_name for obj in env.objects)
                     if count:
                         if count != 1:
                             raise ValueError("动态视频资源名称不唯一。")
@@ -140,6 +181,14 @@ class EmoteWorkspace:
                     gc.collect()
             if len(matches) != 1:
                 raise ValueError("无法唯一确定动态视频资源包。")
+            original = self.controller.original_bundle_path(matches[0])
+            if resource_type == MATERIAL_VIDEO_TYPE:
+                from .material_emote import inspect_material_emote_bundle
+                inspect_material_emote_bundle(original, video_name)
+            elif resource_type == CRI_VIDEO_TYPE:
+                inspect_cri_emote_bundle(original, video_name)
+            else:
+                raise ValueError("当前表情资源类型尚未验证。")
             self._video_bundles[video_name] = matches[0]
         name = self._video_bundles[video_name]
         path = self.controller.original_bundle_path(name)
@@ -253,8 +302,13 @@ class EmoteWorkspace:
         from .emote_addressables import independent_emote_identity, create_independent_emote_bundle
         identifier = self._selected_id()
         context = self.context()
+        self.require_independent(template_video)
         _, reference = self.video_bundle(template_video)
-        validate_usm_file(replacement_path, reference, template_video)
+        resource_type = context["video_types"].get(template_video, CRI_VIDEO_TYPE)
+        if resource_type == CRI_VIDEO_TYPE:
+            validate_usm_file(replacement_path, reference, template_video)
+        elif resource_type != MATERIAL_VIDEO_TYPE:
+            raise ValueError("此表情的独立动画布局尚未验证。")
         identity = independent_emote_identity(identifier)
         if identity["video_name"] in context["videos"]:
             raise ValueError("当前游戏已经存在这个独立表情地址，请先禁用旧作品再制作。")
@@ -266,6 +320,7 @@ class EmoteWorkspace:
         item = {"kind": "emote", "bundle": context["config_bundle"], "name": selection["name"],
                 "source_bundle": selection["bundle"], "emote_id": identifier,
                 "video_name": identity["video_name"], "reference_video": template_video,
+                "media_type": resource_type,
                 "custom_video": True, "independent_video": True, "extra_bundles": [identity["bundle_name"]],
                 "note": Path(replacement_path).name, "at": datetime.now().isoformat(timespec="seconds")}
         items = others + [item]
@@ -275,7 +330,11 @@ class EmoteWorkspace:
             if existing and existing.get("custom_video"):
                 self._restore_video(existing, staged, folder)
             video_output = folder / identity["bundle_name"]
-            create_independent_emote_bundle(reference, template_video, replacement_path, video_output, emote_id=identifier)
+            if resource_type == MATERIAL_VIDEO_TYPE:
+                self._validate_independent_material(replacement_path, identity)
+                _copy_atomic(replacement_path, video_output)
+            else:
+                create_independent_emote_bundle(reference, template_video, replacement_path, video_output, emote_id=identifier)
             staged[identity["bundle_name"]] = video_output
             config_name = context["config_bundle"]
             current = self.controller._draft_dir() / config_name
@@ -287,6 +346,33 @@ class EmoteWorkspace:
             self._commit({name: source if name in active else None for name, source in staged.items()}, items)
         self.controller.log(f"已保存独立动态表情：{emote_label(identifier)}")
         return item
+
+    def _validate_independent_material(self, path: Path, identity: dict) -> None:
+        from .material_emote import inspect_material_emote_bundle
+
+        inspect_material_emote_bundle(path, identity["video_name"])
+        if Path(path).name != identity["bundle_name"]:
+            raise ValueError("独立表情材质包名称与当前表情不一致。")
+        environment = UnityPy.load(Path(path).read_bytes(), path=str(Path(path).parent))
+        try:
+            materials = [obj for obj in environment.objects
+                         if obj.type.name == "Material" and obj.peek_name() == identity["video_name"]]
+            bundles = [obj for obj in environment.objects if obj.type.name == "AssetBundle"]
+            if len(materials) != 1 or len(bundles) != 1:
+                raise ValueError("独立表情材质包的对象布局不唯一。")
+            tree = bundles[0].read_typetree()
+            containers = tree.get("m_Container")
+            if (tree.get("m_Name") != identity["bundle_name"]
+                    or tree.get("m_AssetBundleName") != identity["bundle_name"]
+                    or not isinstance(containers, list) or len(containers) != 1
+                    or not isinstance(containers[0], (list, tuple)) or len(containers[0]) != 2
+                    or not isinstance(containers[0][1], dict)
+                    or containers[0][0] != identity["internal_id"]
+                    or containers[0][1].get("asset") != {"m_FileID": 0, "m_PathID": materials[0].path_id}):
+                raise ValueError("独立表情材质包的资源入口与当前表情不一致。")
+        finally:
+            environment = None
+            gc.collect()
 
     def save(self, video_name: str, replacement_path: Path | None = None) -> dict:
         identifier = self._selected_id()
@@ -300,6 +386,8 @@ class EmoteWorkspace:
                                                 and item.get("video_name") == video_name for item in others):
             raise ValueError(f"{video_label(video_name)}已被另一项自定义表情占用，请选其它原生动画或先移除那一项。")
         if replacement_path is not None:
+            if context["video_types"].get(video_name) == MATERIAL_VIDEO_TYPE:
+                raise ValueError("材质序列帧表情需要通过独立自定义动画导入，不能作为 CRI 视频替换。")
             validate_usm_file(replacement_path, original_video, video_name)
         selection = self.controller.selection
         item = {"kind": "emote", "bundle": context["config_bundle"], "name": selection["name"],

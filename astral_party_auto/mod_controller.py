@@ -184,7 +184,7 @@ class ModController:
             self.aa_dirs = directories
             self.aa_dir = directories[0]
             self.game_executable = executable.resolve()
-            self.manager = ModManager(directories, DATA_DIR)
+            self.manager = ModManager(directories, DATA_DIR, executable=self.game_executable)
             return True
 
         self.game_install = find_game_install()

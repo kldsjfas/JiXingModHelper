@@ -1504,6 +1504,21 @@ body.nav-open .sidebar {
   line-height: 1.6;
 }
 
+.resource-diagnostics-label { display: block; margin: 12px 0 6px; color: var(--muted); font-size: 12px; }
+.resource-diagnostics-output {
+  width: 100%;
+  min-height: 180px;
+  max-height: 460px;
+  resize: vertical;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--text);
+  background: #100d18;
+  font: 12px/1.7 Consolas, "Microsoft YaHei", monospace;
+  overflow-wrap: anywhere;
+}
+
 .crop-stage {
   position: relative;
   width: 100%;

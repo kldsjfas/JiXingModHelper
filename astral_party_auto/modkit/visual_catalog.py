@@ -81,28 +81,38 @@ class VisualCatalogSource:
     def fingerprint(self) -> str:
         digest = hashlib.sha256()
         digest.update(json.dumps((self.kind, self.settings_problem), ensure_ascii=False).encode("utf-8"))
-        for path in (self.path, self.settings_path):
+        official_hash = self.path.with_suffix(".hash") if self.kind == "hot_json" else None
+        if official_hash is not None and not official_hash.is_file():
+            official_hash = None
+        for path in (self.path, self.settings_path, official_hash):
             if path is not None:
-                limit = MAX_CATALOG_BYTES if path == self.path else 1024 * 1024
+                limit = MAX_CATALOG_BYTES if path == self.path else (4096 if path == official_hash else 1024 * 1024)
                 if not 0 < path.stat().st_size <= limit:
-                    raise ValueError(_checked_message(f"卡面目录来源为空或超过允许大小：{path}", self.checked_paths))
+                    raise ValueError(_checked_message(f"资源目录来源为空或超过允许大小：{path}", self.checked_paths))
                 digest.update(str(path.resolve()).encode("utf-8"))
                 with path.open("rb") as stream:
                     digest.update(hashlib.file_digest(stream, "sha256").digest())
         return digest.hexdigest()
 
-    def read(self, bundle_path: Callable[[str], Path | None]) -> VisualCatalogSnapshot:
+    def read_document(self, *, purpose: str = "资源") -> dict:
+        """共享来源校验；各制作流程再核对自己需要的地址和实际资源。"""
         try:
             if not 0 < self.path.stat().st_size <= MAX_CATALOG_BYTES:
-                raise ValueError("卡面 catalog 文件为空或超过 32 MB。")
+                raise ValueError("catalog 文件为空或超过 32 MB。")
+            if self.settings_problem:
+                raise ValueError(self.settings_problem)
             raw = _read_catalog_bundle(self.path) if self.kind == "base_bundle" else self.path.read_bytes()
-            catalog = _json_document(raw, "卡面资源 catalog")
+            return _json_document(raw, f"{purpose} catalog")
+        except (OSError, ValueError, KeyError) as exc:
+            raise ValueError(_checked_message(f"{purpose}制作暂不可用：{exc}", self.checked_paths)) from exc
+
+    def read(self, bundle_path: Callable[[str], Path | None]) -> VisualCatalogSnapshot:
+        catalog = self.read_document(purpose="卡面")
+        try:
             locations = visual_bundle_locations(catalog)
             config_names = {locations[key] for key in ("GameData_CN", "GameData_INT") if key in locations}
             if len(config_names) != 1 or any(key not in locations for key in ("Common_fui", "Common_atlas0")):
                 raise ValueError("卡面 catalog 缺少唯一的 GameData、Common 界面或图集地址。")
-            if self.settings_problem:
-                raise ValueError(self.settings_problem)
             required = config_names | {locations["Common_fui"], locations["Common_atlas0"]}
             missing = [name for name in sorted(required) if (path := bundle_path(name)) is None or not Path(path).is_file()]
             if missing:
@@ -137,8 +147,9 @@ def _base_settings_problem(settings_path: Path, catalog_path: Path, kind: str) -
     return ""
 
 
-def find_visual_catalog_source(aa_dirs: tuple[Path, ...], executable: str | Path | None = None) -> VisualCatalogSource:
-    """先查遍热更新元数据；内置目录只在能确认当前来源时供卡面读取。"""
+def find_catalog_source(aa_dirs: tuple[Path, ...], executable: str | Path | None = None,
+                        *, purpose: str = "资源") -> VisualCatalogSource:
+    """按当前安装身份查元数据，资源目录是否存在不影响 catalog 定位。"""
     from .bundles import _latest_catalog_path, unity_catalog_roots_for_exe
 
     directories = tuple(Path(directory) for directory in aa_dirs)
@@ -153,7 +164,7 @@ def find_visual_catalog_source(aa_dirs: tuple[Path, ...], executable: str | Path
             roots.extend(unity_catalog_roots_for_exe(executable))
         except (OSError, ValueError) as exc:
             raise ValueError(_checked_message(
-                "卡面制作无法核实当前游戏身份或系统 LocalLow 位置，未使用可能属于其它安装的目录。" + str(exc),
+                f"{purpose}制作无法核实当前游戏身份或系统 LocalLow 位置，未使用可能属于其它安装的目录。" + str(exc),
                 (str(data_root / "app.info"),))) from exc
     for directory in directories:
         if executable is not None:
@@ -172,6 +183,14 @@ def find_visual_catalog_source(aa_dirs: tuple[Path, ...], executable: str | Path
             candidate = root / "catalog.json"
         if candidate is not None:
             return VisualCatalogSource(candidate.resolve(), "hot_json", tuple(checked))
+    # 没有客户端身份的旧接口兼容目录内 JSON；生产环境始终按 exe 身份查找。
+    if executable is None:
+        for directory in directories:
+            candidate = directory / "catalog.json"
+            if directory.name != "StandaloneWindows64":
+                checked.append(str(candidate))
+                if candidate.is_file():
+                    return VisualCatalogSource(candidate.resolve(), "hot_json", tuple(checked))
     cached_hashes = [path for root in roots for path in root.glob("catalog_*.hash") if path.is_file()]
     bases = [path for root in base_roots for path in (root / "catalog.bundle", root / "catalog.json") if path.is_file()]
     checked.extend(str(path) for root in base_roots for path in (root / "catalog.bundle", root / "catalog.json", root / "settings.json"))
@@ -184,10 +203,14 @@ def find_visual_catalog_source(aa_dirs: tuple[Path, ...], executable: str | Path
             checked.extend(str(path) for path in cached_hashes)
             problem = "检测到热更新版本 hash，但对应 catalog JSON 缺失，无法确认内置版本生效；未使用可能过时的卡面配置。"
         return VisualCatalogSource(path.resolve(), kind, tuple(checked), settings_path if settings_path.is_file() else None, problem)
-    message = "卡面制作未找到可读取的 catalog。请保留现有缓存，并核对助手检测的游戏位置。"
+    message = f"{purpose}制作未找到可读取的 catalog。请保留现有缓存，并核对助手检测的游戏位置。"
     if len(bases) > 1:
         message = "发现多份内置 catalog，无法确认当前游戏使用哪一份，未使用可能过时的卡面配置。"
     raise ValueError(_checked_message(message, tuple(checked)))
+
+
+def find_visual_catalog_source(aa_dirs: tuple[Path, ...], executable: str | Path | None = None) -> VisualCatalogSource:
+    return find_catalog_source(aa_dirs, executable, purpose="卡面")
 
 
 def visual_bundle_locations(catalog: dict) -> dict[str, str]:
