@@ -49,7 +49,7 @@ $arch = Join-Path $out "_internal\archspec\json\cpu\microarchitectures.json"
 if (-not (Test-Path $exe)) { throw "missing exe" }
 if (-not (Test-Path $tpk)) { throw "missing UnityPy resources\lzma.tpk - package broken" }
 if (-not (Test-Path $web)) { throw "missing webui" }
-foreach ($name in @('app.js', 'audio.js', 'updates.js', 'workshop.js', 'visual-animation.js', 'workshop.css', 'styles.css')) {
+foreach ($name in @('app.js', 'audio.js', 'updates.js', 'workshop.js', 'visual-animation.js', 'game-location.js', 'workshop.css', 'styles.css')) {
   if (-not (Test-Path -LiteralPath (Join-Path $out ('_internal\astral_party_auto\webui\' + $name)))) {
     throw "missing webui resource: $name"
   }
@@ -86,6 +86,7 @@ if ($unexpectedEmoteFiles -or (Test-Path -LiteralPath (Join-Path $out '_internal
 }
 
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'PREVIEW_GUIDE.md') -Destination (Join-Path $out '使用说明.md')
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'docs\先看这里.txt') -Destination (Join-Path $out '先看这里.txt')
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'workshop\README.md') -Destination (Join-Path $out '工坊说明.md')
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'LICENSE') -Destination (Join-Path $out 'LICENSE')
 

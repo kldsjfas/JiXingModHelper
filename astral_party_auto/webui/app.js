@@ -27,6 +27,12 @@
   const state = {
     page: "dashboard",
     dashboard: null,
+    resourceDiagnosticsRequest: 0,
+    resourceDiagnosticsLoading: false,
+    resourceDiagnosticsExporting: false,
+    resourceDiagnosticsText: "",
+    resourceDiagnosticsToken: "",
+    resourceDiagnosticsChecks: null,
     installed: [],
     draft: { name: "我的Mod套装", items: [] },
     assetTypes: [],
@@ -174,6 +180,14 @@
     state.studioRequest += 1;
     state.packRequest += 1;
     state.draftDetailRequest += 1;
+    state.resourceDiagnosticsRequest += 1;
+    if (state.resourceDiagnosticsLoading || state.resourceDiagnosticsExporting) {
+      const diagnosticStatus = $("#resource-diagnostics-status");
+      if (diagnosticStatus) diagnosticStatus.textContent = "上次检查已取消，可以重新检查。";
+    }
+    state.resourceDiagnosticsLoading = false;
+    state.resourceDiagnosticsExporting = false;
+    renderResourceDiagnostics();
     stopAllAnimations();
     closeLightbox();
     state.page = page;
@@ -211,10 +225,127 @@
     if (backups) backups.textContent = String(d.backup_count ?? 0);
     if (path) {
       path.textContent = d.has_game
-        ? `自动找到的游戏：${d.game_exe || ""}`
+        ? `${d.game_location_mode === "manual" ? "手动选择的游戏" : "自动找到的游戏"}：${d.game_exe || ""}`
         : "未找到游戏，请确认已安装 Steam 或 TapTap 版吉星派对。";
     }
+    window.GameLocation?.update(d);
     setHeaderStatus(d.has_game ? "游戏已连接" : "未检测到游戏", !d.has_game);
+  }
+
+  function renderResourceDiagnostics() {
+    const working = state.resourceDiagnosticsLoading || state.resourceDiagnosticsExporting;
+    const check = $("#check-resources");
+    if (check) {
+      check.disabled = working;
+      check.textContent = state.resourceDiagnosticsLoading ? "正在检查…" : "检查资源";
+    }
+    const copy = $("#copy-resource-diagnostics");
+    if (copy) copy.disabled = working || !state.resourceDiagnosticsText;
+    const exportButton = $("#export-resource-diagnostics");
+    if (exportButton) {
+      exportButton.disabled = working || !state.resourceDiagnosticsText || !state.resourceDiagnosticsToken;
+      exportButton.textContent = state.resourceDiagnosticsExporting ? "正在导出…" : "导出诊断报告…";
+    }
+    const output = $("#resource-diagnostics-output");
+    if (output) output.value = state.resourceDiagnosticsText;
+    const summary = $("#resource-diagnostics-summary");
+    if (summary) {
+      const checks = state.resourceDiagnosticsChecks;
+      summary.classList.toggle("is-hidden", !checks);
+      const parts = [];
+      if (checks?.catalog && checks.catalog !== "readable") parts.push("资源目录尚未通过核对");
+      if (Number.isInteger(checks?.emote_total)) {
+        parts.push(`动态表情 ${checks.emote_downloaded}/${checks.emote_total} 项依赖齐全`);
+      }
+      if (checks?.emote === "missing_configuration") parts.push("表情配置包缺失");
+      if (checks?.emote === "unknown_type") parts.push("表情类型尚未识别");
+      if (checks?.visual === "available") parts.push("卡面依赖已找到");
+      if (checks?.missing_bundle_count) parts.push(`缺少 ${checks.missing_bundle_count} 个资源包，名称见报告`);
+      if (checks?.independent === "missing_hash") parts.push("独立导入缺少可核对的版本 hash");
+      summary.textContent = parts.join(" · ");
+    }
+  }
+
+  function invalidateResourceDiagnostics(message = "游戏位置已更改，请重新检查资源。") {
+    state.resourceDiagnosticsRequest += 1;
+    state.resourceDiagnosticsLoading = false;
+    state.resourceDiagnosticsExporting = false;
+    state.resourceDiagnosticsText = "";
+    state.resourceDiagnosticsToken = "";
+    state.resourceDiagnosticsChecks = null;
+    renderResourceDiagnostics();
+    const status = $("#resource-diagnostics-status");
+    if (status) status.textContent = message;
+  }
+
+  async function checkResources() {
+    if (state.page !== "dashboard" || state.resourceDiagnosticsLoading || state.resourceDiagnosticsExporting) return;
+    const request = ++state.resourceDiagnosticsRequest;
+    state.resourceDiagnosticsLoading = true;
+    renderResourceDiagnostics();
+    const status = $("#resource-diagnostics-status");
+    if (status) status.textContent = "正在检查本机资源位置…";
+    const current = () => request === state.resourceDiagnosticsRequest && state.page === "dashboard";
+    try {
+      const report = await call("get_resource_diagnostics", { quiet: true });
+      if (!current()) return;
+      if (typeof report?.text !== "string" || !report.text.trim()) throw new Error("未收到可读取的诊断报告");
+      state.resourceDiagnosticsText = report.text;
+      state.resourceDiagnosticsToken = typeof report.report_token === "string" ? report.report_token : "";
+      state.resourceDiagnosticsChecks = report.checks && typeof report.checks === "object" ? report.checks : null;
+      if (status) status.textContent = "检查完成。报告包含本机路径，核对后可复制或导出给维护者。";
+    } catch (error) {
+      if (current() && status) status.textContent = `检查未完成：${error.message || error}。可以重试。`;
+    } finally {
+      if (current()) {
+        state.resourceDiagnosticsLoading = false;
+        renderResourceDiagnostics();
+      }
+    }
+  }
+
+  async function copyResourceDiagnostics() {
+    if (state.page !== "dashboard" || state.resourceDiagnosticsLoading || state.resourceDiagnosticsExporting || !state.resourceDiagnosticsText) return;
+    const request = state.resourceDiagnosticsRequest;
+    const report = state.resourceDiagnosticsText;
+    const current = () => request === state.resourceDiagnosticsRequest && state.page === "dashboard";
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error("剪贴板不可用");
+      await navigator.clipboard.writeText(report);
+      if (current()) $("#resource-diagnostics-status").textContent = "诊断信息已复制。";
+    } catch (_) {
+      if (!current()) return;
+      const output = $("#resource-diagnostics-output");
+      output?.focus();
+      output?.select();
+      $("#resource-diagnostics-status").textContent = "无法自动复制，已选中报告，请按 Ctrl+C 复制。";
+    }
+  }
+
+  async function exportResourceDiagnostics() {
+    if (state.page !== "dashboard" || state.resourceDiagnosticsLoading || state.resourceDiagnosticsExporting
+        || !state.resourceDiagnosticsText || !state.resourceDiagnosticsToken) return;
+    const request = state.resourceDiagnosticsRequest;
+    const token = state.resourceDiagnosticsToken;
+    const current = () => request === state.resourceDiagnosticsRequest && state.page === "dashboard"
+      && token === state.resourceDiagnosticsToken;
+    state.resourceDiagnosticsExporting = true;
+    renderResourceDiagnostics();
+    $("#resource-diagnostics-status").textContent = "选择诊断报告的保存位置…";
+    try {
+      const result = await call("export_resource_diagnostics", { quiet: true }, token);
+      if (!current()) return;
+      $("#resource-diagnostics-status").textContent = result
+        ? `已导出：${result.name || "诊断报告.txt"}。可作为文件发送给维护者。`
+        : "已取消导出，当前报告仍保留。";
+    } catch (error) {
+      if (current()) $("#resource-diagnostics-status").textContent = `导出未完成：${error.message || error}。可以重试。`;
+    } finally {
+      if (current()) {
+        state.resourceDiagnosticsExporting = false;
+        renderResourceDiagnostics();
+      }
+    }
   }
 
   function renderInstalled() {
@@ -841,8 +972,7 @@ ${row.bundle}`;
     if (state.emoteSelectionKey !== key) {
       resetEmoteReplacement();
       resetEmotePreview();
-      // Existing videos are an explicit alternative; the original preview
-      // comes from emote.video_name independently of this optional picker.
+      // 原版预览不依赖这个可选的原生动图下拉框。
       state.emoteVideoName = "";
       state.emoteDraftVideoName = emote?.draft_video_name || "";
       state.emoteSelectionKey = key;
@@ -868,14 +998,21 @@ ${row.bundle}`;
     picker.disabled = emote.editable !== true;
     choice = selectedEmoteVideo();
     const stored = state.emoteReplacement;
-    if (stored && (emote.editable !== true || stored.sourceKey !== key || !stored.templateName)) resetEmoteReplacement();
+    if (stored && (emote.editable !== true || emote.independent_supported === false || stored.sourceKey !== key || !stored.templateName)) resetEmoteReplacement();
     const editable = emote.editable === true;
-    $("#emote-import").disabled = !editable;
+    const canImport = editable && emote.independent_supported !== false;
+    $("#emote-import").disabled = !canImport;
     $("#emote-export").disabled = !editable || !choice;
+    $("#emote-export").textContent = !choice ? "导出所选原动图…"
+      : choice.media_kind === "material_sequence" ? "导出原动图…" : "导出原 USM…";
     $("#emote-save").disabled = !editable || (!state.emoteReplacement && !choice);
     const current = emote.choices?.find((entry) => entry.name === emote.video_name);
     $("#emote-current").textContent = `原来的表情：${current?.label || (emote.video_name ? "游戏动态表情" : "静态图片")}`;
-    $("#emote-reason").textContent = emote.editable === true ? "" : emote.reason || "这个表情暂时不能替换成动态表情。";
+    $("#emote-guidance").textContent = editable && !canImport
+      ? "当前可使用下方的游戏已有动图。自定义导入的限制见下面的说明。"
+      : "直接导入动图或视频，让当前表情动起来。自动识别并转换 GIF、APNG、WebP、MP4、WebM 等；普通视频背景会保留，不会自动抠图。";
+    $("#emote-reason").textContent = !editable ? emote.reason || "这个表情暂时不能替换成动态表情。"
+      : !canImport ? emote.independent_reason || emote.reason || "当前资源可以绑定游戏已有动图，暂不支持自定义导入。" : "";
     const ids = choice?.affected_ids || [];
     $("#emote-shared").textContent = "仅修改当前表情，其他原生动图保留。";
     $("#emote-shared-ids").textContent = ids.length ? `同时使用这个动图的表情编号：${ids.join("、")}` : "没有其他表情。";
@@ -884,7 +1021,7 @@ ${row.bundle}`;
     if (candidate) {
       const size = Number(candidate.size);
       const fileSize = Number.isFinite(size) && size >= 0 ? `${(size / 1024 / 1024).toFixed(2)} MiB` : "大小未知";
-      const info = candidate.video_info || {};
+      const info = candidate.video_info || candidate.animation || {};
       const dimensions = info.width && info.height ? `${info.width} × ${info.height}` : "";
       const animation = candidate.animation || {};
       const count = animation.total || animation.frames?.length;
@@ -896,7 +1033,7 @@ ${row.bundle}`;
       $("#emote-file-status").textContent = state.emoteImportError || (choice && choice.name !== state.emoteDraftVideoName
         ? "未导入自己的文件：保存后使用所选游戏动图。" : state.emoteDraftVideoName
         ? "已保存到作品集，右侧为保存后的实际效果。"
-        : "直接导入你的动图或视频，预览满意后保存。");
+        : canImport ? "直接导入你的动图或视频，预览满意后保存。" : "可展开「也可使用游戏已有动图」，选择后保存。");
     }
     renderEmotePreviews();
   }
@@ -975,7 +1112,7 @@ ${row.bundle}`;
 
   async function chooseEmoteFile() {
     const emote = state.selection?.emote;
-    if (emote?.editable !== true) return;
+    if (emote?.editable !== true || emote.independent_supported === false) return;
     const key = selectionKey();
     const selectionRequest = state.selectionRequest;
     const templateName = emote.default_video_name || emote.video_name || "";
@@ -983,7 +1120,7 @@ ${row.bundle}`;
     const request = state.emoteRequest;
     renderEmoteSettings();
     const current = () => request === state.emoteRequest && selectionRequest === state.selectionRequest &&
-      key === selectionKey();
+      key === selectionKey() && state.selection?.emote?.independent_supported !== false;
     try {
       const data = await call("choose_emote_file", { busy: true, busyText: "自动识别并转换…" }, templateName);
       if (!current()) return;
@@ -1005,7 +1142,8 @@ ${row.bundle}`;
     const choice = selectedEmoteVideo();
     if (state.selection?.emote?.editable !== true || !choice) return;
     try {
-      const data = await call("export_emote_video", { busy: true, busyText: "导出原 USM…" }, choice.name);
+      const data = await call("export_emote_video", { busy: true,
+        busyText: choice.media_kind === "material_sequence" ? "导出原动图…" : "导出原 USM…" }, choice.name);
       if (data) toast(`已导出：${data.path || data.name || choice.name}`);
     } catch (_) {}
   }
@@ -1018,6 +1156,7 @@ ${row.bundle}`;
     const request = state.emoteRequest;
     const candidate = state.emoteReplacement;
     const useCustom = !!candidate && candidate.sourceKey === key && !!candidate.templateName;
+    if (useCustom && state.selection.emote.independent_supported === false) return;
     const videoName = useCustom ? candidate.templateName : choice?.name;
     if (!videoName) return;
     try {
@@ -1835,6 +1974,14 @@ ${row.bundle}`;
     $$("[data-page-link]").forEach((btn) =>
       btn.addEventListener("click", () => showPage(btn.dataset.pageLink))
     );
+    $("#check-resources")?.addEventListener("click", checkResources);
+    $("#copy-resource-diagnostics")?.addEventListener("click", copyResourceDiagnostics);
+    $("#export-resource-diagnostics")?.addEventListener("click", exportResourceDiagnostics);
+    $$("[data-resource-diagnostics]").forEach((btn) => btn.addEventListener("click", () => {
+      showPage("dashboard");
+      $("#resource-diagnostics")?.scrollIntoView({ block: "start" });
+      $("#check-resources")?.focus();
+    }));
 
     $("#mobile-nav-toggle")?.addEventListener("click", () => {
       document.body.classList.toggle("nav-open");
@@ -2130,7 +2277,9 @@ ${row.bundle}`;
         renderInstalled();
         toast(`已还原 ${data.restored || 0} 个资源包`);
       } else if (action === "refresh-detection") {
+        invalidateResourceDiagnostics("旧诊断已清空，完成游戏检测后可重新检查资源。");
         state.dashboard = await call("refresh_detection", { busy: true, busyText: "检测中…" });
+        $("#resource-diagnostics-status").textContent = "游戏检测已刷新，请重新检查资源。";
         renderDashboard();
         toast("已刷新检测");
       } else if (action === "open-assets") {
@@ -2774,6 +2923,32 @@ ${row.bundle}`;
     setHeaderStatus("连接后端…");
     const boot = await call("bootstrap", { quiet: false });
     window.ProjectUpdates?.init({ api, toast, appInfo: boot.app_info || {} });
+    window.GameLocation?.init({
+      api: (name, ...args) => call(name, { busy: true, quiet: true, busyText: "检查游戏位置…" }, ...args),
+      toast,
+      onChanged: (data) => {
+        state.dashboard = data.dashboard;
+        state.installed = data.installed || [];
+        state.selection = null;
+        state.resources = [];
+        state.pendingMod = null;
+        state.selectedResources = [];
+        state.browseRequestSeq += 1;
+        state.browseRefreshSeq += 1;
+        state.selectionRequest += 1;
+        state.comparisonRequest += 1;
+        state.replacementRequest += 1;
+        state.studioRequest += 1;
+        state.draftDetailRequest += 1;
+        state.replacement = null;
+        resetEmoteReplacement();
+        resetEmotePreview();
+        window.VisualAnimation?.leave();
+        invalidateResourceDiagnostics();
+        renderDashboard();
+        renderInstalled();
+      },
+    });
     state.dashboard = boot.dashboard;
     state.installed = boot.installed || [];
     state.draft = boot.draft || state.draft;

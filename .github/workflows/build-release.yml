@@ -75,7 +75,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
+          release_flags=()
+          if [[ "${GITHUB_REF_NAME}" == *-* ]]; then
+            release_flags+=(--prerelease)
+          fi
           gh release create "${GITHUB_REF_NAME}" release/JiXingModHelper.zip release/SHA256SUMS.txt \
             --repo "${GITHUB_REPOSITORY}" \
             --title "吉星派对 Mod 助手 ${GITHUB_REF_NAME}" \
-            --notes-file release/RELEASE_NOTES.md
+            --notes-file release/RELEASE_NOTES.md "${release_flags[@]}"

@@ -541,5 +541,61 @@ class EmoteApiTests(unittest.TestCase):
         self.assertIsNone(self.api._draft_crop_path)
 
 
+    def test_material_import_builds_independent_bundle_without_usm_conversion(self):
+        self.workspace._selected_id.return_value = 120101008
+        self.workspace.context.return_value = {"source_key": "catalog-current",
+            "video_types": {"VEmoji_A": "UnityEngine.Material"}}
+
+        def prepare(source, reference, name, output, **options):
+            self.assertEqual(options["emote_id"], 120101008)
+            self.assertEqual(Path(output).name, "jixing_emote_120101008.bundle")
+            Path(output).write_bytes(b"prepared independent material")
+            return {"path": str(output), "animation": self.animation, "size": Path(output).stat().st_size}
+
+        with patch("astral_party_auto.modkit.material_emote.prepare_material_emote", side_effect=prepare) as converter:
+            result = self.choose()
+        converter.assert_called_once()
+        self.preparer.assert_not_called()
+        self.assertEqual(result["animation"], self.animation)
+        self.assertEqual(self.api._emote_replacement["media_type"], "UnityEngine.Material")
+        saved = self.api.save_emote("VEmoji_A", True)
+        self.assertTrue(saved["ok"], saved.get("error"))
+        self.assertFalse(Path(result["path"]).exists())
+        self.assertTrue(self.movie.exists())
+
+    def test_catalog_changes_after_import_reject_stale_candidate(self):
+        self.workspace.context.return_value = {"source_key": "catalog-before"}
+        self.choose()
+        self.workspace.context.return_value = {"source_key": "catalog-after"}
+        result = self.api.save_emote("VEmoji_A", True)
+        self.assert_rejected_without_write(result)
+        self.assertIn("资源目录已经变化", result["error"])
+
+    def test_catalog_changes_during_conversion_reject_candidate(self):
+        self.workspace.context.return_value = {"source_key": "catalog-before"}
+        def convert(*args, **options):
+            prepared = self.prepare_media(*args, **options)
+            self.workspace.context.return_value = {"source_key": "catalog-after"}
+            return prepared
+        self.preparer.side_effect = convert
+        result = self.api.choose_emote_file("VEmoji_A")
+        self.assert_rejected_without_write(result)
+        self.assertIn("资源目录在转换期间变化", result["error"])
+
+    def test_missing_independent_support_rejects_before_file_dialog(self):
+        self.workspace.require_independent.side_effect = ValueError("缺少官方版本 hash")
+        self.assert_rejected_without_write(self.api.choose_emote_file("VEmoji_A"))
+        self.api._pick_path.assert_not_called()
+
+    def test_material_preview_uses_sequence_reader_instead_of_video_decoder(self):
+        self.workspace.context.return_value = {"video_types": {"VEmoji_A": "UnityEngine.Material"}}
+        with patch("astral_party_auto.modkit.material_emote.read_material_emote_preview", return_value=self.animation) as reader:
+            result = self.api.get_emote_preview("VEmoji_A")
+        self.assertTrue(result["ok"], result.get("error"))
+        self.assertEqual(result["data"], self.animation)
+        reader.assert_called_once_with(self.original, "VEmoji_A")
+        self.previewer.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

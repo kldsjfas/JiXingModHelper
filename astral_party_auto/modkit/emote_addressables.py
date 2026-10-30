@@ -17,11 +17,10 @@ from .cri_emote import (
     MAX_BUNDLE_BYTES, MAX_USM_BYTES, _check_movie_cache, _compatible,
     _embedded_object, _load_bundle, _read_file, inspect_usm_bytes,
 )
-from .emote_catalog import MAX_CATALOG_BYTES, MAX_ENTRIES, read_emote_locations
+from .emote_catalog import CRI_VIDEO_TYPE, MATERIAL_VIDEO_TYPE, MAX_CATALOG_BYTES, MAX_ENTRIES, read_emote_locations
 
 _BUNDLE_PROVIDER = "UnityEngine.ResourceManagement.ResourceProviders.AssetBundleProvider"
 _ASSET_PROVIDER = "UnityEngine.ResourceManagement.ResourceProviders.BundledAssetProvider"
-_VIDEO_TYPE = "CriWare.Assets.CriManaUsmAsset"
 _OPTIONS_TYPE = "UnityEngine.ResourceManagement.ResourceProviders.AssetBundleRequestOptions"
 _BUNDLE_NAME = re.compile(r"jixing_emote_([0-9]+)\.bundle\Z")
 
@@ -157,11 +156,15 @@ def apply_catalog_address_patch(catalog_dict: dict, template_video_key: str, new
         raise ValueError("参考动态表情不存在或地址不唯一。")
     template = entries[template_buckets[0][0]]
     providers, types = catalog_dict["m_ProviderIds"], catalog_dict["m_resourceTypes"]
-    if providers[template[1]] != _ASSET_PROVIDER or types[template[6]].get("m_ClassName") != _VIDEO_TYPE:
+    template_type = types[template[6]].get("m_ClassName")
+    if providers[template[1]] != _ASSET_PROVIDER or template_type not in {CRI_VIDEO_TYPE, MATERIAL_VIDEO_TYPE}:
         raise ValueError("参考表情的加载器或资源类型不受支持。")
-    if template[2] < 0 or len(buckets[template[2]][2]) < 2:
+    minimum_dependencies = 2 if template_type == CRI_VIDEO_TYPE else 1
+    if template[2] < 0 or len(buckets[template[2]][2]) < minimum_dependencies:
         raise ValueError("参考视频缺少视频包或共享脚本包依赖。")
     dependencies = buckets[template[2]][2]
+    if template_type == MATERIAL_VIDEO_TYPE and len(dependencies) != 1:
+        raise ValueError("材质表情包含尚未验证的多包依赖，不能猜测独立资源包顺序。")
     if len(set(dependencies)) != len(dependencies):
         raise ValueError("参考视频包含重复资源包依赖。")
     primary_bundle_id = dependencies[0]

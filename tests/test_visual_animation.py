@@ -85,6 +85,21 @@ class AtlasLayoutTests(unittest.TestCase):
 
 
 class VisualSelectionTests(unittest.TestCase):
+    def test_saved_candidate_cannot_cross_a_catalog_source_change(self):
+        selection = {"asset_type": "texture", "bundle": "card.bundle", "name": "UT_HandCard_1"}
+        controller = Mock(selection=selection)
+        workspace = VisualAnimationWorkspace(controller)
+        workspace._selection = Mock(return_value=(selection, {}))
+        def changed_context():
+            workspace._source_key = ("current-bundles", "new-catalog")
+            return {}
+        workspace.context = Mock(side_effect=changed_context)
+        candidate = {"item": {"name": selection["name"], "source_bundle": selection["bundle"]},
+                     "catalog_source_key": ("current-bundles", "old-catalog")}
+        with self.assertRaisesRegex(ValueError, "目录来源.*变化"):
+            workspace.save(candidate)
+        controller.emote_workspace._commit.assert_not_called()
+
     def test_configuration_reference_is_editable_even_with_a_new_resource_name(self):
         controller = Mock(draft_items=[])
         workspace = VisualAnimationWorkspace(controller)

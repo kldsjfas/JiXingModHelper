@@ -1124,6 +1124,7 @@ input {
 .text-tools label { display: grid; flex: 1 1 190px; gap: 6px; color: var(--muted); font-size: 12px; }
 .text-tools input { min-width: 0; width: 100%; }
 .editor-status { color: var(--muted); font-size: 12px; line-height: 1.65; }
+#visual-animation-reason { white-space: pre-line; overflow-wrap: anywhere; }
 .text-compare > label { display: grid; min-width: 0; gap: 9px; color: var(--muted); font-size: 12px; }
 #studio-original-text { width: 100%; min-height: 340px; padding: 14px; margin: 0; border: 1px solid var(--line); border-radius: 12px; color: var(--muted); background: #1b1626; resize: vertical; font: 12px/1.6 Consolas, "Microsoft YaHei UI", monospace; }
 .text-compare #studio-text { min-height: 340px; }
@@ -1501,6 +1502,21 @@ body.nav-open .sidebar {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.6;
+}
+
+.resource-diagnostics-label { display: block; margin: 12px 0 6px; color: var(--muted); font-size: 12px; }
+.resource-diagnostics-output {
+  width: 100%;
+  min-height: 260px;
+  max-height: 460px;
+  resize: vertical;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--text);
+  background: #100d18;
+  font: 12px/1.7 Consolas, "Microsoft YaHei", monospace;
+  overflow-wrap: anywhere;
 }
 
 .crop-stage {

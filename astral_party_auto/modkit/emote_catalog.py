@@ -2,17 +2,19 @@
 from __future__ import annotations
 
 import base64
-import json
 import re
 import struct
-from pathlib import Path
 
-from .bundles import _latest_catalog_path, bundle_file_map
+from .bundles import bundle_file_map
+from .visual_catalog import find_catalog_source
 
 VIDEO_NAME = re.compile(r"VEmoji_[0-9]+(?:_[0-9]+)+\Z")
 TEXTURE_NAME = re.compile(r"UT_Item_Emoji_([0-9]+)_([0-9]+)\Z")
 MAX_CATALOG_BYTES = 32 * 1024 * 1024
 MAX_ENTRIES = 200_000
+CRI_VIDEO_TYPE = "CriWare.Assets.CriManaUsmAsset"
+MATERIAL_VIDEO_TYPE = "UnityEngine.Material"
+EMOTE_RESOURCE_TYPES = {CRI_VIDEO_TYPE, MATERIAL_VIDEO_TYPE}
 
 
 def emote_id_from_texture(name: str) -> int | None:
@@ -27,6 +29,9 @@ def emote_id_from_texture(name: str) -> int | None:
 
 def read_emote_locations(catalog: dict) -> dict:
     """读取紧凑 catalog 的地址、类型及直接 bundle 依赖。"""
+    if not isinstance(catalog, dict):
+        raise ValueError("表情资源目录的根节点不是对象。")
+
     def decode(key):
         value = catalog.get(key)
         if not isinstance(value, str) or len(value) > MAX_CATALOG_BYTES * 2:
@@ -52,6 +57,8 @@ def read_emote_locations(catalog: dict) -> dict:
         raise ValueError("表情资源条目数量不合法。")
     if not 0 <= bucket_count <= MAX_ENTRIES:
         raise ValueError("表情资源键数量不合法。")
+    if integer(keys, 0) != bucket_count:
+        raise ValueError("表情资源键数量与索引不一致。")
     entries = [struct.unpack_from("<7i", entries_raw, 4 + index * 28) for index in range(entry_count)]
     buckets = []
     offset = 4
@@ -70,12 +77,15 @@ def read_emote_locations(catalog: dict) -> dict:
             start = key_offset + 5
             if not 0 <= length <= 4096 or start + length > len(keys):
                 raise ValueError("表情资源名称长度不合法。")
-            name = keys[start:start + length].decode("ascii" if keys[key_offset] == 0 else "utf-16le")
+            try:
+                name = keys[start:start + length].decode("ascii" if keys[key_offset] == 0 else "utf-16le")
+            except UnicodeError as exc:
+                raise ValueError("表情资源名称编码无效。") from exc
         buckets.append((name, ids))
     if offset != len(buckets_raw):
         raise ValueError("表情资源目录存在未识别尾部数据。")
 
-    result = {"config_bundles": set(), "videos": {}}
+    result = {"config_bundles": set(), "videos": {}, "video_types": {}}
     for row in entries:
         internal, _, dependency, _, _, primary, resource_type = row
         if not 0 <= primary < len(buckets) or not 0 <= internal < len(internal_ids) or not 0 <= resource_type < len(resource_types):
@@ -85,8 +95,10 @@ def read_emote_locations(catalog: dict) -> dict:
         is_video = isinstance(name, str) and VIDEO_NAME.fullmatch(name)
         if not is_config and not is_video:
             continue
-        expected_type = "UnityEngine.TextAsset" if is_config else "CriWare.Assets.CriManaUsmAsset"
-        if resource_types[resource_type].get("m_ClassName") != expected_type:
+        type_record = resource_types[resource_type]
+        class_name = type_record.get("m_ClassName") if isinstance(type_record, dict) else None
+        expected_types = {"UnityEngine.TextAsset"} if is_config else EMOTE_RESOURCE_TYPES
+        if class_name not in expected_types:
             raise ValueError("表情资源类型与当前游戏不匹配。")
         if not 0 <= dependency < len(buckets):
             raise ValueError("表情资源缺少 bundle 依赖。")
@@ -105,30 +117,35 @@ def read_emote_locations(catalog: dict) -> dict:
         if is_config:
             result["config_bundles"].update(bundle_names)
         else:
+            if name in result["video_types"] and result["video_types"][name] != class_name:
+                raise ValueError("同一表情地址包含不同类型，无法确认实际播放资源。")
             result["videos"].setdefault(name, set()).update(bundle_names)
+            result["video_types"][name] = class_name
     return result
 
 
-def discover_emote_locations(aa_dirs) -> dict:
+def discover_emote_locations(aa_dirs, executable=None, *, source=None) -> dict:
+    """表情和卡面使用同一份当前目录，不拼接不同版本的地址。"""
+    source = source or find_catalog_source(aa_dirs, executable, purpose="动态表情")
     files = bundle_file_map(aa_dirs)
-    config_bundles, videos = set(), {}
-    seen = set()
-    for directory in aa_dirs:
-        directory = Path(directory)
-        catalog_path = _latest_catalog_path(directory)
-        if catalog_path is None:
-            catalog_path = directory / "catalog.json"
-        if catalog_path in seen or not catalog_path.is_file():
-            continue
-        seen.add(catalog_path)
-        if catalog_path.stat().st_size > MAX_CATALOG_BYTES:
-            raise ValueError("表情资源目录超过 32 MB。")
-        locations = read_emote_locations(json.loads(catalog_path.read_text(encoding="utf-8-sig")))
-        config_bundles.update(name for name in locations["config_bundles"] if name in files)
-        for name, dependencies in locations["videos"].items():
-            # 热更新目录在前；旧基础目录不得覆盖当前同名地址。
-            if name not in videos and dependencies and dependencies <= files.keys():
-                videos[name] = sorted(dependencies)
-    if len(config_bundles) != 1 or not videos:
-        raise ValueError("缺少完整的表情配置或动态视频，请更新游戏资源后重试。")
-    return {"config_bundle": next(iter(config_bundles)), "videos": videos}
+    try:
+        if not 0 < source.path.stat().st_size <= MAX_CATALOG_BYTES:
+            raise ValueError("表情资源目录为空或超过 32 MB。")
+        document = source.read_document(purpose="动态表情")
+        locations = read_emote_locations(document)
+        config_bundles = locations["config_bundles"]
+        if len(config_bundles) != 1:
+            raise ValueError("当前 catalog 缺少唯一的表情配置地址。")
+        config_name = next(iter(config_bundles))
+        if config_name not in files:
+            raise ValueError(f"当前表情配置尚未在本机找到：{config_name}")
+        videos = {name: sorted(dependencies) for name, dependencies in locations["videos"].items()
+                  if dependencies and dependencies <= files.keys()}
+        if not videos:
+            missing = sorted(set().union(*locations["videos"].values()) - files.keys()) if locations["videos"] else []
+            detail = "、".join(missing[:8])
+            raise ValueError("当前目录中没有已完整下载的动态表情资源。" + ("缺少：" + detail if detail else ""))
+        return {"config_bundle": config_name, "videos": videos,
+                "video_types": {name: locations["video_types"][name] for name in videos}}
+    except (OSError, ValueError, KeyError) as exc:
+        raise ValueError("动态表情暂不可用：" + str(exc) + "\n已检查：\n" + "\n".join(source.checked_paths)) from exc

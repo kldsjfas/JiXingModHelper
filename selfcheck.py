@@ -217,6 +217,8 @@ def check_hot_update_cache() -> None:
             / "StandaloneWindows64"
         )
         legacy_dir.mkdir(parents=True)
+        (executable.parent / "AstralParty_CN_Data" / "app.info").write_text(
+            "feimo\nAstralParty_CN\n", encoding="utf-8")
         profile = root / "profile"
         active_name = "a" * 32 + ".bundle"
         stale_name = "b" * 32 + ".bundle"

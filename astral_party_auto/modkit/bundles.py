@@ -18,11 +18,11 @@ from .dynamic import (
     sequence_groups_from_names,
     text_asset_bytes,
 )
+from .unity_paths import local_low_dir, read_unity_identity, unity_catalog_roots_for_exe
 
 
 # 资源包相对客户端 exe 所在目录的位置
 AA_SUBPATH = ("StreamingAssets", "aa", "StandaloneWindows64")
-ADDRESSABLES_CACHE_SUBPATH = ("AppData", "LocalLow", "feimo")
 UNITY_CACHE_DATA_FILE = "__data"
 
 _TEXTURE_TYPES = {"Texture2D", "Sprite"}
@@ -67,16 +67,9 @@ def hot_update_dir_for_exe(
     *,
     user_profile: str | Path | None = None,
 ) -> Path:
-    """返回新版 Addressables 热更新缓存根目录。"""
-    exe = Path(exe_path)
-    profile_value = user_profile or os.environ.get("USERPROFILE") or Path.home()
-    profile = Path(profile_value)
-    return profile.joinpath(
-        *ADDRESSABLES_CACHE_SUBPATH,
-        exe.stem,
-        "com.unity.addressables",
-        "AssetBundles",
-    )
+    """按 app.info 的公司/产品身份与系统 LocalLow 位置定位用户缓存。"""
+    company, product = read_unity_identity(exe_path)
+    return local_low_dir(user_profile=user_profile) / company / product / "com.unity.addressables" / "AssetBundles"
 
 
 def _legacy_aa_dir_for_exe(exe_path: str | Path) -> Path:
@@ -97,11 +90,15 @@ def bundle_dirs_for_exe(
 ) -> tuple[Path, ...]:
     """优先读取客户端数据目录缓存，再回退用户缓存与安装时的基础包。"""
     client_cache_dir = _client_cache_dir_for_exe(exe_path)
-    hot_update_dir = hot_update_dir_for_exe(exe_path, user_profile=user_profile)
+    try:
+        hot_update_dir = hot_update_dir_for_exe(exe_path, user_profile=user_profile)
+    except (OSError, ValueError):
+        # 身份未知时仍可使用明确属于当前安装的资源；不能猜另一个产品的用户目录。
+        hot_update_dir = None
     legacy_dir = _legacy_aa_dir_for_exe(exe_path)
     directories = tuple(
         directory
-        for directory in _normalize_bundle_dirs((client_cache_dir, hot_update_dir, legacy_dir))
+        for directory in _normalize_bundle_dirs((client_cache_dir, *((hot_update_dir,) if hot_update_dir else ()), legacy_dir))
         if directory.is_dir()
     )
     return directories or (legacy_dir,)

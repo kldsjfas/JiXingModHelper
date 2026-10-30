@@ -125,7 +125,8 @@ class EmoteCatalogTests(unittest.TestCase):
                 catalog.discover_emote_locations((root,))
             (root / "scripts.bundle").write_bytes(b"placeholder")
             result = catalog.discover_emote_locations((root,))
-            self.assertEqual(result, {"config_bundle": "config.bundle", "videos": {"VEmoji_101_09": ["scripts.bundle", "video.bundle"]}})
+            self.assertEqual(result, {"config_bundle": "config.bundle", "videos": {"VEmoji_101_09": ["scripts.bundle", "video.bundle"]},
+                                      "video_types": {"VEmoji_101_09": catalog.CRI_VIDEO_TYPE}})
 
     def test_catalog_size_gate_before_reading(self):
         with tempfile.TemporaryDirectory() as temporary:
