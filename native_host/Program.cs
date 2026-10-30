@@ -90,9 +90,11 @@ internal sealed class MainWindow : Form
         _url = url;
         _profilePath = profilePath;
         Text = Program.WindowTitle;
-        // 默认接近用户截图外框 ~1866×1182（含标题栏），客户区略大便于浏览
-        ClientSize = new Size(1840, 1120);
-        MinimumSize = new Size(1280, 800);
+        var workingArea = Screen.FromPoint(Cursor.Position).WorkingArea;
+        // 小屏幕和任务栏较高时也要能看到完整窗口及关闭按钮。
+        Size = new Size(Math.Min(1860, Math.Max(1, workingArea.Width - 40)),
+                        Math.Min(1160, Math.Max(1, workingArea.Height - 40)));
+        MinimumSize = new Size(Math.Min(960, Width), Math.Min(640, Height));
         StartPosition = FormStartPosition.CenterScreen;
         Controls.Add(_webView);
 
@@ -150,6 +152,19 @@ internal sealed class MainWindow : Form
                 }
             };
             _webView.Source = new Uri(_url);
+        }
+        catch (WebView2RuntimeNotFoundException)
+        {
+            MessageBox.Show(
+                "缺少 Microsoft Edge WebView2 Runtime，暂时无法显示助手界面。\n\n" +
+                "请从微软官方页面安装 Evergreen WebView2 Runtime（Windows x64），再重新打开助手：\n" +
+                "https://developer.microsoft.com/microsoft-edge/webview2/\n\n" +
+                "助手已自带 Python 和 .NET，不需要另外安装；请保留完整解压目录。",
+                Program.WindowTitle,
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error
+            );
+            Close();
         }
         catch (Exception exception)
         {

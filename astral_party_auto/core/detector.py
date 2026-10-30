@@ -205,6 +205,67 @@ def _is_game_executable(path: Path) -> bool:
     )
 
 
+def manual_game_install(path: str | Path) -> GameInstall:
+    """校验用户选中的安装，不把启动器或另一款 Unity 游戏当作目标。"""
+    from ..modkit.unity_paths import read_unity_identity, unity_data_dir_for_exe
+
+    selected = Path(path).resolve()
+    if selected.is_dir():
+        if selected == Path(selected.anchor) or selected.name.lower().endswith("_data"):
+            raise ValueError("请选择吉星派对的安装文件夹，或直接选择实际的游戏 exe。")
+        queue, candidates, visited = [(selected, 0)], [], 0
+        ignored = {"streamingassets", "resources", "plugins", "il2cpp_data", "assetbundles",
+                   "modkit_data", "made_mods", "monobleedingedge"}
+        while queue:
+            directory, depth = queue.pop(0)
+            try:
+                with os.scandir(directory) as entries:
+                    for entry in entries:
+                        visited += 1
+                        if visited > 256:
+                            raise ValueError("所选目录内容太多，请进入游戏程序所在文件夹，或直接选择游戏 exe。")
+                        if (entry.is_symlink()
+                                or getattr(entry.stat(follow_symlinks=False), "st_file_attributes", 0) & 0x400):
+                            continue
+                        if entry.is_file(follow_symlinks=False) and Path(entry.name).suffix.lower() == ".exe":
+                            try:
+                                candidate = manual_game_install(Path(entry.path))
+                            except ValueError:
+                                continue
+                            candidates.append(candidate)
+                        elif (depth < 2 and entry.is_dir(follow_symlinks=False)
+                              and not entry.name.lower().endswith("_data") and entry.name.lower() not in ignored):
+                            queue.append((Path(entry.path), depth + 1))
+            except OSError as exc:
+                raise ValueError(f"无法读取所选游戏目录：{directory}") from exc
+        unique = {}
+        for candidate in candidates:
+            executable = candidate.cn_exe or candidate.int_exe
+            unique[os.path.normcase(str(executable))] = candidate
+        candidates = list(unique.values())
+        if not candidates:
+            raise ValueError("这个文件夹里没有找到带有有效 app.info 的吉星派对客户端，请选择实际游戏 exe。")
+        if len(candidates) > 1:
+            raise ValueError("找到多个客户端，可能同时安装了国服、国际服或多个版本。请用「选择游戏程序」明确选择要修改的 exe。")
+        return candidates[0]
+    if not selected.is_file() or selected.suffix.lower() != ".exe":
+        raise ValueError("请选择吉星派对的游戏程序，不能选择启动器、资源包或其它程序。")
+    try:
+        company, product = read_unity_identity(selected)
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"所选程序没有有效的 Unity 安装信息：{exc}") from exc
+    products = {"astralparty", "astralparty_cn", "astralparty_int", "吉星派对", "星引擎派对"}
+    if company.casefold() != "feimo" or product.casefold() not in products:
+        raise ValueError("所选程序的 app.info 不是已识别的吉星派对客户端，请核对游戏位置。")
+    data = unity_data_dir_for_exe(selected)
+    if not (data / "StreamingAssets" / "aa").is_dir() and not (data / "com.unity.addressables").is_dir():
+        raise ValueError("所选程序旁没有吉星派对资源目录，请选择完整安装的游戏客户端。")
+    international = product.casefold() == "astralparty_int"
+    return GameInstall(app_id="manual", name="吉星派对（国际服）" if international else "吉星派对（国服）",
+                       install_dir=selected.parent, cn_exe=None if international else selected,
+                       int_exe=selected if international else None, launcher="manual")
+
+
 def _iter_taptap_game_dirs() -> Iterable[Path]:
     """在 TapTap 安装目录里找出包含游戏 exe 的目录（支持多层版本目录）。"""
     seen: set[str] = set()

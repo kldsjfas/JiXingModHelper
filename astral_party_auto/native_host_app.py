@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import secrets
 import subprocess
+import tempfile
 import threading
 from pathlib import Path
 from socketserver import ThreadingMixIn
@@ -27,6 +28,27 @@ def _host_executable() -> Path:
     raise FileNotFoundError("找不到原生 WebView 窗口组件。请重新完整解压发布包。")
 
 
+def _check_data_directory() -> None:
+    for directory in (APP_ROOT, DATA_DIR, APP_ROOT / "made_mods"):
+        if directory != APP_ROOT and not directory.exists():
+            continue
+        try:
+            with tempfile.TemporaryFile(prefix=".jixing-write-check-", dir=directory):
+                pass
+        except OSError as exc:
+            raise OSError(
+                "助手无法在当前目录保存设置、作品集或备份。\n"
+                "请关闭助手，把完整 ZIP 解压到你有写入权限的新文件夹后再打开，"
+                "例如桌面或自己的游戏工具目录；保留旧版及其备份。\n\n"
+                f"无法写入的目录：{directory}"
+            ) from exc
+
+
+def _show_startup_error(message: str) -> None:
+    import ctypes
+    ctypes.windll.user32.MessageBoxW(None, message, f"吉星派对 Mod 助手 · {__version__}", 0x10)
+
+
 def main() -> None:
     """启动本地 API，并将 HTML 页面交给 C# WebView2 原生窗口显示。"""
     import tkinter as tk
@@ -37,7 +59,13 @@ def main() -> None:
     if not (web_app.WEB_DIR / "index.html").exists():
         raise FileNotFoundError(f"找不到界面文件：{web_app.WEB_DIR / 'index.html'}")
 
-    api = web_app.DesktopApi()
+    try:
+        _check_data_directory()
+        host_executable = _host_executable()
+        api = web_app.DesktopApi()
+    except OSError as exc:
+        _show_startup_error(str(exc))
+        return
     root = tk.Tk()
     root.withdraw()
     api.set_tk_root(root)
@@ -59,7 +87,7 @@ def main() -> None:
     profile_dir = DATA_DIR / "webview2_profile"
     profile_dir.mkdir(parents=True, exist_ok=True)
     host_args = [
-        str(_host_executable()),
+        str(host_executable),
         "--version",
         __version__,
         "--url",

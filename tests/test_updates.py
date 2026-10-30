@@ -33,6 +33,14 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(describe_release("1.3.0-preview.2", release("v1.3.0"))["status"], "available")
         self.assertEqual(describe_release("1.2.0", release("v1.2.0"))["status"], "up_to_date")
 
+    def test_formal_138_upgrade_from_previous_stable_and_previews(self):
+        for current in ("1.3.6", "1.3.7", "1.3.8-preview.2", "1.3.8-preview.3"):
+            with self.subTest(current=current):
+                result = describe_release(current, release("v1.3.8"))
+                self.assertEqual(result["status"], "available")
+                self.assertTrue(result["release_url"].endswith("/releases/tag/v1.3.8"))
+        self.assertEqual(describe_release("1.3.8", release("v1.3.8"))["status"], "up_to_date")
+
     def test_only_valid_stable_releases(self):
         for payload in (None, {}, release("invalid"), release("v1.3.0-preview.1"),
                         {**release("v1.3.0"), "draft": True},

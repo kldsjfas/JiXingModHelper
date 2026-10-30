@@ -19,7 +19,7 @@ from typing import Callable
 
 from .core.characters import load_character_list
 from .core.config import APP_ROOT
-from .core.detector import find_game_install, launch_direct, launch_with_steam
+from .core.detector import find_game_install, launch_direct, launch_with_steam, manual_game_install
 from .modkit import (
     DYNAMIC_KIND_LABELS,
     BundleMigrationPlan,
@@ -82,6 +82,8 @@ class ModController:
         self.aa_dir: Path | None = None
         self.aa_dirs: tuple[Path, ...] = ()
         self.manager: ModManager | None = None
+        self.game_location_mode = "auto"
+        self.game_detection_note = ""
         self._pending_extract_dir: Path | None = None
         self._pending_extract_source: Path | None = None
         # 多类型索引：texture/text/mesh/anim/dynamic → {bundle: [names]}
@@ -170,53 +172,286 @@ class ModController:
             return rows
 
     # ---------- 检测 ----------
-    def refresh_detection(self) -> None:
-        def connect(executable: Path | None) -> bool:
-            if executable is None or not executable.exists():
-                return False
-            directories = tuple(
-                directory
-                for directory in bundle_dirs_for_exe(executable)
-                if directory.is_dir()
-            )
-            if not directories:
-                return False
-            self.aa_dirs = directories
-            self.aa_dir = directories[0]
-            self.game_executable = executable.resolve()
-            self.manager = ModManager(directories, DATA_DIR, executable=self.game_executable)
-            return True
+    def _read_game_location(self) -> Path | None:
+        source = DATA_DIR / "game_location.json"
+        try:
+            if not source.exists():
+                return None
+            if not 0 < source.stat().st_size <= 8192:
+                raise ValueError("游戏位置设置为空或过大。")
+            settings = json.loads(source.read_text(encoding="utf-8"))
+            if not isinstance(settings, dict) or type(settings.get("version")) is not int or settings.get("version") != 1:
+                raise ValueError("游戏位置设置格式无法识别。")
+            if settings.get("mode") == "auto":
+                return None
+            executable = settings.get("executable")
+            if settings.get("mode") != "manual" or not isinstance(executable, str) or not Path(executable).is_absolute():
+                raise ValueError("手动游戏位置设置无效。")
+            return Path(executable)
+        except (OSError, UnicodeError, json.JSONDecodeError, RecursionError) as exc:
+            raise ValueError("无法读取保存的游戏位置，请重新选择游戏程序或恢复自动检测。") from exc
 
-        self.game_install = find_game_install()
-        executable = None
-        if self.game_install:
-            executable = self.game_install.cn_exe or self.game_install.int_exe
-        connected = connect(executable)
-        if not connected and self.game_install:
-            other = (
-                self.game_install.int_exe
-                if executable == self.game_install.cn_exe
-                else self.game_install.cn_exe
-            )
-            connected = connect(other)
-        if not connected:
-            self.game_executable = None
-            self.aa_dir = None
-            self.aa_dirs = ()
-            self.manager = None
+    def _prepare_game_connection(self, executable: Path | None) -> dict | None:
+        if executable is None or not executable.is_file():
+            return None
+        directories = tuple(directory for directory in bundle_dirs_for_exe(executable) if directory.is_dir())
+        if not directories:
+            return None
+        source_key = bundle_source_key(directories)
+        index = (load_asset_index(INDEX_CACHE, directories) if source_key != self._index_source_key
+                 else self.typed_index)
+        return {"executable": executable.resolve(), "directories": directories, "source_key": source_key,
+                "index": index, "manager": ModManager(directories, DATA_DIR, executable=executable)}
 
-        source_key = bundle_source_key(self.aa_dirs) if self.aa_dirs else ""
-        if source_key != self._index_source_key:
+    def _apply_game_connection(self, install, connection: dict | None) -> None:
+        previous_executable = self.game_executable
+        self.game_install = install
+        self.game_executable = connection["executable"] if connection else None
+        self.aa_dirs = connection["directories"] if connection else ()
+        self.aa_dir = self.aa_dirs[0] if self.aa_dirs else None
+        self.manager = connection["manager"] if connection else None
+        source_key = connection["source_key"] if connection else ""
+        if source_key != self._index_source_key or previous_executable != self.game_executable:
             self.selection = None
-            if self.aa_dirs:
-                self.typed_index = load_asset_index(INDEX_CACHE, self.aa_dirs)
-            else:
-                self.typed_index = {"texture": {}, "text": {}, "mesh": {}, "anim": {}, "dynamic": {}}
+            self.typed_index = connection["index"] if connection else {
+                "texture": {}, "text": {}, "mesh": {}, "anim": {}, "dynamic": {}}
+            self._emote_workspace = None
+            self._visual_animation_workspace = None
+            self._dynamic_sequence_bases = None
             self._category_cache_source = None
             self._category_rows = {}
             self._category_counts = {}
             self._index_source_key = source_key
-            self._load_dynamic_validation(source_key)
+            try:
+                self._load_dynamic_validation(source_key)
+            except (OSError, ValueError, TypeError, RecursionError):
+                self._valid_dynamic = {}
+
+    def refresh_detection(self) -> None:
+        self.game_detection_note = ""
+        try:
+            manual = self._read_game_location()
+        except ValueError as exc:
+            self.game_location_mode = "manual"
+            self.game_detection_note = str(exc)
+            self._apply_game_connection(None, None)
+            return
+        if manual is not None:
+            self.game_location_mode = "manual"
+            try:
+                install = manual_game_install(manual)
+                connection = self._prepare_game_connection(install.cn_exe or install.int_exe)
+                if connection is None:
+                    raise ValueError("保存的游戏位置已没有可读取的资源目录。")
+            except (OSError, ValueError) as exc:
+                self.game_detection_note = f"手动游戏位置暂不可用：{exc} 可重新选择，或恢复自动检测。"
+                self._apply_game_connection(None, None)
+                return
+        else:
+            self.game_location_mode = "auto"
+            try:
+                install = find_game_install()
+                connection = self._prepare_automatic_connection(install)
+                if connection is not None:
+                    self._remember_automatic_connection(connection["executable"])
+            except (OSError, ValueError) as exc:
+                self.game_detection_note = f"自动检测没有切换客户端：{exc}"
+                if self.game_executable is None or not self.game_executable.is_file():
+                    self._apply_game_connection(None, None)
+                return
+            if connection is None and self.game_executable is not None and self.game_executable.is_file():
+                self.game_detection_note = "自动检测暂未找到客户端，已保留当前游戏连接。"
+                return
+        self._apply_game_connection(install, connection)
+
+    def _read_last_game_executable(self) -> Path | None:
+        source = DATA_DIR / "game_location.json"
+        if not source.exists():
+            return None
+        if not 0 < source.stat().st_size <= 8192:
+            raise ValueError("游戏位置设置为空或过大。")
+        settings = json.loads(source.read_text(encoding="utf-8"))
+        if not isinstance(settings, dict):
+            raise ValueError("游戏位置设置格式无法识别。")
+        value = settings.get("executable") if settings.get("mode") == "manual" else settings.get("last_executable")
+        if value is None:
+            return None
+        if not isinstance(value, str) or not Path(value).is_absolute():
+            raise ValueError("上次连接的客户端位置无效，已保留原记录。")
+        return Path(value)
+
+    def _prepare_automatic_connection(self, install) -> dict | None:
+        if install is None:
+            return None
+        candidates = list(dict.fromkeys((install.cn_exe, install.int_exe)))
+        previous = self.game_executable or self._read_last_game_executable()
+        if previous is not None:
+            candidates.sort(key=lambda path: path is None or path.resolve() != previous.resolve())
+        for executable in candidates:
+            connection = self._prepare_game_connection(executable)
+            if connection is not None:
+                self._check_game_location_switch(executable, connection=connection, allow_legacy=True)
+                return connection
+        return None
+
+    def _remember_automatic_connection(self, executable: Path) -> None:
+        from .modkit.catalog_mods import atomic_bytes
+
+        settings = {"version": 1, "mode": "auto", "last_executable": str(executable.resolve())}
+        path = DATA_DIR / "game_location.json"
+        if path.is_file():
+            try:
+                if json.loads(path.read_text(encoding="utf-8")) == settings:
+                    return
+            except (OSError, ValueError, RecursionError):
+                pass
+        atomic_bytes(path, json.dumps(settings, ensure_ascii=False).encode("utf-8"))
+
+    def set_manual_game_location(self, path: str | Path) -> None:
+        from .modkit.catalog_mods import atomic_bytes
+
+        install = manual_game_install(path)
+        executable = install.cn_exe or install.int_exe
+        connection = self._prepare_game_connection(executable)
+        if connection is None:
+            raise ValueError("所选客户端没有可读取的资源目录，请选择完整安装的游戏。")
+        self._check_game_location_switch(executable, connection=connection, allow_legacy=True)
+        settings = {"version": 1, "mode": "manual", "executable": str(executable)}
+        atomic_bytes(DATA_DIR / "game_location.json", json.dumps(settings, ensure_ascii=False).encode("utf-8"))
+        self._apply_game_connection(install, connection)
+        self.game_location_mode = "manual"
+        self.game_detection_note = "已记住这个客户端；其它安装不会自动替代它。"
+
+    def restore_automatic_game_location(self) -> None:
+        install = find_game_install()
+        connection = self._prepare_automatic_connection(install)
+        if connection is None:
+            raise ValueError("自动检测暂时没有找到可用客户端，原游戏位置和备份记录保持不变。请稍后重试或重新选择原客户端。")
+        self._remember_automatic_connection(connection["executable"])
+        self._apply_game_connection(install, connection)
+        self.game_location_mode = "auto"
+        self.game_detection_note = "已恢复自动检测。"
+
+    def _check_game_location_switch(self, executable: Path | None, *, connection: dict | None = None,
+                                    allow_legacy: bool = False) -> None:
+        if executable is None:
+            return
+        previous_executable = self.game_executable
+        if previous_executable is None:
+            try:
+                previous_executable = self._read_last_game_executable()
+            except ValueError:
+                previous_executable = None
+        if previous_executable is not None and previous_executable.resolve() == executable.resolve():
+            return
+        state_path = DATA_DIR / "mods_state.json"
+        try:
+            state = {}
+            if state_path.exists():
+                if not 0 < state_path.stat().st_size <= 4 * 1024 * 1024:
+                    raise ValueError("Mod 记录为空或过大。")
+                state = json.loads(state_path.read_text(encoding="utf-8"))
+                if not isinstance(state, dict):
+                    raise ValueError("Mod 记录格式不正确。")
+            has_installed = bool(state.get("mods") or state.get("catalog_overlay"))
+            if self.manager is not None:
+                has_installed = has_installed or bool(self.manager.installed_mods())
+            has_backups = (next((DATA_DIR / "backups").glob("*.bundle"), None) is not None
+                           or next((DATA_DIR / "catalog_backups").glob("catalog-*.json"), None) is not None)
+        except (OSError, ValueError, RecursionError) as exc:
+            raise ValueError("无法核实原客户端的 Mod 与备份记录，已保留所有记录。请在原助手检查或还原，不要混用另一个安装。") from exc
+        if ((has_installed or has_backups) and previous_executable is None and allow_legacy
+                and connection is not None and self._legacy_game_data_matches(connection, state)):
+            return
+        if has_installed:
+            raise ValueError("原客户端仍有已安装的 Mod，请先在原客户端卸载或还原；连接另一个客户端请使用单独解压的助手目录，旧备份不会迁移。")
+        if has_backups:
+            raise ValueError("此助手目录保留着原客户端的备份。连接另一客户端请使用单独解压的助手目录；原目录及备份继续保留供还原。")
+
+    def _legacy_game_data_matches(self, connection: dict, state: dict) -> bool:
+        """旧版没有保存客户端路径时，先核对全部已管理字节，不能只匹配包名。"""
+        from .modkit.catalog_mods import active_catalog_path, file_sha256, _official_hash
+
+        manager = connection["manager"]
+        mods = state.get("mods", {})
+        if not isinstance(mods, dict) or any(not isinstance(mod, dict) for mod in mods.values()):
+            return False
+        overlay = state.get("catalog_overlay")
+        checked_bytes = 0
+        checked_files = 0
+
+        def checked_digest(path: Path, limit: int = 512 * 1024 * 1024) -> str:
+            nonlocal checked_bytes, checked_files
+            checked_bytes += path.stat().st_size
+            checked_files += 1
+            if checked_bytes > 512 * 1024 * 1024 or checked_files > 256:
+                raise ValueError("旧版 Mod 核对超出只读检查预算，请先用原版助手还原。")
+            return file_sha256(path, limit)
+
+        try:
+            if overlay is not None:
+                if not isinstance(overlay, dict):
+                    return False
+                allowed = {directory.resolve() for directory in connection["directories"]}
+                if Path(overlay.get("bundle_root", "")).resolve() not in allowed:
+                    return False
+                target = active_catalog_path(connection["directories"], connection["executable"])
+                if str(target) != overlay.get("target"):
+                    return False
+                if (checked_digest(target, 32 * 1024 * 1024) != overlay.get("applied_sha256")
+                        or _official_hash(target) != overlay.get("official_hash")):
+                    return False
+                baseline = overlay.get("baseline_sha256")
+                if not isinstance(baseline, str) or not re.fullmatch(r"[0-9a-f]{64}", baseline):
+                    return False
+                if checked_digest(DATA_DIR / "catalog_backups" / f"catalog-{baseline}.json", 32 * 1024 * 1024) != baseline:
+                    return False
+                owned = overlay.get("bundles")
+                if not isinstance(owned, dict) or len(owned) > 256:
+                    return False
+                root = Path(overlay["bundle_root"])
+                for name, digest in owned.items():
+                    if (not isinstance(name, str) or not re.fullmatch(r"jixing_emote_[0-9]+\.bundle", name)
+                            or checked_digest(root / name, 128 * 1024 * 1024) != digest):
+                        return False
+            names = {path.name for path in manager.backup_dir.glob("*.bundle")}
+            new_names = set()
+            for mod in mods.values():
+                files = mod.get("files")
+                new_files = mod.get("new_bundles", [])
+                if (not isinstance(files, list) or not isinstance(new_files, list)
+                        or any(not isinstance(name, str) or Path(name).name != name for name in files + new_files)
+                        or ("disabled" in mod and not isinstance(mod["disabled"], bool))):
+                    return False
+                names.update(files)
+                new_names.update(new_files)
+            names.difference_update(new_names)
+            if not names:
+                return overlay is not None
+            if len(names) > 256:
+                return False
+            for name in names:
+                if not isinstance(name, str) or Path(name).name != name:
+                    return False
+                source = manager.backup_dir / name
+                for mod in reversed(list(mods.values())):
+                    if not mod.get("disabled") and name in mod["files"]:
+                        # 旧来源必须能直接定位；不在启动时递归搜索用户原素材目录。
+                        store, origin = mod.get("store"), mod.get("source")
+                        source = next((Path(folder) / name for folder in (store, origin)
+                                       if isinstance(folder, str) and (Path(folder) / name).is_file()), None)
+                        break
+                target = manager.bundle_path(name)
+                if target is None or source is None or not source.is_file() or not target.is_file():
+                    return False
+                size = source.stat().st_size
+                if size != target.stat().st_size:
+                    return False
+                if checked_digest(source) != checked_digest(target):
+                    return False
+            return True
+        except (OSError, ValueError, TypeError):
+            return False
 
     @property
     def has_game(self) -> bool:
@@ -345,6 +580,8 @@ class ModController:
     def launch_game(self, region: str = "CN") -> None:
         """启动吉星派对：优先直启本地 exe，失败再尝试 Steam。"""
         self.refresh_detection()
+        if getattr(self, "game_location_mode", "auto") == "manual" and not self.game_install:
+            raise RuntimeError(self.game_detection_note or "手动游戏位置不可用，请重新选择或恢复自动检测。")
         if self.game_install:
             exe = self.game_install.executable_for_region(region)
             if exe and exe.exists():

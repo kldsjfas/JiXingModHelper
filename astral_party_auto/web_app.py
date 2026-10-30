@@ -564,6 +564,8 @@ class DesktopApi:
             "backup_count": backup_count,
             "index_ready": controller.index_ready,
             "asset_type_counts": controller.asset_type_counts(),
+            "game_location_mode": getattr(controller, "game_location_mode", "auto"),
+            "game_detection_note": getattr(controller, "game_detection_note", ""),
         }
 
     def _draft_state(self) -> dict:
@@ -639,11 +641,75 @@ class DesktopApi:
             self._append_log("已刷新游戏检测：仍未找到。")
         return self._dashboard_state()
 
+    def _game_location_changed(self) -> dict:
+        self._clear_workshop_pending()
+        self._clear_emote_candidate()
+        self._clear_visual_candidate()
+        self._clear_replacement()
+        self._clear_draft_crop()
+        self.controller.selection = None
+        self._append_log(f"游戏位置已更新：{self.controller.game_exe_display()}")
+        return {"dashboard": self._dashboard_state(), "installed": self.controller.installed_mods()}
+
+    @exposed
+    def choose_game_location(self, kind: str = "folder") -> dict | None:
+        if kind not in ("folder", "program"):
+            raise ValueError("请选择游戏文件夹或游戏程序。")
+        path = (self._pick_path("folder") if kind == "folder" else
+                self._pick_path("open", file_types=("吉星派对游戏程序 (*.exe)",)))
+        if path is None:
+            return None
+        # 先验证并原子保存；取消、选错或保存失败时不清掉当前候选和连接。
+        self.controller.set_manual_game_location(path)
+        return self._game_location_changed()
+
+    @exposed
+    def restore_automatic_game_location(self) -> dict:
+        self.controller.restore_automatic_game_location()
+        return self._game_location_changed()
+
     @exposed
     def get_resource_diagnostics(self) -> dict:
         from .modkit.resource_diagnostics import resource_diagnostics
 
-        return resource_diagnostics(self.controller, __version__)
+        report = resource_diagnostics(self.controller, __version__)
+        report["report_token"] = hashlib.sha256(report["text"].encode("utf-8")).hexdigest()
+        self._resource_diagnostic_report = deepcopy(report)
+        self._resource_diagnostic_context = self._resource_diagnostic_context_key()
+        return report
+
+    def _resource_diagnostic_context_key(self) -> tuple:
+        return (str(getattr(self.controller, "game_executable", None) or ""),
+                tuple(str(directory) for directory in getattr(self.controller, "aa_dirs", ()) or ()))
+
+    @exposed
+    def export_resource_diagnostics(self, report_token: str) -> dict | None:
+        """导出用户当前看到的报告快照，文件选择前后都核对报告与安装身份。"""
+        from .modkit.catalog_mods import atomic_bytes
+
+        report = getattr(self, "_resource_diagnostic_report", None)
+        context = getattr(self, "_resource_diagnostic_context", None)
+
+        def current() -> bool:
+            return (isinstance(report_token, str) and report is not None
+                    and report.get("report_token") == report_token
+                    and getattr(self, "_resource_diagnostic_report", None) == report
+                    and context == self._resource_diagnostic_context_key())
+
+        if not current():
+            raise ValueError("诊断报告或游戏位置已变化，请重新检查资源后再导出。")
+        path = self._pick_path("save", file_types=("文本报告 (*.txt)",),
+                               save_filename=f"吉星派对资源诊断-{__version__}.txt")
+        if path is None:
+            return None
+        if not current():
+            raise ValueError("选择保存位置期间诊断报告或游戏位置已变化，请重新检查后再导出。")
+        path = Path(path)
+        if path.suffix.lower() != ".txt":
+            raise ValueError("请选择 .txt 文件保存诊断报告。")
+        atomic_bytes(path, report["text"].encode("utf-8-sig"))
+        return {"path": str(path), "name": path.name, "size": path.stat().st_size,
+                "checked_at": report["checked_at"]}
 
     @exposed
     def launch_game(self) -> dict:

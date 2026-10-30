@@ -77,19 +77,25 @@
               <button class="button ghost" data-page-link="audio">试听与替换音频</button>
               <button class="button ghost" data-page-link="pack">我的作品集</button>
               <button class="button ghost" data-action="refresh-detection">刷新检测</button>
+              <button id="choose-game-folder" class="button ghost" disabled>选择游戏目录…</button>
+              <button id="choose-game-program" class="button ghost" disabled>选择游戏程序…</button>
+              <button id="auto-game-location" class="button ghost" disabled>恢复自动检测</button>
               <button class="button ghost" data-action="open-assets">打开资源目录</button>
               <button class="button danger" data-action="quick-sfw-texture">一键创建去SFW贴图Mod</button>
             </div>
             <small id="game-path">自动检测游戏路径中…</small>
+            <p id="game-location-status" class="notice">自动检测不到，或装了多个客户端时，可以手动选择游戏程序。</p>
           </article>
 
           <article id="resource-diagnostics" class="card">
-            <div class="section-heading"><div><h2>资源诊断</h2><p>卡面或表情提示找不到资源时，检查当前游戏位置并复制完整诊断信息。</p></div></div>
+            <div class="section-heading"><div><h2>资源诊断</h2><p>卡面或表情提示找不到资源时，核对当前目录和缺失资源，复制或导出报告用于反馈。</p></div></div>
             <div class="action-row">
               <button id="check-resources" class="button ghost" type="button">检查资源</button>
               <button id="copy-resource-diagnostics" class="button ghost" type="button" disabled>复制诊断信息</button>
+              <button id="export-resource-diagnostics" class="button ghost" type="button" disabled>导出诊断报告…</button>
             </div>
             <p id="resource-diagnostics-status" class="editor-status" role="status" aria-live="polite">按需检查，只在本地显示。</p>
+            <p id="resource-diagnostics-summary" class="notice is-hidden"></p>
             <label class="resource-diagnostics-label" for="resource-diagnostics-output">诊断报告</label>
             <textarea id="resource-diagnostics-output" class="resource-diagnostics-output" readonly spellcheck="false" placeholder="点击「检查资源」生成报告；不会修改或清理游戏资源。"></textarea>
           </article>
@@ -513,6 +519,7 @@
   <script src="updates.js" defer></script>
   <script src="workshop.js" defer></script>
   <script src="visual-animation.js" defer></script>
+  <script src="game-location.js" defer></script>
   <script src="app.js" defer></script>
 </body>
 </html>

@@ -1507,7 +1507,7 @@ body.nav-open .sidebar {
 .resource-diagnostics-label { display: block; margin: 12px 0 6px; color: var(--muted); font-size: 12px; }
 .resource-diagnostics-output {
   width: 100%;
-  min-height: 180px;
+  min-height: 260px;
   max-height: 460px;
   resize: vertical;
   padding: 12px;

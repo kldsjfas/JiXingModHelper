@@ -29,7 +29,10 @@
     dashboard: null,
     resourceDiagnosticsRequest: 0,
     resourceDiagnosticsLoading: false,
+    resourceDiagnosticsExporting: false,
     resourceDiagnosticsText: "",
+    resourceDiagnosticsToken: "",
+    resourceDiagnosticsChecks: null,
     installed: [],
     draft: { name: "我的Mod套装", items: [] },
     assetTypes: [],
@@ -178,11 +181,12 @@
     state.packRequest += 1;
     state.draftDetailRequest += 1;
     state.resourceDiagnosticsRequest += 1;
-    if (state.resourceDiagnosticsLoading) {
+    if (state.resourceDiagnosticsLoading || state.resourceDiagnosticsExporting) {
       const diagnosticStatus = $("#resource-diagnostics-status");
       if (diagnosticStatus) diagnosticStatus.textContent = "上次检查已取消，可以重新检查。";
     }
     state.resourceDiagnosticsLoading = false;
+    state.resourceDiagnosticsExporting = false;
     renderResourceDiagnostics();
     stopAllAnimations();
     closeLightbox();
@@ -221,26 +225,61 @@
     if (backups) backups.textContent = String(d.backup_count ?? 0);
     if (path) {
       path.textContent = d.has_game
-        ? `自动找到的游戏：${d.game_exe || ""}`
+        ? `${d.game_location_mode === "manual" ? "手动选择的游戏" : "自动找到的游戏"}：${d.game_exe || ""}`
         : "未找到游戏，请确认已安装 Steam 或 TapTap 版吉星派对。";
     }
+    window.GameLocation?.update(d);
     setHeaderStatus(d.has_game ? "游戏已连接" : "未检测到游戏", !d.has_game);
   }
 
   function renderResourceDiagnostics() {
+    const working = state.resourceDiagnosticsLoading || state.resourceDiagnosticsExporting;
     const check = $("#check-resources");
     if (check) {
-      check.disabled = state.resourceDiagnosticsLoading;
+      check.disabled = working;
       check.textContent = state.resourceDiagnosticsLoading ? "正在检查…" : "检查资源";
     }
     const copy = $("#copy-resource-diagnostics");
-    if (copy) copy.disabled = state.resourceDiagnosticsLoading || !state.resourceDiagnosticsText;
+    if (copy) copy.disabled = working || !state.resourceDiagnosticsText;
+    const exportButton = $("#export-resource-diagnostics");
+    if (exportButton) {
+      exportButton.disabled = working || !state.resourceDiagnosticsText || !state.resourceDiagnosticsToken;
+      exportButton.textContent = state.resourceDiagnosticsExporting ? "正在导出…" : "导出诊断报告…";
+    }
     const output = $("#resource-diagnostics-output");
     if (output) output.value = state.resourceDiagnosticsText;
+    const summary = $("#resource-diagnostics-summary");
+    if (summary) {
+      const checks = state.resourceDiagnosticsChecks;
+      summary.classList.toggle("is-hidden", !checks);
+      const parts = [];
+      if (checks?.catalog && checks.catalog !== "readable") parts.push("资源目录尚未通过核对");
+      if (Number.isInteger(checks?.emote_total)) {
+        parts.push(`动态表情 ${checks.emote_downloaded}/${checks.emote_total} 项依赖齐全`);
+      }
+      if (checks?.emote === "missing_configuration") parts.push("表情配置包缺失");
+      if (checks?.emote === "unknown_type") parts.push("表情类型尚未识别");
+      if (checks?.visual === "available") parts.push("卡面依赖已找到");
+      if (checks?.missing_bundle_count) parts.push(`缺少 ${checks.missing_bundle_count} 个资源包，名称见报告`);
+      if (checks?.independent === "missing_hash") parts.push("独立导入缺少可核对的版本 hash");
+      summary.textContent = parts.join(" · ");
+    }
+  }
+
+  function invalidateResourceDiagnostics(message = "游戏位置已更改，请重新检查资源。") {
+    state.resourceDiagnosticsRequest += 1;
+    state.resourceDiagnosticsLoading = false;
+    state.resourceDiagnosticsExporting = false;
+    state.resourceDiagnosticsText = "";
+    state.resourceDiagnosticsToken = "";
+    state.resourceDiagnosticsChecks = null;
+    renderResourceDiagnostics();
+    const status = $("#resource-diagnostics-status");
+    if (status) status.textContent = message;
   }
 
   async function checkResources() {
-    if (state.page !== "dashboard" || state.resourceDiagnosticsLoading) return;
+    if (state.page !== "dashboard" || state.resourceDiagnosticsLoading || state.resourceDiagnosticsExporting) return;
     const request = ++state.resourceDiagnosticsRequest;
     state.resourceDiagnosticsLoading = true;
     renderResourceDiagnostics();
@@ -252,7 +291,9 @@
       if (!current()) return;
       if (typeof report?.text !== "string" || !report.text.trim()) throw new Error("未收到可读取的诊断报告");
       state.resourceDiagnosticsText = report.text;
-      if (status) status.textContent = "检查完成。报告包含本机路径，检查后可复制给维护者。";
+      state.resourceDiagnosticsToken = typeof report.report_token === "string" ? report.report_token : "";
+      state.resourceDiagnosticsChecks = report.checks && typeof report.checks === "object" ? report.checks : null;
+      if (status) status.textContent = "检查完成。报告包含本机路径，核对后可复制或导出给维护者。";
     } catch (error) {
       if (current() && status) status.textContent = `检查未完成：${error.message || error}。可以重试。`;
     } finally {
@@ -264,7 +305,7 @@
   }
 
   async function copyResourceDiagnostics() {
-    if (state.page !== "dashboard" || state.resourceDiagnosticsLoading || !state.resourceDiagnosticsText) return;
+    if (state.page !== "dashboard" || state.resourceDiagnosticsLoading || state.resourceDiagnosticsExporting || !state.resourceDiagnosticsText) return;
     const request = state.resourceDiagnosticsRequest;
     const report = state.resourceDiagnosticsText;
     const current = () => request === state.resourceDiagnosticsRequest && state.page === "dashboard";
@@ -278,6 +319,32 @@
       output?.focus();
       output?.select();
       $("#resource-diagnostics-status").textContent = "无法自动复制，已选中报告，请按 Ctrl+C 复制。";
+    }
+  }
+
+  async function exportResourceDiagnostics() {
+    if (state.page !== "dashboard" || state.resourceDiagnosticsLoading || state.resourceDiagnosticsExporting
+        || !state.resourceDiagnosticsText || !state.resourceDiagnosticsToken) return;
+    const request = state.resourceDiagnosticsRequest;
+    const token = state.resourceDiagnosticsToken;
+    const current = () => request === state.resourceDiagnosticsRequest && state.page === "dashboard"
+      && token === state.resourceDiagnosticsToken;
+    state.resourceDiagnosticsExporting = true;
+    renderResourceDiagnostics();
+    $("#resource-diagnostics-status").textContent = "选择诊断报告的保存位置…";
+    try {
+      const result = await call("export_resource_diagnostics", { quiet: true }, token);
+      if (!current()) return;
+      $("#resource-diagnostics-status").textContent = result
+        ? `已导出：${result.name || "诊断报告.txt"}。可作为文件发送给维护者。`
+        : "已取消导出，当前报告仍保留。";
+    } catch (error) {
+      if (current()) $("#resource-diagnostics-status").textContent = `导出未完成：${error.message || error}。可以重试。`;
+    } finally {
+      if (current()) {
+        state.resourceDiagnosticsExporting = false;
+        renderResourceDiagnostics();
+      }
     }
   }
 
@@ -1909,6 +1976,7 @@ ${row.bundle}`;
     );
     $("#check-resources")?.addEventListener("click", checkResources);
     $("#copy-resource-diagnostics")?.addEventListener("click", copyResourceDiagnostics);
+    $("#export-resource-diagnostics")?.addEventListener("click", exportResourceDiagnostics);
     $$("[data-resource-diagnostics]").forEach((btn) => btn.addEventListener("click", () => {
       showPage("dashboard");
       $("#resource-diagnostics")?.scrollIntoView({ block: "start" });
@@ -2209,11 +2277,7 @@ ${row.bundle}`;
         renderInstalled();
         toast(`已还原 ${data.restored || 0} 个资源包`);
       } else if (action === "refresh-detection") {
-        state.resourceDiagnosticsRequest += 1;
-        state.resourceDiagnosticsLoading = false;
-        state.resourceDiagnosticsText = "";
-        renderResourceDiagnostics();
-        $("#resource-diagnostics-status").textContent = "旧诊断已清空，完成游戏检测后可重新检查资源。";
+        invalidateResourceDiagnostics("旧诊断已清空，完成游戏检测后可重新检查资源。");
         state.dashboard = await call("refresh_detection", { busy: true, busyText: "检测中…" });
         $("#resource-diagnostics-status").textContent = "游戏检测已刷新，请重新检查资源。";
         renderDashboard();
@@ -2859,6 +2923,32 @@ ${row.bundle}`;
     setHeaderStatus("连接后端…");
     const boot = await call("bootstrap", { quiet: false });
     window.ProjectUpdates?.init({ api, toast, appInfo: boot.app_info || {} });
+    window.GameLocation?.init({
+      api: (name, ...args) => call(name, { busy: true, quiet: true, busyText: "检查游戏位置…" }, ...args),
+      toast,
+      onChanged: (data) => {
+        state.dashboard = data.dashboard;
+        state.installed = data.installed || [];
+        state.selection = null;
+        state.resources = [];
+        state.pendingMod = null;
+        state.selectedResources = [];
+        state.browseRequestSeq += 1;
+        state.browseRefreshSeq += 1;
+        state.selectionRequest += 1;
+        state.comparisonRequest += 1;
+        state.replacementRequest += 1;
+        state.studioRequest += 1;
+        state.draftDetailRequest += 1;
+        state.replacement = null;
+        resetEmoteReplacement();
+        resetEmotePreview();
+        window.VisualAnimation?.leave();
+        invalidateResourceDiagnostics();
+        renderDashboard();
+        renderInstalled();
+      },
+    });
     state.dashboard = boot.dashboard;
     state.installed = boot.installed || [];
     state.draft = boot.draft || state.draft;
