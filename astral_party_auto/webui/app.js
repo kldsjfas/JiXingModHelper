@@ -6,6 +6,11 @@
   const REPLACEMENT_FILE_LIMIT = 12 * 1024 * 1024;
   const API_TOKEN = new URLSearchParams(window.location.hash.slice(1)).get("token") || "";
   const API_HEADERS = { "X-JiXing-Token": API_TOKEN };
+  const EMOTE_BATCH_CHANGING_CALLS = new Set([
+    "save_emote", "save_visual_animation", "commit_replacement", "commit_draft_crop", "replace_draft_image",
+    "remove_draft_item", "clear_draft", "set_draft_name", "run_migration", "install_draft", "change_mod",
+    "install_pending_mod", "workshop_install", "restore_all", "quick_create_sfw_texture",
+  ]);
   const PAGE_TITLES = {
     dashboard: "仪表盘",
     manage: "Mod 管理",
@@ -150,11 +155,13 @@
       body: JSON.stringify(args),
     });
     const result = await resp.json();
+    let data = result;
     if (result && typeof result === "object" && "ok" in result) {
       if (!result.ok) throw new Error(result.error || "操作失败");
-      return result.data;
+      data = result.data;
     }
-    return result;
+    if (data != null && EMOTE_BATCH_CHANGING_CALLS.has(name)) window.EmoteBatch?.invalidate();
+    return data;
   }
 
   async function call(name, options = {}, ...args) {
@@ -176,6 +183,7 @@
     if (state.page === "audio") window.AudioWorkbench?.leave();
     if (state.page === "workshop") window.ModWorkshop?.leave();
     if (state.page === "studio") window.VisualAnimation?.leave();
+    if (state.page === "pack") window.EmoteBatch?.leave();
     rememberTextEdit();
     state.studioRequest += 1;
     state.packRequest += 1;
@@ -203,7 +211,7 @@
     if (page === "audio") window.AudioWorkbench?.enter();
     if (page === "workshop") window.ModWorkshop?.enter();
     if (page === "studio") refreshStudio();
-    if (page === "pack") refreshPack();
+    if (page === "pack") { window.EmoteBatch?.enter(); refreshPack(); }
     if (page === "manage") renderInstalled();
     if (page === "logs") refreshLogs();
     if (page === "dashboard") renderDashboard();
@@ -229,6 +237,7 @@
         : "未找到游戏，请确认已安装 Steam 或 TapTap 版吉星派对。";
     }
     window.GameLocation?.update(d);
+    window.EmoteBatch?.updateGame(d.game_exe || "");
     setHeaderStatus(d.has_game ? "游戏已连接" : "未检测到游戏", !d.has_game);
   }
 
@@ -1777,6 +1786,7 @@ ${row.bundle}`;
   }
 
   function renderDraftList() {
+    window.EmoteBatch?.updateDraft(state.draft);
     const list = $("#draft-list");
     const count = $("#draft-count");
     const navCount = $("#nav-pack-count");
@@ -1939,6 +1949,20 @@ ${row.bundle}`;
 
   function bindEvents() {
     bindReplacementDrop();
+    window.EmoteBatch?.init({
+      api: (name, ...args) => call(name, { quiet: true, busy: name === "save_emote_gif_batch",
+        busyText: "正在转换、校验并保存整批动态表情…" }, ...args),
+      toast,
+      onSaved(data) {
+        if (data?.draft) state.draft = data.draft;
+        state.packRequest += 1;
+        state.draftDetailRequest += 1;
+        state.draftIndex = -1;
+        renderDraftList();
+        refreshSelectionComparison();
+        if (state.page === "pack") refreshPack();
+      },
+    });
     window.VisualAnimation?.init({
       call, toast, renderAnimation, renderAnimationState,
       getSelection: () => state.selection,
@@ -2140,6 +2164,10 @@ ${row.bundle}`;
     $("#emote-export")?.addEventListener("click", exportEmoteVideo);
     $("#emote-import")?.addEventListener("click", chooseEmoteFile);
     $("#emote-save")?.addEventListener("click", saveEmote);
+    $("#emote-batch-from-studio")?.addEventListener("click", () => {
+      showPage("pack");
+      window.EmoteBatch?.open();
+    });
     $("#studio-text")?.addEventListener("input", updateTextStatus);
     $("#text-find")?.addEventListener("input", () => { state.textFieldPage = 0; updateTextStatus(); renderTextFields(); });
     $("#text-find-next")?.addEventListener("click", findNextText);
@@ -2868,6 +2896,9 @@ ${row.bundle}`;
     const payload = packet?.payload || {};
     if (event === "log" && payload.line) {
       appendLogLine(payload.line);
+    } else if (event === "emote_batch_progress") {
+      const message = window.EmoteBatch?.progress(payload);
+      if (message && state.busy) setBusy(true, message);
     } else if (event === "index_progress") {
       setBusy(true, `建索引… ${payload.done || 0}/${payload.total || "?"}`);
     } else if (event === "index_done") {
@@ -2927,6 +2958,7 @@ ${row.bundle}`;
       api: (name, ...args) => call(name, { busy: true, quiet: true, busyText: "检查游戏位置…" }, ...args),
       toast,
       onChanged: (data) => {
+        window.EmoteBatch?.invalidate("游戏位置已变化，请重新选择 GIF 后核对映射。");
         state.dashboard = data.dashboard;
         state.installed = data.installed || [];
         state.selection = null;

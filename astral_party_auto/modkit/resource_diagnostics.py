@@ -8,6 +8,7 @@ from datetime import datetime
 from fnmatch import fnmatchcase
 from pathlib import Path
 
+from .coexistence_diagnostics import coexistence_diagnostics, coexistence_report_lines
 from .unity_paths import local_low_dir, read_unity_identity, unity_data_dir_for_exe
 
 MAX_DIRECTORY_ENTRIES = 128
@@ -239,6 +240,8 @@ def resource_diagnostics(controller, version: str) -> dict:
 
     checks = _catalog_check(controller, lines)
     _selection_report(controller, lines)
+    checks["coexistence"] = coexistence_diagnostics(executable)
+    lines.extend(coexistence_report_lines(checks["coexistence"]))
 
     for label, directory in metadata_roots:
         lines.extend(("", f"{label}：{directory}（{_directory_status(directory)}）"))

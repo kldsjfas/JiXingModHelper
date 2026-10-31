@@ -106,6 +106,7 @@ class ModController:
         # 当前在「浏览」里选中的资源，供「制作」页使用
         self.selection: dict | None = None
         self._emote_workspace = None
+        self._emote_batch_workspace = None
         self._visual_animation_workspace = None
         # 角色标注：bundle 级 + 资源级覆盖
         self._bundle_labels: dict[str, str] = {}
@@ -899,6 +900,22 @@ class ModController:
                 raise ValueError("独立动态表情需要导入素材。")
             return self.emote_workspace.save_independent(video_name, replacement_path)
         return self.emote_workspace.save(video_name, replacement_path)
+
+    @property
+    def emote_batch_workspace(self):
+        if getattr(self, "_emote_batch_workspace", None) is None:
+            from .modkit.emote_batch import EmoteBatchWorkspace
+            self._emote_batch_workspace = EmoteBatchWorkspace(self)
+        return self._emote_batch_workspace
+
+    def inspect_emote_gifs(self, paths) -> dict:
+        return self.emote_batch_workspace.inspect(paths)
+
+    def emote_gif_batch_preview(self, token: str, source_id: str, emote_id: int) -> dict:
+        return self.emote_batch_workspace.preview(token, source_id, emote_id)
+
+    def commit_emote_gifs(self, token: str, mappings: list[dict], *, progress=None) -> dict:
+        return self.emote_batch_workspace.commit(token, mappings, progress=progress)
 
     @property
     def visual_animation_workspace(self):

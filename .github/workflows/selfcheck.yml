@@ -75,6 +75,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tests/test_emote_ui.js
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tests/test_emote_batch_ui.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tests/test_resource_diagnostics_ui.js
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tests/test_game_location_ui.js

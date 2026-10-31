@@ -159,8 +159,21 @@ class DesktopApi:
                 conflicts.append(mod_name)
                 conflict_files.update(overlap)
         compatible = bool(analysis.matched) and not analysis.unmatched
+        from .modkit.emote_labels import emote_label
+        emote_targets = []
+        character_counts = {}
+        patches = getattr(analysis, "catalog_patches", ())
+        for patch in patches if isinstance(patches, list) else ():
+            identifier = patch["emote_id"]
+            label = emote_label(identifier)
+            character = label.split(" · ", 1)[0]
+            character_counts[character] = character_counts.get(character, 0) + 1
+            emote_targets.append({"emote_id": identifier, "label": label})
         return {"matched": len(analysis.matched), "unmatched": len(analysis.unmatched),
                 "conflicts": len(conflict_files), "conflict_names": conflicts, "can_install": compatible,
+                "emote_count": len(emote_targets), "emote_targets": emote_targets,
+                "emote_characters": [{"label": label, "count": count}
+                                     for label, count in sorted(character_counts.items())],
                 "matched_names": sorted(analysis.matched), "unmatched_names": sorted(analysis.unmatched),
                 "message": "资源名称匹配，仍请核对作者标注的游戏版本。" if compatible else "资源与当前游戏不完全匹配，工坊停止安装。"}
 
@@ -1146,6 +1159,61 @@ class DesktopApi:
         selection = self.controller.selection or {}
         return (getattr(self.controller, "_index_source_key", ""), selection.get("original_path"),
                 selection.get("asset_type"), selection.get("bundle"), selection.get("name"))
+
+    def _pick_emote_gif_paths(self) -> list[Path]:
+        def select_files():
+            from tkinter import filedialog
+
+            parent = self._tk_root
+            options = {"parent": parent} if parent is not None else {}
+            previous_topmost = False
+            try:
+                if parent is not None:
+                    previous_topmost = bool(parent.attributes("-topmost"))
+                    parent.attributes("-topmost", True)
+                    parent.update_idletasks()
+                return filedialog.askopenfilenames(
+                    title="批量选择 GIF 表情", filetypes=[("GIF 动图", "*.gif")], **options)
+            finally:
+                if parent is not None:
+                    parent.attributes("-topmost", previous_topmost)
+
+        return [Path(path) for path in self._run_on_ui(select_files) or ()]
+
+    @exposed
+    def choose_emote_gifs(self) -> dict | None:
+        paths = self._pick_emote_gif_paths()
+        if not paths:
+            return None
+        return self.controller.inspect_emote_gifs(paths)
+
+    @exposed
+    def preview_emote_gif_batch(self, token: str, source_id: str, emote_id: int) -> dict:
+        preview = self.controller.emote_gif_batch_preview(token, source_id, emote_id)
+        source = Path(preview["source_path"])
+        original = Path(preview["original_path"])
+        # 只发送当前行的两张图，批量预检不会把整组 GIF 塞进页面。
+        if source.stat().st_size > 16 * 1024 * 1024 or original.stat().st_size > 16 * 1024 * 1024:
+            raise ValueError("当前表情超过 16 MB 预览限制，请先缩小 GIF 再重新预检。")
+        if self._emote_file_hash(source) != preview["source"]["sha256"]:
+            raise ValueError("GIF 在预览前发生变化，请重新预检。")
+        source_bytes = source.read_bytes()
+        if hashlib.sha256(source_bytes).hexdigest() != preview["source"]["sha256"]:
+            raise ValueError("GIF 在读取期间发生变化，请重新预检。")
+        source_data = "data:image/gif;base64," + base64.b64encode(source_bytes).decode("ascii")
+        result = {"source_data": source_data, "original_data": self._image_data(original),
+                  "source": preview["source"], "target": preview["target"]}
+        if self._emote_file_hash(source) != preview["source"]["sha256"]:
+            raise ValueError("GIF 在预览期间发生变化，请重新预检。")
+        return result
+
+    @exposed
+    def save_emote_gif_batch(self, token: str, mappings: list[dict]) -> dict:
+        result = self.controller.commit_emote_gifs(
+            token, mappings, progress=lambda progress: self._emit("emote_batch_progress", {**progress, "token": token}))
+        self._emote_preview_cache = {}
+        self._clear_emote_candidate()
+        return {**result, "draft": self._draft_state()}
 
     def _clear_emote_candidate(self) -> None:
         """只清理由本会话创建的转码目录，用户选入的原文件始终保留。"""

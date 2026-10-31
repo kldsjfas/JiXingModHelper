@@ -194,6 +194,14 @@
     const analysis = result?.analysis || {};
     const lines = [inspectionText(result?.inspection)];
     lines.push(`当前游戏：可匹配 ${count(analysis.matched)} 个资源包，未匹配 ${count(analysis.unmatched)} 个，冲突 ${count(analysis.conflicts)} 个。`);
+    if (count(analysis.emote_count)) {
+      const characters = Array.isArray(analysis.emote_characters) ? analysis.emote_characters : [];
+      const breakdown = characters.map((entry) => `${String(entry.label)} ${count(entry.count)} 个`).join("、");
+      lines.push(`独立动态表情：${count(analysis.emote_count)} 个${breakdown ? `（${breakdown}）` : ""}。`);
+      lines.push("只替换清单中的已有表情，不改变表情拥有状态。");
+      const targets = Array.isArray(analysis.emote_targets) ? analysis.emote_targets : [];
+      for (const target of targets) lines.push(`  ${String(target.label)} · ${String(target.emote_id)}`);
+    }
     const conflicts = Array.isArray(analysis.conflict_names) ? analysis.conflict_names : [];
     if (conflicts.length) lines.push(`冲突作品：${conflicts.map(String).join("、")}`);
     if (analysis.message) lines.push(String(analysis.message));
