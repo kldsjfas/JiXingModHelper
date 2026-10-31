@@ -608,5 +608,89 @@ class WorkshopGithubBridgeTests(unittest.TestCase):
         proxy_factory.assert_not_called()
 
 
+class TrustedHttpResponseTimeoutTests(unittest.TestCase):
+    def connection(self, *, response_delay=0):
+        observations = {}
+
+        class Socket:
+            timeout = 30
+
+            def __init__(self):
+                self.timeouts = []
+
+            def settimeout(self, timeout):
+                self.timeout = timeout
+                self.timeouts.append(timeout)
+
+        active_socket = Socket()
+        connection = Mock(timeout=30, sock=active_socket)
+        response = Mock(status=200)
+        response.getheader.return_value = "application/json"
+
+        def endheaders():
+            observations["request"] = (connection.timeout, active_socket.timeout)
+
+        def getresponse():
+            observations["first_response"] = (connection.timeout, active_socket.timeout)
+            if response_delay > active_socket.timeout:
+                raise TimeoutError("simulated response delay")
+            # A close-delimited response keeps the socket after HTTPConnection detaches it.
+            connection.sock = None
+            return response
+
+        def read(_count):
+            observations["response_body"] = (connection.timeout, active_socket.timeout)
+            return b'{"ok":true}'
+
+        connection.endheaders.side_effect = endheaders
+        connection.getresponse.side_effect = getresponse
+        response.read.side_effect = read
+        return connection, active_socket, observations
+
+    def test_scan_allows_slow_first_response_then_restores_short_timeout_on_detached_socket(self):
+        service = ServiceApi("private-test-admin-token")
+        connection, active_socket, observations = self.connection(response_delay=40)
+        with patch.object(service.http, "_connection", return_value=connection):
+            self.assertEqual(service.scan(SUBMISSION), {"ok": True})
+        self.assertEqual(observations["request"], (30, 30))
+        self.assertEqual(observations["first_response"], (150, 150))
+        self.assertEqual(observations["response_body"], (30, 30))
+        self.assertEqual(active_socket.timeouts, [150, 30])
+        connection.close.assert_called_once()
+
+    def test_service_queries_reviews_and_both_github_origins_keep_normal_timeout(self):
+        service = ServiceApi("private-test-admin-token")
+        github = GithubApi("private-test-github-token")
+        operations = (
+            (service.http, lambda: service.detail(SUBMISSION)),
+            (service.http, lambda: service.review(SUBMISSION, {"decision": "reject"})),
+            (service.http, lambda: service.bind_issue(SUBMISSION, 27)),
+            (github.http, lambda: github.request("GET", "/issues/27")),
+            (github.uploads, lambda: github.uploads.request("POST", "/test-upload")),
+        )
+        for transport, operation in operations:
+            with self.subTest(host=transport.host):
+                connection, active_socket, observations = self.connection(response_delay=10)
+                with patch.object(transport, "_connection", return_value=connection):
+                    self.assertEqual(operation(), {"ok": True})
+                self.assertEqual(observations, {"request": (30, 30), "first_response": (30, 30),
+                                                "response_body": (30, 30)})
+                self.assertFalse(active_socket.timeouts)
+                connection.close.assert_called_once()
+
+    def test_scan_timeout_stays_finite_and_does_not_retry_or_expose_credentials(self):
+        service = ServiceApi("private-test-admin-token")
+        connection, _active_socket, observations = self.connection(response_delay=151)
+        with patch.object(service.http, "_connection", return_value=connection):
+            with self.assertRaisesRegex(RuntimeError, "桥接网络连接失败") as caught:
+                service.scan(SUBMISSION)
+        self.assertEqual(observations["first_response"], (150, 150))
+        self.assertNotIn("response_body", observations)
+        connection.getresponse.assert_called_once()
+        connection.close.assert_called_once()
+        self.assertNotIn("private-test-admin-token", str(caught.exception))
+        self.assertNotIn("simulated response delay", str(caught.exception))
+
+
 if __name__ == "__main__":
     unittest.main()
