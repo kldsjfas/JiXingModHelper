@@ -207,10 +207,14 @@ class EmoteBatchWorkspace:
                 identifier = emote_id_from_texture(name)
                 if identifier is not None:
                     images.setdefault(identifier, set()).add((bundle, name))
-        materials = sorted(name for name in context["videos"]
-                           if context.get("video_types", {}).get(name) == MATERIAL_VIDEO_TYPE)
+        # catalog 可能叠加了其它已装独立表情；分享包只能借用原始配置
+        # 实际引用的原生模板，不能继续依赖别人的 *_999 自定义资源。
+        native_names = {record["video_name"] for record in context["records"]
+                        if record["video_name"] and not record["video_name"].endswith("_999")}
+        materials = sorted(name for name in native_names if name in context["videos"]
+                           and context.get("video_types", {}).get(name) == MATERIAL_VIDEO_TYPE)
         if not materials:
-            raise ValueError("当前游戏没有已验证的材质序列图模板，暂不支持批量 GIF 导入。")
+            raise ValueError("当前游戏没有已完整下载、可核对的原生材质序列图模板，暂不支持批量 GIF 导入。")
         targets, unavailable = [], []
         for record in context["records"]:
             if record["video_name"]:

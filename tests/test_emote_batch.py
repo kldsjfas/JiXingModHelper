@@ -158,6 +158,47 @@ class EmoteBatchTests(unittest.TestCase):
         result = self.inspect([self.gif("UT_Item_Emoji_102_01.gif")])
         self.assertEqual(result["sources"][0]["suggested_emote_id"], 120102001)
 
+    def add_installed_material(self, name="VEmoji_102_05_999"):
+        (self.controller.original / "installed-custom.bundle").write_bytes(b"other installed custom material")
+        self.context["videos"][name] = ["installed-custom.bundle"]
+        self.context["video_types"][name] = "UnityEngine.Material"
+
+    def test_same_character_custom_address_sorted_first_is_never_a_template(self):
+        self.add_installed_material()
+        result = self.inspect()
+        self.assertTrue(all(target["template_video"] == "VEmoji_102_09" for target in result["targets"]))
+        self.edit.commit(result["token"], self.mappings(result))
+        self.assertTrue(all(call.args[2] == "VEmoji_102_09" for call in self.prepare.call_args_list))
+
+    def test_only_custom_routes_in_original_records_cannot_be_used_as_native_templates(self):
+        custom = "VEmoji_102_09_999"
+        self.add_installed_material(custom)
+        self.context["records"][2]["video_name"] = custom
+        before = self.draft_state()
+        with self.assertRaisesRegex(ValueError, "原生.*模板"):
+            self.inspect()
+        self.assertEqual(self.draft_state(), before)
+        self.prepare.assert_not_called()
+
+    def test_missing_official_catalog_dependency_does_not_fall_back_to_installed_custom(self):
+        self.add_installed_material()
+        self.context["videos"].pop("VEmoji_102_09")
+        self.context["video_types"].pop("VEmoji_102_09")
+        before = self.draft_state()
+        with self.assertRaisesRegex(ValueError, "原生.*模板"):
+            self.inspect()
+        self.assertEqual(self.draft_state(), before)
+        self.prepare.assert_not_called()
+
+    def test_missing_official_bundle_refuses_import_instead_of_using_custom_material(self):
+        self.add_installed_material()
+        self.context["videos"]["VEmoji_102_09"] = ["missing-official.bundle"]
+        before = self.draft_state()
+        with self.assertRaisesRegex(ValueError, "资源文件.*丢失"):
+            self.inspect()
+        self.assertEqual(self.draft_state(), before)
+        self.prepare.assert_not_called()
+
     def test_canonical_filename_must_agree_with_confirmed_target(self):
         result = self.inspect([self.first])
         with self.assertRaisesRegex(ValueError, "文件名"):
