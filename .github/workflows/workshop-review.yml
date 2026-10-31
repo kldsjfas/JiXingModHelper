@@ -43,7 +43,7 @@ jobs:
       - name: Checkout reviewed workshop bridge
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          ref: 7b3a973ceb02839ca0ad50a4f29884eb2038934b # reviewed source; never accepts an input ref
+          ref: 262fe22e5dfeaab689de5e314342e2026deb1ac4 # reviewed source; never accepts an input ref
           persist-credentials: false
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6

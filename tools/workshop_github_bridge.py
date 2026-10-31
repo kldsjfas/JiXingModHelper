@@ -92,7 +92,8 @@ class TrustedHttp:
         connection._create_connection = connect_service
         return connection
 
-    def request(self, method, path, value=None, *, file=None, size=0, sha256="", output=None, binary=False):
+    def request(self, method, path, value=None, *, file=None, size=0, sha256="", output=None, binary=False,
+                response_timeout=30):
         if not path.startswith("/") or "\\" in path or any(ord(char) <= 32 for char in path):
             raise ValueError("桥接请求路径不正确。")
         connection = self._connection()
@@ -122,7 +123,17 @@ class TrustedHttp:
                     raise ValueError("发布包在传输期间变化。")
             elif body is not None:
                 connection.send(body)
+            response_socket = connection.sock
+            if response_timeout != 30:
+                connection.timeout = response_timeout
+                if response_socket is not None:
+                    response_socket.settimeout(response_timeout)
             response = connection.getresponse()
+            if response_timeout != 30:
+                # Connection: close 可能已将 socket 交给响应，读取正文仍使用普通超时。
+                connection.timeout = 30
+                if response_socket is not None:
+                    response_socket.settimeout(30)
             if response.status not in (200, 201, 204):
                 # 包括所有跳转：绝不把任何 Bearer 凭证转发到其它来源。
                 raise ApiFailure(response.status, self.host)
@@ -186,7 +197,8 @@ class ServiceApi:
         return self.http.request("POST", f"/v1/admin/submissions/{identifier}/github-issue", {"issue_number": number})
 
     def scan(self, identifier):
-        return self.http.request("POST", f"/v1/admin/submissions/{identifier}/scan")
+        # 独立扫描服务最多运行120秒；只延长本次扫描的首个响应等待。
+        return self.http.request("POST", f"/v1/admin/submissions/{identifier}/scan", response_timeout=150)
 
     def review(self, identifier, payload):
         return self.http.request("POST", f"/v1/admin/submissions/{identifier}/review", payload)
