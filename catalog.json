@@ -1,5 +1,22 @@
 {
   "format": "jixing-workshop",
   "version": 1,
-  "mods": []
+  "mods": [
+    {
+      "id": "kk-four-character-emotes",
+      "name": "四角色动态表情 · 32枚",
+      "author": "kldsjfas",
+      "description": "太刀（美咲）、芬妮、邦妮、蓝海晴各8枚，共32枚；将对应原静态槽改为动态，保留接近原表情的表达，不改变拥有状态。使用EmoteLab/CoffeeBean资源制作，角色造型与动画非独立原创；蓝海晴角色来源：https://steamcommunity.com/sharedfiles/filedetails/?id=3816989299 。整包为本地资源替换；游戏内逐个触发与性能尚未验证。",
+      "category": "emote",
+      "version": "1.0.0",
+      "game_version": "3.3.0",
+      "asset": {
+        "tag": "workshop-a35d7746575beae11fd75e5ff2177700",
+        "name": "workshop-a35d7746575beae11fd75e5ff2177700.zip",
+        "size": 23060466,
+        "sha256": "bac5fede04880cc4144683b1f7873997a91439201828fc2fd5ce0e3fd35d877e"
+      },
+      "revoked": false
+    }
+  ]
 }
