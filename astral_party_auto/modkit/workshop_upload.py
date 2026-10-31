@@ -9,6 +9,7 @@ import json
 import os
 import re
 import secrets
+import socket
 import stat
 import tempfile
 import threading
@@ -145,18 +146,53 @@ class WorkshopUploadClient:
         if self._origin is None:
             raise RuntimeError(self._message)
         connection = None
+        response = None
+        response_socket = None
+        watchdog = None
+        deadline_expired = threading.Event()
         deadline = time.monotonic() + REQUEST_DEADLINE
+
+        def time_left():
+            remaining = deadline - time.monotonic()
+            if deadline_expired.is_set() or remaining <= 0:
+                raise ValueError("投稿请求耗时超过限制，请稍后重试。")
+            return remaining
+
+        def set_timeout(limit, active_socket=None):
+            connection.timeout = min(limit, time_left())
+            active_socket = connection.sock if active_socket is None else active_socket
+            if active_socket is not None:
+                active_socket.settimeout(connection.timeout)
+
         try:
             connection = self._connection()
-            if source is None:
-                connection.timeout = STATUS_SOCKET_TIMEOUT
+            set_timeout(STATUS_SOCKET_TIMEOUT if source is None else SOCKET_TIMEOUT)
             connection.putrequest(method, self._origin[3] + endpoint)
             connection.putheader("Accept", "application/json")
             connection.putheader("User-Agent", "JiXing-Mod-Helper")
             connection.putheader("Connection", "close")
             for key, value in (headers or {}).items():
                 connection.putheader(key, value)
+            def interrupt_request():
+                deadline_expired.set()
+                # CONNECT 阶段使用本连接；响应接管后使用保留的原 socket。
+                active_socket = response_socket if response_socket is not None else connection.sock
+                if active_socket is None:
+                    return
+                try:
+                    active_socket.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                finally:
+                    active_socket.close()
+
+            watchdog = threading.Timer(time_left(), interrupt_request)
+            watchdog.name = "jixing-workshop-request-deadline"
+            watchdog.daemon = True
+            watchdog.start()
             connection.endheaders()
+            time_left()
+            response_socket = connection.sock
             if source is not None:
                 count, digest = 0, hashlib.sha256()
                 while block := source.read(BLOCK_BYTES):
@@ -164,10 +200,14 @@ class WorkshopUploadClient:
                     if count > size or time.monotonic() > deadline:
                         raise ValueError("投稿包大小改变或上传时间超过限制。")
                     digest.update(block)
+                    set_timeout(SOCKET_TIMEOUT)
                     connection.send(block)
                 if count != size or digest.hexdigest() != expected_sha256:
                     raise ValueError("投稿包在上传时发生改变，请重新选择。")
+                # 服务收到完整包后还会检查内容，首个响应可使用本次请求的剩余期限。
+                set_timeout(REQUEST_DEADLINE)
             response = connection.getresponse()
+            time_left()
             # 不跟随任何跳转，包与凭证只发到固定来源。
             if 300 <= response.status <= 399:
                 raise RuntimeError("投稿服务返回了跳转，已停止传输。")
@@ -176,14 +216,30 @@ class WorkshopUploadClient:
             if response.getheader("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
                 raise ValueError("上传服务返回了无效响应类型。")
             body = bytearray()
-            while block := response.read(min(BLOCK_BYTES, MAX_RESPONSE_BYTES + 1 - len(body))):
+            read_timeout = SOCKET_TIMEOUT if source is not None else STATUS_SOCKET_TIMEOUT
+            while not response.isclosed():
+                # Connection: close 会让连接移交 socket；响应体仍需受短超时和总期限约束。
+                set_timeout(read_timeout, response_socket)
+                block = response.read1(min(BLOCK_BYTES, MAX_RESPONSE_BYTES + 1 - len(body)))
+                time_left()
+                if not block:
+                    break
                 body.extend(block)
-                if len(body) > MAX_RESPONSE_BYTES or time.monotonic() > deadline:
+                if len(body) > MAX_RESPONSE_BYTES:
                     raise ValueError("上传服务响应超过限制。")
-            return response.status, _strict_json(bytes(body))
+            result = _strict_json(bytes(body))
+            time_left()
+            return response.status, result
         except (OSError, http.client.HTTPException):
+            time_left()
             raise RuntimeError("无法连接投稿服务或连接中断；上传结果尚未确认，可稍后重试。") from None
         finally:
+            if watchdog is not None:
+                watchdog.cancel()
+                if watchdog.ident is not None:
+                    watchdog.join()
+            if response is not None:
+                response.close()
             if connection is not None:
                 connection.close()
 
