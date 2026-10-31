@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import http.client
 import io
 import json
 import os
+import socket
 import stat
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -15,7 +18,9 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from astral_party_auto.modkit.workshop import MAX_PACKAGE_BYTES
-from astral_party_auto.modkit.workshop_upload import BLOCK_BYTES, WorkshopUploadClient
+from astral_party_auto.modkit.workshop_upload import (
+    BLOCK_BYTES, REQUEST_DEADLINE, SOCKET_TIMEOUT, STATUS_SOCKET_TIMEOUT, WorkshopUploadClient,
+)
 from tests.test_workshop import metadata
 
 
@@ -314,6 +319,250 @@ class WorkshopUploadTests(unittest.TestCase):
         self.server.review_status = "rejected"
         state = self.client.snapshot(refresh=True)
         self.assertEqual(state["submissions"][0]["status"], "rejected")
+
+
+class WorkshopUploadDeadlineTests(unittest.TestCase):
+    """推进模拟时钟检查慢确认，避免实际等待网络超时。"""
+
+    def setUp(self):
+        self.now = 100.0
+        self.client = WorkshopUploadClient(Path("unused-upload-deadline-test"),
+                                          service_url="http://127.0.0.1", allow_local_http=True)
+        self.payload = b"a complete resource package"
+        self.monotonic = patch("astral_party_auto.modkit.workshop_upload.time.monotonic", side_effect=lambda: self.now)
+        self.monotonic.start()
+        self.addCleanup(self.monotonic.stop)
+
+    def connection(self, *, connect_seconds=0, send_seconds=0, response_seconds=0, body_seconds=()):
+        test = self
+
+        class Socket:
+            def settimeout(self, timeout):
+                self.timeout = timeout
+
+        class Response:
+            status = 200
+
+            def __init__(self, connection, active_socket):
+                self.connection = connection
+                self.socket = active_socket
+                self.body = io.BytesIO(b'{"ok":true}')
+                self.reads = []
+                self.closed = False
+
+            def getheader(self, key, default=""):
+                return "application/json" if key == "Content-Type" else default
+
+            def isclosed(self):
+                return self.closed
+
+            def close(self):
+                self.closed = True
+                self.body.close()
+
+            def read1(self, count):
+                timeout = self.socket.timeout
+                self.reads.append((self.connection.timeout, timeout, count))
+                delay = body_seconds[len(self.reads) - 1] if len(self.reads) <= len(body_seconds) else 0
+                test.now += min(delay, timeout)
+                if delay > timeout:
+                    raise TimeoutError
+                block = self.body.read1(count)
+                self.closed = not block
+                return block
+
+        class Connection:
+            timeout = SOCKET_TIMEOUT
+            sock = None
+            closed = False
+            response_wait = None
+
+            def putrequest(self, *_args):
+                pass
+
+            def putheader(self, *_args):
+                pass
+
+            def endheaders(self):
+                self.connect_timeout = self.timeout
+                test.now += connect_seconds
+                self.sock = Socket()
+                self.sock.settimeout(self.timeout)
+
+            def send(self, _block):
+                test.now += send_seconds
+
+            def getresponse(self):
+                self.response_wait = (self.timeout, self.sock.timeout)
+                test.now += min(response_seconds, self.sock.timeout)
+                if response_seconds > self.sock.timeout:
+                    raise TimeoutError
+                self.response = Response(self, self.sock)
+                # HTTPConnection releases its reference for Connection: close.
+                self.sock = None
+                return self.response
+
+            def close(self):
+                self.closed = True
+
+        return Connection()
+
+    def request(self, connection, *, upload=True, source=None):
+        with patch.object(self.client, "_connection", return_value=connection):
+            if not upload:
+                return self.client._request("GET", "/v1/health")
+            return self.client._request("POST", "/v1/submissions", source=source or io.BytesIO(self.payload),
+                                        size=len(self.payload), expected_sha256=hashlib.sha256(self.payload).hexdigest())
+
+    def test_slow_upload_confirmation_uses_remaining_request_deadline_on_connected_socket(self):
+        connection = self.connection(connect_seconds=7, send_seconds=5, response_seconds=45)
+        self.assertEqual(self.request(connection), (200, {"ok": True}))
+        remaining = REQUEST_DEADLINE - 7 - 5
+        self.assertEqual(connection.response_wait, (remaining, remaining))
+        self.assertEqual(connection.connect_timeout, SOCKET_TIMEOUT)
+        self.assertTrue(all(row[:2] == (SOCKET_TIMEOUT, SOCKET_TIMEOUT) for row in connection.response.reads))
+        self.assertTrue(connection.closed)
+
+    def test_health_requests_keep_short_connection_and_response_timeouts(self):
+        connection = self.connection(response_seconds=5)
+        self.assertEqual(self.request(connection, upload=False), (200, {"ok": True}))
+        self.assertEqual(connection.connect_timeout, STATUS_SOCKET_TIMEOUT)
+        self.assertEqual(connection.response_wait, (STATUS_SOCKET_TIMEOUT, STATUS_SOCKET_TIMEOUT))
+        self.assertTrue(all(row[:2] == (STATUS_SOCKET_TIMEOUT, STATUS_SOCKET_TIMEOUT)
+                            for row in connection.response.reads))
+
+    def test_exhausted_upload_deadline_never_starts_waiting_for_response(self):
+        test = self
+
+        class Source(io.BytesIO):
+            def read(self, count):
+                block = super().read(count)
+                if not block:
+                    test.now += REQUEST_DEADLINE
+                return block
+
+        connection = self.connection()
+        with self.assertRaisesRegex(ValueError, "耗时超过限制"):
+            self.request(connection, source=Source(self.payload))
+        self.assertIsNone(connection.response_wait)
+        self.assertTrue(connection.closed)
+
+    def test_response_headers_cannot_reset_the_total_deadline(self):
+        connection = self.connection(response_seconds=REQUEST_DEADLINE)
+        with self.assertRaisesRegex(ValueError, "耗时超过限制"):
+            self.request(connection)
+        self.assertFalse(connection.response.reads)
+        self.assertTrue(connection.closed)
+
+    def test_each_body_read_is_capped_by_remaining_deadline_even_after_socket_handoff(self):
+        connection = self.connection(response_seconds=REQUEST_DEADLINE - 5, body_seconds=(3, 1))
+        self.assertEqual(self.request(connection), (200, {"ok": True}))
+        self.assertEqual([row[:2] for row in connection.response.reads], [(5, 5), (2, 2)])
+        self.assertTrue(all(0 < row[2] <= BLOCK_BYTES for row in connection.response.reads))
+
+    def test_slow_response_body_cannot_wait_past_remaining_deadline(self):
+        connection = self.connection(response_seconds=REQUEST_DEADLINE - 2, body_seconds=(3,))
+        with self.assertRaisesRegex(ValueError, "耗时超过限制"):
+            self.request(connection)
+        self.assertEqual(connection.response.reads[0][:2], (2, 2))
+        self.assertEqual(self.now, 100 + REQUEST_DEADLINE)
+        self.assertTrue(connection.closed)
+
+
+class WorkshopUploadWallClockTests(unittest.TestCase):
+    def slow_response(self, method, *, chunked_body=False, tunnel=False):
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        listener.settimeout(1)
+        port = listener.getsockname()[1]
+        stopped = threading.Event()
+
+        def serve():
+            try:
+                with listener.accept()[0] as connection:
+                    connection.settimeout(1)
+                    incoming = bytearray()
+                    while b"\r\n\r\n" not in incoming:
+                        block = connection.recv(65536)
+                        if not block:
+                            return
+                        incoming.extend(block)
+                    headers, body = bytes(incoming).split(b"\r\n\r\n", 1)
+                    content_length = 0
+                    for header in headers.split(b"\r\n")[1:]:
+                        name, value = header.split(b":", 1)
+                        if name.lower() == b"content-length":
+                            content_length = int(value)
+                    while len(body) < content_length:
+                        block = connection.recv(content_length - len(body))
+                        if not block:
+                            return
+                        body += block
+                    if chunked_body:
+                        connection.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                                           b"Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n")
+                    else:
+                        connection.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-Slow: ")
+                    for _ in range(10):
+                        if stopped.wait(0.06):
+                            return
+                        connection.sendall(b"0" if chunked_body else b"a")
+                    ending = (b"b\r\n{\"ok\":true}\r\n0\r\n\r\n" if chunked_body else
+                              b"\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}")
+                    connection.sendall(ending)
+            except OSError:
+                pass
+            finally:
+                listener.close()
+
+        server = threading.Thread(target=serve, daemon=True, name="workshop-slow-response-test")
+        server.start()
+        watchdogs_before = {thread.ident for thread in threading.enumerate()
+                            if thread.name == "jixing-workshop-request-deadline"}
+        client = WorkshopUploadClient(Path("unused-slow-response-test"),
+                                      service_url=f"http://127.0.0.1:{port}", allow_local_http=True)
+
+        def connection():
+            transport = http.client.HTTPConnection("127.0.0.1", port, timeout=SOCKET_TIMEOUT)
+            if tunnel:
+                transport.set_tunnel("127.0.0.1", 9)
+            return transport
+
+        payload = b"a complete resource package"
+        arguments = {}
+        if method == "POST":
+            arguments = {"source": io.BytesIO(payload), "size": len(payload),
+                         "expected_sha256": hashlib.sha256(payload).hexdigest(),
+                         "headers": {"Content-Length": str(len(payload))}}
+        try:
+            with patch("astral_party_auto.modkit.workshop_upload.REQUEST_DEADLINE", 0.25), \
+                    patch("astral_party_auto.modkit.workshop_upload.SOCKET_TIMEOUT", 0.15), \
+                    patch("astral_party_auto.modkit.workshop_upload.STATUS_SOCKET_TIMEOUT", 0.15), \
+                    patch.object(client, "_connection", side_effect=connection):
+                started = time.monotonic()
+                with self.assertRaisesRegex(ValueError, "耗时超过限制"):
+                    client._request(method, "/v1/slow-response", **arguments)
+                self.assertLess(time.monotonic() - started, 0.5)
+        finally:
+            stopped.set()
+            listener.close()
+            server.join(timeout=1)
+        self.assertFalse(server.is_alive())
+        self.assertFalse([thread for thread in threading.enumerate()
+                          if thread.name == "jixing-workshop-request-deadline" and thread.ident not in watchdogs_before])
+
+    def test_upload_slow_header_bytes_cannot_extend_absolute_deadline(self):
+        self.slow_response("POST")
+
+    def test_health_slow_header_bytes_cannot_extend_absolute_deadline(self):
+        self.slow_response("GET")
+
+    def test_chunk_header_drip_is_stopped_after_response_takes_socket_ownership(self):
+        self.slow_response("GET", chunked_body=True)
+
+    def test_proxy_connect_header_drip_cannot_extend_absolute_deadline(self):
+        self.slow_response("GET", tunnel=True)
 
 
 class WorkshopServiceIntegrationTests(unittest.TestCase):
