@@ -307,6 +307,7 @@
               <p>替换预览会读取转换后的实际动图，保存后再从作品集重新读取。保存不会直接安装，准备好后再手动安装到游戏。</p>
               <div class="action-row">
                 <button id="emote-import" class="button ghost" disabled>导入动图或视频…</button>
+                <button id="emote-batch-from-studio" class="button ghost" type="button">批量导入 GIF…</button>
                 <button id="emote-save" class="button primary" disabled>保存动态表情</button>
                 <button class="button ghost" type="button" data-resource-diagnostics>查看资源诊断</button>
               </div>
@@ -384,6 +385,22 @@
           <article class="card pack-header">
             <div><h2>我的作品集 <span id="draft-count">0 项</span></h2><p>保存和预览只改作品集；准备好后再手动安装到游戏。</p></div>
             <label>套装名<input id="draft-name" maxlength="60"></label>
+          </article>
+          <article id="emote-batch" class="card emote-batch">
+            <div class="section-heading emote-batch-heading"><div><h2>批量导入 GIF 表情</h2><p>让多张原静态表情动起来，每批最多 64 张。先按角色指定目标，再对照原图核对表达；每张使用独立动画资源。</p></div><div class="action-row"><button id="emote-batch-choose" class="button purple" type="button">选择 GIF 动图…</button><button id="emote-batch-clear" class="button ghost compact is-hidden" type="button" disabled>取消这一批</button></div></div>
+            <p id="emote-batch-status" class="editor-status" role="status" aria-live="polite">选择多张 GIF，再为每张指定对应角色的原静态表情。</p>
+            <div id="emote-batch-content" class="emote-batch-content is-hidden">
+              <ol id="emote-batch-list" class="emote-batch-list" aria-label="GIF 与原静态表情映射"></ol>
+              <aside class="emote-batch-preview" aria-label="当前 GIF 对照预览">
+                <h3 id="emote-batch-preview-title">原表情与 GIF 对照</h3>
+                <div class="compare-grid"><div><h4>原静态表情</h4><div id="emote-batch-original" class="preview-media"><span>尚未预览</span></div></div><div><h4>待导入 GIF</h4><div id="emote-batch-source" class="preview-media"><span>尚未预览</span></div></div></div>
+                <p id="emote-batch-preview-status" class="editor-status" role="status">点击一行的「对照预览」，查看原静态表情与待导入 GIF。</p>
+              </aside>
+            </div>
+            <p id="emote-batch-summary" class="emote-batch-summary" role="status" aria-live="polite"></p>
+            <label id="emote-batch-confirm-row" class="emote-batch-confirm is-hidden"><input id="emote-batch-confirm" type="checkbox" disabled><span>我已逐项核对角色和原表情含义，确认 GIF 的表达相近、对应无误。</span></label>
+            <progress id="emote-batch-progress" class="emote-batch-progress is-hidden" aria-label="整批动态表情保存进度"></progress>
+            <div class="action-row"><button id="emote-batch-save" class="button primary" type="button" disabled>保存这一批到作品集</button><span class="emote-batch-save-note">仅保存作品集，不会自动安装到游戏。</span></div>
           </article>
           <div class="pack-layout">
             <section class="panel"><div id="draft-list" class="draft-list"></div></section>
@@ -520,6 +537,7 @@
   <script src="workshop.js" defer></script>
   <script src="visual-animation.js" defer></script>
   <script src="game-location.js" defer></script>
+  <script src="emote-batch.js" defer></script>
   <script src="app.js" defer></script>
 </body>
 </html>

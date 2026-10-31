@@ -1519,6 +1519,52 @@ body.nav-open .sidebar {
   overflow-wrap: anywhere;
 }
 
+/* 批量 GIF 只在右侧播放当前一项，避免长列表同时解码大量动图。 */
+.emote-batch { min-width: 0; scroll-margin-top: 18px; }
+.emote-batch-heading { align-items: flex-start; flex-wrap: wrap; gap: 14px; }
+.emote-batch-heading > div:first-child { flex: 1 1 360px; min-width: 0; }
+.emote-batch-heading h2 { margin-bottom: 7px; }
+.emote-batch-heading p { margin: 0; }
+.emote-batch-content { display: grid; grid-template-columns: minmax(300px, 1.05fr) minmax(280px, 1fr); gap: 18px; align-items: start; }
+.emote-batch-list { margin: 0; padding: 0; display: grid; gap: 10px; list-style: none; max-height: 640px; overflow-y: auto; scrollbar-gutter: stable; }
+.emote-batch-row { min-width: 0; padding: 13px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel-soft); }
+.emote-batch-row.is-error { border-color: var(--danger); }
+.emote-batch-file { display: grid; gap: 5px; margin-bottom: 11px; }
+.emote-batch-file strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.emote-batch-file span, .emote-batch-row-notice { color: var(--muted); font-size: 11px; line-height: 1.6; }
+.emote-batch-fields { display: grid; grid-template-columns: minmax(100px, .7fr) minmax(140px, 1.3fr); gap: 9px; }
+.emote-batch-fields label { display: grid; gap: 6px; min-width: 0; color: var(--muted); font-size: 11px; }
+.emote-batch-fields select { width: 100%; min-width: 0; min-height: 36px; padding: 7px 8px; border: 1px solid var(--line); border-radius: 8px; color: var(--text); background: var(--input); font-size: 12px; }
+.emote-batch-fields button { grid-column: 1 / -1; justify-self: start; }
+.emote-batch-row-notice { margin: 9px 0 0; overflow-wrap: anywhere; }
+.emote-batch-row.is-error .emote-batch-row-notice { color: var(--danger); }
+.emote-batch-preview { position: sticky; top: 0; min-width: 0; padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel-soft); }
+.emote-batch-preview h3 { margin: 0 0 12px; font-size: 14px; overflow-wrap: anywhere; }
+.emote-batch-preview h4 { margin: 0 0 8px; color: var(--muted); font-size: 12px; font-weight: 500; }
+.emote-batch-preview .compare-grid { gap: 10px; }
+.emote-batch-preview .preview-media { min-height: 155px; height: clamp(150px, 18vw, 250px); }
+.emote-batch-preview .preview-media img { width: 100%; height: 100%; object-fit: contain; }
+.emote-batch-summary { margin: 15px 0 10px; color: var(--text); font-size: 12px; line-height: 1.7; }
+.emote-batch-confirm { display: flex; gap: 9px; align-items: flex-start; margin: 12px 0; color: var(--muted); font-size: 12px; line-height: 1.7; }
+.emote-batch-confirm input { flex: 0 0 auto; margin: 4px 0 0; accent-color: var(--accent); }
+.emote-batch-progress { display: block; width: 100%; height: 8px; margin: 12px 0; accent-color: var(--purple); }
+.emote-batch-save-note { color: var(--muted); font-size: 12px; }
+
+@media (max-width: 1100px) {
+  .emote-batch-content { grid-template-columns: minmax(0, 1fr); }
+  .emote-batch-list { max-height: 430px; }
+  .emote-batch-preview { position: static; }
+  .emote-batch-preview .preview-media { height: 220px; }
+}
+
+@media (max-width: 620px) {
+  .emote-batch-fields { grid-template-columns: minmax(0, 1fr); }
+  .emote-batch-preview .compare-grid { grid-template-columns: minmax(0, 1fr); }
+  .emote-batch-preview .preview-media { height: 190px; }
+  .emote-batch-heading > .action-row { width: 100%; }
+  .emote-batch-heading > .action-row .button { flex: 1 1 130px; }
+}
+
 .crop-stage {
   position: relative;
   width: 100%;
