@@ -9,7 +9,7 @@
   const EMOTE_BATCH_CHANGING_CALLS = new Set([
     "save_emote", "save_visual_animation", "commit_replacement", "commit_draft_crop", "replace_draft_image",
     "remove_draft_item", "clear_draft", "set_draft_name", "run_migration", "install_draft", "change_mod",
-    "install_pending_mod", "workshop_install", "restore_all", "quick_create_sfw_texture",
+    "install_pending_mod", "workshop_install", "disable_all_mods", "restore_all", "quick_create_sfw_texture",
   ]);
   const PAGE_TITLES = {
     dashboard: "仪表盘",
@@ -39,6 +39,7 @@
     resourceDiagnosticsToken: "",
     resourceDiagnosticsChecks: null,
     installed: [],
+    modPauseWorking: false,
     draft: { name: "我的Mod套装", items: [] },
     assetTypes: [],
     assetType: "texture",
@@ -360,7 +361,12 @@
   function renderInstalled() {
     const list = $("#installed-list");
     const badge = $("#installed-count");
+    const active = state.installed.filter((mod) => !mod.disabled).length;
+    const summary = $("#installed-summary");
+    const pause = $("#pause-all-mods");
     if (badge) badge.textContent = `${state.installed.length} 个`;
+    if (summary) summary.textContent = `本助手记录：已启用 ${active} 个 / 已停用 ${state.installed.length - active} 个`;
+    if (pause) pause.disabled = state.modPauseWorking || active === 0 || state.dashboard?.has_game === false;
     if (!list) return;
     list.innerHTML = "";
     if (!state.installed.length) {
@@ -384,6 +390,7 @@
         const b = document.createElement("button");
         b.className = `button ${cls} compact`;
         b.textContent = label;
+        b.disabled = state.modPauseWorking;
         b.addEventListener("click", fn);
         actions.appendChild(b);
       };
@@ -1947,6 +1954,17 @@ ${row.bundle}`;
     return `${name.slice(0, 8)}…${name.slice(-6)}`;
   }
 
+  function handlePageLink(event) {
+    const link = event.target?.closest?.("[data-page-link]");
+    if (!link || link.disabled || !PAGE_TITLES[link.dataset.pageLink]) return;
+    event.preventDefault?.();
+    showPage(link.dataset.pageLink);
+  }
+
+  function bindPageLinks() {
+    document.addEventListener("click", handlePageLink);
+  }
+
   function bindEvents() {
     bindReplacementDrop();
     window.EmoteBatch?.init({
@@ -1995,9 +2013,7 @@ ${row.bundle}`;
       },
     });
     $$(".nav-button").forEach((btn) => btn.addEventListener("click", () => showPage(btn.dataset.page)));
-    $$("[data-page-link]").forEach((btn) =>
-      btn.addEventListener("click", () => showPage(btn.dataset.pageLink))
-    );
+    bindPageLinks();
     $("#check-resources")?.addEventListener("click", checkResources);
     $("#copy-resource-diagnostics")?.addEventListener("click", copyResourceDiagnostics);
     $("#export-resource-diagnostics")?.addEventListener("click", exportResourceDiagnostics);
@@ -2296,8 +2312,23 @@ ${row.bundle}`;
       if (action === "launch-game") {
         await call("launch_game", { busy: true, busyText: "启动游戏…" });
         toast("已尝试启动游戏");
+      } else if (action === "pause-all-mods") {
+        if (state.modPauseWorking || !state.installed.some((mod) => !mod.disabled)) return;
+        if (!confirm("暂停全部已启用的 Mod？本助手管理的替换会按备份还原，安装记录、作品文件和原始备份保留，之后可逐项重新启用。请先退出游戏。")) return;
+        state.modPauseWorking = true;
+        renderInstalled();
+        try {
+          const data = await call("disable_all_mods", { busy: true, busyText: "暂停 Mod 中…" });
+          state.dashboard = data.dashboard || state.dashboard;
+          state.installed = data.installed || [];
+          renderDashboard();
+          toast("已暂停全部 Mod，安装记录和备份已保留");
+        } finally {
+          state.modPauseWorking = false;
+          renderInstalled();
+        }
       } else if (action === "restore-all") {
-        if (!confirm("一键全还原：恢复所有备份的原始资源包？")) return;
+        if (!confirm("完全还原：恢复所有备份的原始资源，并清空 Mod 记录和安装副本？原始备份与「我的作品集」仍保留。如需以后逐项启用，请改用「暂停全部 Mod」。")) return;
         const data = await call("restore_all", { busy: true, busyText: "还原中…" });
         state.dashboard = data.dashboard || state.dashboard;
         state.installed = data.installed || [];

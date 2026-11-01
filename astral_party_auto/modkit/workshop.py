@@ -9,6 +9,8 @@ import hashlib
 import json
 import os
 import re
+import socket
+import ssl
 import stat
 import struct
 import tempfile
@@ -39,6 +41,8 @@ MAX_INNER_PACKAGE_BYTES = 512 * 1024 * 1024
 MAX_INNER_PACKAGE_OBJECTS = 100_000
 MAX_FILES = 512
 MAX_MODS = 1000
+CATALOG_CACHE_SECONDS = 300
+CATALOG_FAILURE_CACHE_SECONDS = 10
 MAX_RATIO = 100
 CATEGORIES = frozenset({"texture", "text", "animation", "emote", "audio", "mixed"})
 METADATA_FIELDS = frozenset({"id", "name", "author", "description", "category", "version", "game_version"})
@@ -459,6 +463,39 @@ def _extract_snapshot(path: Path, inspection: dict, destination: Path) -> None:
         raise
 
 
+def _catalog_failure(error: Exception) -> dict:
+    """Only return fixed explanations; remote errors may contain private URLs."""
+    reason = error
+    for _ in range(4):
+        if isinstance(reason, URLError) and not isinstance(reason, HTTPError) and isinstance(reason.reason, BaseException):
+            reason = reason.reason
+        else:
+            break
+    recovery = "确认当前网络能够访问 GitHub 后刷新目录；已下载的 ZIP 也可在 Mod 管理中导入。"
+    if isinstance(reason, HTTPError):
+        code, message = {
+            403: ("http_forbidden", "GitHub 拒绝了工坊目录请求。"),
+            404: ("http_not_found", "未找到工坊目录（HTTP 404）。"),
+            407: ("proxy_auth_required", "当前系统代理要求认证，暂时无法读取工坊目录。"),
+            429: ("http_rate_limited", "工坊目录请求过于频繁，请稍后重试。"),
+        }.get(reason.code, ("http_error", "GitHub 暂时无法返回工坊目录。"))
+    elif isinstance(reason, ssl.SSLCertVerificationError):
+        code, message = "tls_certificate", "无法验证 GitHub 的 HTTPS 证书。"
+        recovery = "请检查系统时间和系统证书，保持 HTTPS 证书验证开启，处理后刷新目录。也可导入已下载的 ZIP。"
+    elif isinstance(reason, ssl.SSLError):
+        code, message = "tls_error", "与 GitHub 的 HTTPS 连接未能完成或被中断。"
+    elif isinstance(reason, (TimeoutError, socket.timeout)):
+        code, message = "timeout", "读取工坊目录超时。"
+    elif isinstance(reason, socket.gaierror):
+        code, message = "dns_error", "无法解析 GitHub 的网络地址。"
+    elif isinstance(reason, ValueError):
+        code, message = "invalid_catalog", "工坊目录未通过格式或来源校验，已停止下载。"
+        recovery = "请稍后刷新目录；不要使用未通过校验的目录或资源。已下载的 ZIP 可前往 Mod 管理重新检查。"
+    else:
+        code, message = "network_error", "暂时无法连接工坊目录。"
+    return {"error_code": code, "message": message, "recovery_hint": recovery}
+
+
 class WorkshopClient:
     def __init__(self, data_dir: str | Path):
         self.data_dir = Path(data_dir).resolve()
@@ -470,7 +507,9 @@ class WorkshopClient:
 
     def catalog(self, force=False) -> dict:
         with self._lock:
-            if self._cached is not None and not force and time.monotonic() - self._cached_at < 300:
+            cache_seconds = (CATALOG_FAILURE_CACHE_SECONDS if self._cached and self._cached["status"] == "unavailable"
+                             else CATALOG_CACHE_SECONDS)
+            if self._cached is not None and not force and time.monotonic() - self._cached_at < cache_seconds:
                 return json.loads(json.dumps(self._cached, ensure_ascii=False))
             import io
 
@@ -490,12 +529,9 @@ class WorkshopClient:
                 revoked = [entry["id"] for entry in catalog["mods"] if entry["revoked"]]
                 result = {**catalog, "mods": [entry for entry in catalog["mods"] if not entry["revoked"]],
                           "revoked_ids": revoked, "status": "ready", "message": "目录仅包含审核上架的作品。"}
-            except HTTPError as exc:
-                message = "工坊目录还没有上架，暂时没有可下载作品。" if exc.code == 404 else "无法读取工坊目录，请稍后刷新。"
-                result = {"format": FORMAT, "version": 1, "mods": [], "revoked_ids": [], "status": "unavailable", "message": message}
-            except (ValueError, OSError, URLError, TimeoutError):
+            except (ValueError, OSError, URLError, TimeoutError) as error:
                 result = {"format": FORMAT, "version": 1, "mods": [], "revoked_ids": [], "status": "unavailable",
-                          "message": "目录获取或验证失败；已停止下载，请检查网络后刷新。"}
+                          **_catalog_failure(error)}
             result.update(source=source_url, fetched_at=datetime.now(timezone.utc).isoformat(timespec="seconds"), risk_note=RISK_NOTE)
             self._cached, self._cached_at = result, time.monotonic()
             return json.loads(json.dumps(result, ensure_ascii=False))

@@ -433,6 +433,19 @@ class ModManager:
         applied = self._apply_operation(previous, state, files)
         return applied
 
+    def disable_all_mods(self) -> int:
+        """一次停用所有启用项，保留安装顺序、来源副本和原始备份。"""
+        self._assert_ready_for_change()
+        state = self._load_state()
+        active_mods = [mod for mod in state["mods"].values() if not mod.get("disabled")]
+        if not active_mods:
+            return 0
+        previous = json.loads(json.dumps(state))
+        files = {name for mod in active_mods for name in mod.get("files", [])}
+        for mod in active_mods:
+            mod["disabled"] = True
+        return self._apply_operation(previous, state, files)
+
     def restore_all(self) -> int:
         """把所有备份过的原文件全部还原（终极还原按钮）。"""
         self._assert_ready_for_change()

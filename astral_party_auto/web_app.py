@@ -730,6 +730,11 @@ class DesktopApi:
         return self._dashboard_state()
 
     @exposed
+    def disable_all_mods(self) -> dict:
+        restored = self.controller.disable_all_mods()
+        return {"restored": restored, "dashboard": self._dashboard_state(), "installed": self.controller.installed_mods()}
+
+    @exposed
     def restore_all(self) -> dict:
         restored = self.controller.restore_all()
         return {"restored": restored, "dashboard": self._dashboard_state(), "installed": self.controller.installed_mods()}

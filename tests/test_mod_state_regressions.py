@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import shutil
+import copy
 import errno
 import tempfile
 import unittest
@@ -143,6 +144,7 @@ class ModStateTests(unittest.TestCase):
         )
         operations = (
             lambda: self.manager.install_mod(self.source, "A"), self.manager.restore_all,
+            self.manager.disable_all_mods,
             lambda: self.manager.disable_mod("A"), lambda: self.manager.enable_mod("A"),
             lambda: self.manager.uninstall_mod("A"),
         )
@@ -328,6 +330,56 @@ class ModStateTests(unittest.TestCase):
         self.assertEqual(self.manager.restore_all(), 2)
         self.assertEqual(self.game_contents(), self.originals)
         self.assertEqual(self.manager.installed_mods(), [])
+
+    def test_pause_all_restores_shared_files_once_and_preserves_records_and_stores(self):
+        self.manager.install_mod(self.source, "A")
+        self.manager.install_mod(self.make_mod("top", {"a.bundle": b"TOP_A"}), "B")
+        self.manager.install_mod(self.make_mod("sleeping", {"b.bundle": b"SLEEPING"}), "Sleeping")
+        self.manager.disable_mod("Sleeping")
+        before = self.manager._load_state()
+        expected = copy.deepcopy(before)
+        for mod in expected["mods"].values():
+            mod["disabled"] = True
+        preserved = {str(path): (path.read_bytes(), path.stat().st_mtime_ns)
+                     for root in (self.manager.backup_dir, self.manager.data_dir / "mod_store")
+                     for path in root.rglob("*") if path.is_file()}
+        with patch.object(self.manager, "_apply_operation", wraps=self.manager._apply_operation) as apply:
+            self.assertEqual(self.manager.disable_all_mods(), 2)
+        self.assertEqual(apply.call_count, 1)
+        self.assertEqual(self.game_contents(), self.originals)
+        self.assertEqual(self.manager._load_state(), expected)
+        self.assertEqual(list(self.manager._load_state()["mods"]), ["A", "B", "Sleeping"])
+        self.assertEqual({name: (Path(name).read_bytes(), Path(name).stat().st_mtime_ns) for name in preserved}, preserved)
+        self.manager.enable_mod("B")
+        self.assertEqual(self.game_contents(), {"a.bundle": b"TOP_A", "b.bundle": b"ORIGINAL_B"})
+
+    def test_pause_all_copy_failure_keeps_all_mods_active_and_restores_game(self):
+        self.manager.install_mod(self.source, "A")
+        self.manager.install_mod(self.make_mod("top", {"a.bundle": b"TOP_A"}), "B")
+        self.assert_copy_failure_keeps_state(self.manager.disable_all_mods)
+        self.assertFalse(any(mod["disabled"] for mod in self.manager.installed_mods()))
+
+    def test_pause_all_missing_backup_refuses_without_changing_records(self):
+        self.manager.install_mod(self.source, "A")
+        self.manager.install_mod(self.make_mod("top", {"a.bundle": b"TOP_A"}), "B")
+        (self.manager.backup_dir / "b.bundle").unlink()
+        before = self.game_contents(), self.state_bytes()
+        with self.assertRaisesRegex(RuntimeError, "备份缺失"):
+            self.manager.disable_all_mods()
+        self.assertEqual((self.game_contents(), self.state_bytes()), before)
+        self.assertEqual(list(self.manager.data_dir.glob("mod-change-*")), [])
+
+    def test_pause_all_empty_and_already_paused_are_no_write_operations(self):
+        self.assertEqual(self.manager.disable_all_mods(), 0)
+        self.assertFalse(self.manager.data_dir.exists())
+        self.manager.install_mod(self.source, "A")
+        self.manager.disable_all_mods()
+        before = {str(path): (path.read_bytes(), path.stat().st_mtime_ns)
+                  for path in self.root.rglob("*") if path.is_file()}
+        with patch.object(self.manager, "_apply_operation", side_effect=AssertionError("no-op transaction")):
+            self.assertEqual(self.manager.disable_all_mods(), 0)
+        self.assertEqual({str(path): (path.read_bytes(), path.stat().st_mtime_ns)
+                          for path in self.root.rglob("*") if path.is_file()}, before)
 
     def test_unmatched_install_does_not_touch_an_installed_mod(self):
         self.manager.install_mod(self.source, "A")

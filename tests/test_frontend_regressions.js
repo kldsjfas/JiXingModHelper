@@ -14,11 +14,14 @@ function deferred() {
 
 function makeDom() {
   const elements = new Map();
+  const documentHandlers = new Map();
   function makeElement(id = "") {
     const classes = new Set();
     const handlers = new Map();
+    const descendants = new Map();
     return {
       id, children: [], disabled: false, textContent: "", innerHTML: "", value: "",
+      dataset: {},
       classList: {
         add: (name) => classes.add(name), remove: (name) => classes.delete(name),
         contains: (name) => classes.has(name),
@@ -29,6 +32,11 @@ function makeDom() {
       replaceChildren(...children) { this.children = children; },
       addEventListener(name, handler) { handlers.set(name, handler); },
       trigger(name, event = {}) { return handlers.get(name)?.(event); },
+      querySelector(selector) {
+        if (!descendants.has(selector)) descendants.set(selector, makeElement());
+        return descendants.get(selector);
+      },
+      querySelectorAll() { return []; },
       setAttribute() {}, removeAttribute() {}, focus() {}, remove() {}, pause() {}, load() {},
     };
   }
@@ -38,8 +46,9 @@ function makeDom() {
   };
   return {
     find,
+    triggerDocument(name, event) { return documentHandlers.get(name)?.(event); },
     document: {
-      readyState: "loading", addEventListener() {},
+      readyState: "loading", addEventListener(name, handler) { documentHandlers.set(name, handler); },
       querySelector: (selector) => find(selector.slice(1)),
       querySelectorAll: () => [], getElementById: find, createElement: () => makeElement(),
     },
@@ -197,8 +206,106 @@ async function checkAudioFailedClearPreservesCandidate() {
   assert.match(ui.find("audio-operation-status").textContent, /文件被占用/);
 }
 
+async function checkPauseAllModsPreservesDisabledRecordsAndBlocksDuplicateRequests() {
+  const response = deferred();
+  let requests = 0;
+  let invalidated = 0;
+  const prompts = [];
+  const ui = loadScript("app.js", "state, doAction, renderInstalled, window", {
+    confirm: (text) => { prompts.push(text); return true; },
+    fetch: async (url) => {
+      assert.equal(url, "/api/disable_all_mods");
+      requests += 1;
+      return { json: async () => await response.promise };
+    },
+  });
+  ui.window.EmoteBatch = { invalidate() { invalidated += 1; }, updateGame() {} };
+  ui.state.installed = [{ name: "Active", disabled: false }, { name: "Sleeping", disabled: true }];
+  ui.state.dashboard = { has_game: true };
+  ui.renderInstalled();
+  assert.match(ui.find("installed-summary").textContent, /已启用 1 个 \/ 已停用 1 个/);
+  assert.equal(ui.find("pause-all-mods").disabled, false);
+  const pending = ui.doAction("pause-all-mods");
+  assert.equal(ui.find("pause-all-mods").disabled, true);
+  assert.equal(ui.state.modPauseWorking, true);
+  await ui.doAction("pause-all-mods");
+  assert.equal(requests, 1, "Double click started a second batch operation");
+  response.resolve({ ok: true, data: {
+    restored: 2, dashboard: { has_game: true, installed_count: 2 },
+    installed: [{ name: "Active", disabled: true }, { name: "Sleeping", disabled: true }],
+  } });
+  await pending;
+  assert.equal(ui.state.installed.length, 2, "Pause cleared the installed records");
+  assert.equal(ui.find("pause-all-mods").disabled, true);
+  assert.equal(ui.state.modPauseWorking, false);
+  assert.match(ui.find("installed-summary").textContent, /已启用 0 个 \/ 已停用 2 个/);
+  assert.doesNotMatch(ui.find("installed-summary").textContent, /已核实|纯原版/);
+  assert.equal(invalidated, 1, "Batch pause did not invalidate saved emote candidates");
+  assert.match(prompts[0], /安装记录、作品文件和原始备份保留/);
+  assert.match(ui.find("toast-region").children.at(-1).textContent, /安装记录和备份已保留/);
+}
+
+async function checkPauseFailureKeepsInstalledStateAndAllowsRetry() {
+  const ui = loadScript("app.js", "state, doAction, renderInstalled", {
+    confirm: () => true,
+    fetch: async () => ({ json: async () => ({ ok: false, error: "原始备份缺失" }) }),
+  });
+  ui.state.installed = [{ name: "Active", disabled: false }];
+  ui.state.dashboard = { has_game: true };
+  await ui.doAction("pause-all-mods");
+  assert.equal(ui.state.installed[0].disabled, false);
+  assert.equal(ui.state.modPauseWorking, false);
+  assert.equal(ui.find("pause-all-mods").disabled, false);
+  assert.match(ui.find("toast-region").children.at(-1).textContent, /原始备份缺失/);
+}
+
+async function checkPauseCancellationAndCompleteRestoreDisclosure() {
+  let requests = 0;
+  const prompts = [];
+  const ui = loadScript("app.js", "state, doAction, renderInstalled", {
+    confirm: (text) => { prompts.push(text); return false; },
+    fetch: async () => { requests += 1; throw new Error("cancelled operation reached backend"); },
+  });
+  ui.state.installed = [{ name: "Active", disabled: false }];
+  await ui.doAction("pause-all-mods");
+  await ui.doAction("restore-all");
+  assert.equal(requests, 0);
+  assert.equal(ui.state.installed[0].disabled, false);
+  assert.match(prompts[1], /清空 Mod 记录和安装副本/);
+  assert.match(prompts[1], /原始备份与「我的作品集」仍保留/);
+  assert.match(prompts[1], /暂停全部 Mod/);
+  ui.state.installed[0].disabled = true;
+  ui.renderInstalled();
+  await ui.doAction("pause-all-mods");
+  assert.equal(prompts.length, 2, "An already paused library requested another confirmation");
+  assert.equal(requests, 0);
+}
+
+async function checkDynamicPageLinkDelegation() {
+  const ui = loadScript("app.js", "bindPageLinks, setNavigationForTest: (callback) => { showPage = callback; }");
+  const navigations = [];
+  ui.setNavigationForTest((page) => navigations.push(page));
+  ui.bindPageLinks();
+  const button = { dataset: { pageLink: "manage" }, disabled: false };
+  let prevented = 0;
+  const event = () => ({ target: { closest: () => button }, preventDefault() { prevented += 1; } });
+  ui.triggerDocument("click", event());
+  assert.deepEqual(navigations, ["manage"], "A dynamically inserted offline-import button could not navigate");
+  assert.equal(prevented, 1);
+  button.disabled = true;
+  ui.triggerDocument("click", event());
+  button.disabled = false;
+  button.dataset.pageLink = "untrusted-page";
+  ui.triggerDocument("click", event());
+  ui.triggerDocument("click", { target: {} });
+  assert.deepEqual(navigations, ["manage"]);
+}
+
 async function main() {
-  const checks = [checkBrowseRace, checkLateResourceList, checkDraftDetailFailure, checkAudioClearCandidate, checkAudioFailedClearPreservesCandidate];
+  const checks = [checkBrowseRace, checkLateResourceList, checkDraftDetailFailure, checkAudioClearCandidate,
+    checkAudioFailedClearPreservesCandidate, checkPauseAllModsPreservesDisabledRecordsAndBlocksDuplicateRequests,
+    checkPauseFailureKeepsInstalledStateAndAllowsRetry, checkPauseCancellationAndCompleteRestoreDisclosure,
+    checkDynamicPageLinkDelegation];
   const failures = [];
   for (const check of checks) {
     try { await check(); console.log(`PASS: ${check.name}`); }

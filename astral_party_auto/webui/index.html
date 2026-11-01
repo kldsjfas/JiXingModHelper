@@ -32,7 +32,7 @@
 
       <div class="sidebar-footer">
         <button id="sidebar-launch" class="button primary wide">启动游戏</button>
-        <button id="sidebar-restore" class="button danger wide">一键全还原</button>
+        <button id="sidebar-restore" class="button danger wide">完全还原</button>
         <span>安装前自动备份，可随时还原</span>
       </div>
     </aside>
@@ -155,6 +155,8 @@
 
           <article class="card">
             <div class="section-heading"><div><h2>已装 Mod</h2><p>预览 / 禁用 / 启用 / 卸载。点「预览」加载该 mod 的资源包列表。</p></div><span id="installed-count" class="count-badge">0 个</span></div>
+            <p id="installed-summary" class="notice" role="status">本助手记录：已启用 0 个 / 已停用 0 个</p>
+            <div class="action-row"><button id="pause-all-mods" class="button ghost" data-action="pause-all-mods" disabled>暂停全部 Mod（保留记录）</button></div>
             <div id="installed-list" class="stack-list"></div>
           </article>
         </section>
@@ -475,7 +477,7 @@
             </section>
           </div>
           <article class="card audio-draft">
-            <div class="section-heading"><div><h2>音频作品集 <span id="audio-draft-count" class="count-badge">0 项</span></h2><p>保存、移除和试听只修改作品集。安装后可在「Mod 管理」禁用、卸载，也可一键全还原。</p></div></div>
+            <div class="section-heading"><div><h2>音频作品集 <span id="audio-draft-count" class="count-badge">0 项</span></h2><p>保存、移除和试听只修改作品集。安装后可在「Mod 管理」禁用、卸载，也可完全还原已安装 Mod。</p></div></div>
             <div id="audio-draft-list" class="audio-draft-list"><p class="notice">还没有保存的音频替换。</p></div>
             <div class="action-row"><button id="audio-export-pack" class="button primary" disabled>导出音频 ZIP</button><button id="audio-install" class="button purple" disabled>安装音频到游戏</button><button id="audio-clear" class="button ghost" disabled>清空音频作品集</button></div>
             <div id="audio-clear-confirm" class="notice is-hidden" role="group" aria-label="确认清空音频作品集">
