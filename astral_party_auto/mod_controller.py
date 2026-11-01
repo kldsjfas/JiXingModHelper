@@ -539,12 +539,20 @@ class ModController:
         self.log(f"已启用「{name}」，重新应用 {n} 个资源包。")
         return n
 
+    def disable_all_mods(self) -> int:
+        self._require_game()
+        if any(not mod.get("disabled", False) for mod in self.manager.installed_mods()):
+            self._require_catalog_game_stopped()
+        n = self.manager.disable_all_mods()
+        self.log(f"已暂停全部 Mod：重新计算 {n} 个资源包的有效覆盖，安装记录和备份保留。")
+        return n
+
     def restore_all(self) -> int:
         self._require_game()
         if self.manager.requires_catalog_reload() or self.manager.requires_native_ui_reload():
             self._require_catalog_game_stopped()
         n = self.manager.restore_all()
-        self.log(f"一键全还原：恢复 {n} 个原始资源包，游戏回到未改状态。")
+        self.log(f"完全还原：恢复 {n} 个原始资源包，清空 Mod 记录与安装副本，原始备份保留。")
         return n
 
     def _require_catalog_game_stopped(self) -> None:

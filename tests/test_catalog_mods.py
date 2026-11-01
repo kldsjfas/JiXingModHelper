@@ -97,6 +97,51 @@ class CatalogModTests(unittest.TestCase):
         self.assertFalse((self.hot / item["bundle_name"]).exists())
         self.assertEqual(self.manager._load_state(), {"mods": {}})
 
+    def test_pause_all_mixed_regular_and_independent_mods_preserves_both_sources(self):
+        source, item = self.make_mod()
+        self.manager.install_mod(source, "Dynamic")
+        ordinary = self.root / "ordinary"
+        ordinary.mkdir()
+        (ordinary / "video.bundle").write_bytes(b"ORDINARY_MOD")
+        self.manager.install_mod(ordinary, "Ordinary")
+        preserved = {str(path): (path.read_bytes(), path.stat().st_mtime_ns)
+                     for folder in (self.manager.backup_dir, self.manager.data_dir / "mod_store")
+                     for path in folder.rglob("*") if path.is_file()}
+        self.manager.disable_all_mods()
+        self.assertEqual(self.catalog.read_bytes(), self.baseline)
+        self.assertEqual(self.hash_file.read_bytes(), b"OFFICIAL_REMOTE_VERSION\n")
+        self.assertEqual((self.hot / "config.bundle").read_bytes(), b"HOT_ORIGINAL_CONFIG")
+        self.assertEqual((self.base / "video.bundle").read_bytes(), b"BASE:video.bundle")
+        self.assertFalse((self.hot / item["bundle_name"]).exists())
+        self.assertEqual(self.manager._load_state()["catalog_overlay"]["bundles"], {})
+        self.assertTrue(all(mod["disabled"] for mod in self.manager.installed_mods()))
+        self.assertEqual({name: (Path(name).read_bytes(), Path(name).stat().st_mtime_ns) for name in preserved}, preserved)
+        self.manager.enable_mod("Dynamic")
+        self.assertIn(item["video_name"], self.videos())
+
+    def test_pause_all_catalog_failure_rolls_back_the_whole_batch(self):
+        first, first_item = self.make_mod("first", 120101008)
+        second, second_item = self.make_mod("second", 120102008)
+        self.manager.install_mod(first, "First")
+        self.manager.install_mod(second, "Second")
+        before = self.snapshot()
+        with patch.object(self.manager, "_save_state", side_effect=OSError("state write failed")):
+            with self.assertRaises(OSError):
+                self.manager.disable_all_mods()
+        self.assertEqual(self.snapshot(), before)
+        self.assertTrue((self.hot / first_item["bundle_name"]).exists())
+        self.assertTrue((self.hot / second_item["bundle_name"]).exists())
+        self.assertEqual(list(self.manager.data_dir.glob("mod-change-*")), [])
+
+    def test_pause_all_refuses_official_catalog_update_without_changing_mods(self):
+        source, _ = self.make_mod()
+        self.manager.install_mod(source, "Dynamic")
+        self.hash_file.write_bytes(b"NEXT_OFFICIAL_VERSION")
+        before = self.snapshot()
+        with self.assertRaisesRegex(ValueError, "更新"):
+            self.manager.disable_all_mods()
+        self.assertEqual(self.snapshot(), before)
+
     def test_two_mods_merge_addresses_then_uninstall_one(self):
         first, first_item = self.make_mod("first", 120101008)
         second, second_item = self.make_mod("second", 120102008)

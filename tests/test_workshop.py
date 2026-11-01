@@ -3,6 +3,8 @@ import hashlib
 import io
 import json
 import os
+import socket
+import ssl
 import stat
 import struct
 import tempfile
@@ -271,6 +273,69 @@ class WorkshopTests(unittest.TestCase):
         self.assertEqual(result["source"], workshop.CATALOG_API_URL)
         self.assertEqual(calls, [workshop.CATALOG_URL, workshop.CATALOG_API_URL])
 
+    def test_catalog_failures_report_safe_actionable_reasons_without_private_error_text(self):
+        secret = "PRIVATE_PROXY_PASSWORD-at-127.0.0.1"
+        cases = [
+            (workshop.URLError(ssl.SSLEOFError(8, secret)), "tls_error"),
+            (workshop.URLError(ssl.SSLCertVerificationError(1, secret)), "tls_certificate"),
+            (workshop.URLError(workshop.URLError(TimeoutError(secret))), "timeout"),
+            (workshop.URLError(socket.gaierror(-2, secret)), "dns_error"),
+            (workshop.URLError(secret), "network_error"),
+            (OSError(secret), "network_error"),
+            (ValueError(secret), "invalid_catalog"),
+        ]
+        for status, code in ((403, "http_forbidden"), (404, "http_not_found"),
+                             (407, "proxy_auth_required"), (429, "http_rate_limited"), (503, "http_error")):
+            cases.append((workshop.HTTPError("https://" + secret + "@proxy.invalid", status, secret, {}, None), code))
+        for error, code in cases:
+            with self.subTest(code=code), patch.object(workshop, "_download", side_effect=error):
+                result = workshop.WorkshopClient(self.root).catalog(force=True)
+            self.assertEqual(result["status"], "unavailable")
+            self.assertEqual(result["mods"], [])
+            self.assertEqual(result["error_code"], code)
+            self.assertTrue(result["recovery_hint"])
+            self.assertNotIn(secret, json.dumps(result))
+            self.assertNotIn("还没有上架", result["message"])
+
+    def test_failed_catalog_cache_expires_soon_and_recovered_catalog_keeps_success_cache(self):
+        payload = pack_bytes()
+        value = entry(payload)
+        client = workshop.WorkshopClient(self.root)
+        online = False
+
+        def download(url, output, limit, **kwargs):
+            if not online:
+                raise workshop.URLError(ssl.SSLEOFError(8, "private network detail"))
+            output.write(json.dumps(catalog([value])).encode())
+
+        with patch.object(workshop, "_download", side_effect=download) as fetch, patch.object(workshop.time, "monotonic", return_value=100) as clock:
+            self.assertEqual(client.catalog()["error_code"], "tls_error")
+            self.assertEqual(fetch.call_count, 2)
+            online = True
+            clock.return_value = 109
+            self.assertEqual(client.catalog()["status"], "unavailable")
+            self.assertEqual(fetch.call_count, 2)
+            clock.return_value = 110.1
+            recovered = client.catalog()
+            self.assertEqual(recovered["status"], "ready")
+            self.assertEqual(len(recovered["mods"]), 1)
+            self.assertNotIn("error_code", recovered)
+            self.assertEqual(fetch.call_count, 3)
+            clock.return_value = 409.9
+            self.assertEqual(client.catalog()["status"], "ready")
+            self.assertEqual(fetch.call_count, 3)
+            clock.return_value = 410.2
+            self.assertEqual(client.catalog()["status"], "ready")
+            self.assertEqual(fetch.call_count, 4)
+
+    def test_force_refresh_bypasses_even_the_short_failure_cache(self):
+        client = workshop.WorkshopClient(self.root)
+        with patch.object(workshop, "_download", side_effect=TimeoutError()), patch.object(workshop.time, "monotonic", return_value=100):
+            self.assertEqual(client.catalog()["status"], "unavailable")
+        with patch.object(workshop, "_download", side_effect=self.fetch([], b"")) as fetch, patch.object(workshop.time, "monotonic", return_value=101):
+            self.assertEqual(client.catalog(force=True)["status"], "ready")
+            self.assertEqual(fetch.call_count, 1)
+
     def test_catalog_validation_or_redirect_failure_does_not_trigger_fallback(self):
         for response in (b'{"untrusted":true}', None):
             def fetch(url, output, limit, **kwargs):
@@ -280,6 +345,7 @@ class WorkshopTests(unittest.TestCase):
             with patch.object(workshop, "_download", side_effect=fetch) as download:
                 result = workshop.WorkshopClient(self.root).catalog(force=True)
             self.assertEqual(result["status"], "unavailable")
+            self.assertEqual(result["error_code"], "invalid_catalog")
             self.assertEqual(download.call_count, 1)
 
     def test_prepare_always_refreshes_and_refuses_revocation_or_changed_hash(self):

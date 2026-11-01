@@ -11,7 +11,7 @@
   const $ = (id) => document.getElementById(id);
   const state = {
     initialized: false, loaded: false, working: false, catalogLoading: false,
-    items: [], selected: null, prepared: null, submission: null,
+    items: [], selected: null, prepared: null, submission: null, catalogError: null,
     uploadService: null, statusLoading: false, serviceError: false, receipts: [], uploadedFingerprint: "",
     selectionVersion: 0, catalogVersion: 0, pageVersion: 0,
   };
@@ -128,8 +128,26 @@
     $("workshop-list-hint").classList.toggle("is-hidden", !state.items.length);
     if (!items.length) {
       const empty = node("div", "workshop-empty");
-      empty.appendChild(node("strong", "", state.items.length ? "没有找到匹配的作品" : "暂时没有已审核的作品"));
-      empty.appendChild(node("span", "", state.items.length ? "换个关键词或分类试试。" : "也可以在下方分享自己的作品。"));
+      if (state.catalogError) {
+        empty.appendChild(node("strong", "", "工坊目录加载失败"));
+        empty.appendChild(node("span", "", state.catalogError.message));
+        empty.appendChild(node("span", "", state.catalogError.recovery_hint));
+        const actions = node("div", "action-row");
+        const retry = node("button", "button ghost compact", "重试连接");
+        retry.type = "button";
+        retry.addEventListener("click", () => refresh(true));
+        const localImport = node("button", "button ghost compact", "导入本地 ZIP");
+        localImport.type = "button";
+        localImport.setAttribute("data-page-link", "manage");
+        actions.appendChild(retry);
+        actions.appendChild(localImport);
+        empty.appendChild(actions);
+      } else if (state.catalogLoading && !state.loaded) {
+        empty.appendChild(node("strong", "", "正在加载工坊目录…"));
+      } else {
+        empty.appendChild(node("strong", "", state.items.length ? "没有找到匹配的作品" : "暂时没有已审核的作品"));
+        empty.appendChild(node("span", "", state.items.length ? "换个关键词或分类试试。" : "也可以在下方分享自己的作品。"));
+      }
       list.appendChild(empty);
       return;
     }
@@ -154,6 +172,7 @@
   async function refresh(force = false) {
     if (state.working || state.catalogLoading) return;
     state.catalogLoading = true;
+    state.catalogError = null;
     const request = ++state.catalogVersion;
     showDetail(null);
     message("workshop-catalog-status", "加载作品中…");
@@ -161,15 +180,27 @@
     try {
       const catalog = await bridge.call("workshop_catalog", { quiet: true }, force);
       if (request !== state.catalogVersion) return;
-      state.items = Array.isArray(catalog?.mods) ? catalog.mods : [];
       state.loaded = catalog?.status !== "unavailable";
-      message("workshop-catalog-status", catalog.message || `已读取 ${state.items.length} 个已审核作品。`, !state.loaded);
+      state.items = state.loaded && Array.isArray(catalog?.mods) ? catalog.mods : [];
+      if (!state.loaded) {
+        state.catalogError = {
+          message: catalog.message || "暂时无法读取工坊目录。",
+          recovery_hint: catalog.recovery_hint || "可以重试连接，或前往 Mod 管理导入已下载的 ZIP。",
+        };
+      }
+      const errorCode = typeof catalog?.error_code === "string" && /^[a-z_]{1,32}$/.test(catalog.error_code)
+        ? `（${catalog.error_code}）` : "";
+      message("workshop-catalog-status", `${catalog.message || `已读取 ${state.items.length} 个已审核作品。`}${!state.loaded ? errorCode : ""}`, !state.loaded);
       renderItems();
     } catch (error) {
       if (request !== state.catalogVersion) return;
       state.items = [];
       state.loaded = false;
-      message("workshop-catalog-status", `目录读取失败：${error.message || "网络暂不可用"}。可点击“刷新目录”重试。`, true);
+      state.catalogError = {
+        message: "目录读取失败，暂时无法加载工坊作品。",
+        recovery_hint: "可点击“刷新目录”重试，或前往 Mod 管理导入已下载的 ZIP。",
+      };
+      message("workshop-catalog-status", `${state.catalogError.message}${state.catalogError.recovery_hint}`, true);
       renderItems();
     } finally {
       if (request === state.catalogVersion) {

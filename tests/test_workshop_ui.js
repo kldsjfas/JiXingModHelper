@@ -143,9 +143,13 @@ async function checkSafeDisplayAndSearch() {
 
 async function checkEmptyAndNetworkRetry() {
   const ui = loadWorkshop();
-  ui.reply("workshop_catalog", new Error("连接超时"));
+  ui.reply("workshop_catalog", new Error("连接超时 https://private-user:private-password@proxy.invalid"));
   await ui.refresh();
-  assert.match(ui.find("workshop-catalog-status").textContent, /失败.*连接超时.*重试/);
+  assert.match(ui.find("workshop-catalog-status").textContent, /目录读取失败.*重试/);
+  assert.doesNotMatch(visibleText(ui.find("workshop-results")) + ui.find("workshop-catalog-status").textContent,
+    /private-user|private-password|proxy\.invalid/, "Unexpected bridge exception leaked private network details");
+  assert.match(visibleText(ui.find("workshop-results")), /工坊目录加载失败/);
+  assert.doesNotMatch(visibleText(ui.find("workshop-results")), /暂时没有已审核/);
   assert.equal(ui.find("workshop-refresh").disabled, false);
   assert.equal(ui.state.loaded, false);
   ui.reply("workshop_catalog", { mods: [], message: "首批作品正在征集。" });
@@ -154,10 +158,34 @@ async function checkEmptyAndNetworkRetry() {
   assert.equal(ui.find("workshop-catalog-status").textContent, "首批作品正在征集。");
   assert.match(ui.find("workshop-results").children[0].children[0].textContent, /暂时没有已审核/);
   assert.equal(ui.find("workshop-install").disabled, true);
-  ui.reply("workshop_catalog", { mods: [], status: "unavailable", message: "目录获取或验证失败；已停止下载，请检查网络后刷新。" });
+  ui.reply("workshop_catalog", {
+    mods: [entry()], status: "unavailable", error_code: "tls_error",
+    message: "与 GitHub 的 HTTPS 连接未能完成或被中断。",
+    recovery_hint: "确认当前网络能够访问 GitHub 后刷新目录。",
+  });
   await ui.refresh(true);
   assert.equal(ui.state.loaded, false, "Backend unavailable result was treated as a loaded directory");
+  assert.equal(ui.state.items.length, 0, "Unavailable response retained stale installable works");
   assert.equal(ui.find("workshop-catalog-status").classList.contains("is-error"), true);
+  assert.match(ui.find("workshop-catalog-status").textContent, /HTTPS.*tls_error/);
+  const actions = ui.find("workshop-results").querySelectorAll("button");
+  assert.equal(actions.length, 2);
+  assert.equal(actions[0].textContent, "重试连接");
+  assert.equal(actions[1].textContent, "导入本地 ZIP");
+  assert.equal(actions[1].getAttribute("data-page-link"), "manage");
+  assert.equal(actions[0].disabled, false);
+  const retry = deferred();
+  ui.reply("workshop_catalog", retry.promise);
+  const retryRequest = actions[0].trigger("click");
+  assert.equal(ui.find("workshop-refresh").disabled, true);
+  assert.match(visibleText(ui.find("workshop-results")), /正在加载工坊目录/);
+  retry.resolve({ mods: [entry()], status: "ready", message: "目录已恢复。" });
+  await retryRequest;
+  assert.deepEqual(Array.from(ui.requests.at(-1).args), [true], "Failure retry did not force a fresh catalog");
+  assert.equal(ui.state.loaded, true);
+  assert.equal(ui.state.catalogError, null);
+  assert.equal(ui.find("workshop-results").children.length, 1);
+  assert.doesNotMatch(visibleText(ui.find("workshop-results")), /加载失败|导入本地 ZIP/);
 }
 
 async function checkTwoStepInstallAndPageLeave() {
