@@ -107,20 +107,54 @@ def fit_animation_frames(base_size: tuple[int, int], occupied: list[list[int]],
     raise ValueError("当前图集已没有足够空间制作动画，请移除其它动态作品或新建作品集。")
 
 
+def card_video_canvas(reference_size: tuple[int, int], frame_size: tuple[int, int]) -> tuple[tuple[int, int], list[int]]:
+    """视频像素保持原样，透明留边只记录为 MovieClip 画布内的偏移。"""
+    if any(type(value) is not int or value <= 0 for value in (*reference_size, *frame_size)):
+        raise ValueError("卡面或视频帧尺寸无效。")
+    reference_width, reference_height = reference_size
+    width, height = frame_size
+    if width * reference_height >= height * reference_width:
+        canvas = (width, max(height, round(width * reference_height / reference_width)))
+    else:
+        canvas = (max(width, round(height * reference_width / reference_height)), height)
+    if max(canvas) > MAX_ATLAS_EDGE:
+        raise ValueError("视频与卡面的比例超出动画画布范围，请缩小视频帧后重试。")
+    return canvas, [(canvas[0] - width) // 2, (canvas[1] - height) // 2, width, height]
+
+
 def plan_card_video(base_size: tuple[int, int], occupied: list[list[int]],
-                    source_size: tuple[int, int], duration_ms: float) -> dict:
+                    source_size: tuple[int, int], duration_ms: float, *,
+                    video_size: tuple[int, int] | None = None, display_aspect: float | None = None) -> dict:
     """按实际时长先规划图集画布和帧率，不解码完整尺寸的中间帧。"""
     from .emote_media import MAX_OUTPUT_PIXELS, MAX_VIDEO_FRAME_PIXELS
     if not math.isfinite(duration_ms) or duration_ms <= 0:
         raise ValueError("视频时长无效。")
+    if any(type(value) is not int or value <= 0 for value in source_size):
+        raise ValueError("卡面尺寸无效。")
     count = min(MAX_MOVIE_FRAMES, max(2, math.floor(duration_ms * 12 / 1000 + 0.5)))
     fps = min(60.0, count * 1000 / duration_ms)
     count = math.floor(duration_ms * fps / 1000 + 0.5)
     if count < 2:
         raise ValueError("视频太短，无法保留两帧动画，请延长素材后重试。")
     pixel_budget = min(MAX_VIDEO_FRAME_PIXELS, MAX_OUTPUT_PIXELS // count)
-    scale = min(1.0, math.sqrt(pixel_budget / (source_size[0] * source_size[1])))
-    bounded_size = (max(1, math.floor(source_size[0] * scale)), max(1, math.floor(source_size[1] * scale)))
+    width, height = source_size
+    if video_size is not None:
+        if any(type(value) is not int or value <= 0 for value in video_size):
+            raise ValueError("源视频尺寸无效。")
+        aspect = display_aspect if display_aspect is not None else video_size[0] / video_size[1]
+        if not math.isfinite(aspect) or aspect <= 0:
+            raise ValueError("源视频显示比例无效。")
+        # 把 SAR 和旋转后的显示比例折进像素尺寸，保留源视频的像素预算。
+        height = math.sqrt(video_size[0] * video_size[1] / aspect)
+        width = height * aspect
+        reference_aspect = source_size[0] / source_size[1]
+        canvas_width_limit = min(MAX_ATLAS_EDGE, MAX_ATLAS_EDGE * reference_aspect)
+        canvas_height_limit = min(MAX_ATLAS_EDGE, MAX_ATLAS_EDGE / reference_aspect)
+        canvas_scale = min(canvas_width_limit / width, canvas_height_limit / height)
+    else:
+        canvas_scale = 1.0
+    scale = min(1.0, canvas_scale, math.sqrt(pixel_budget / (width * height)))
+    bounded_size = (max(1, math.floor(width * scale)), max(1, math.floor(height * scale)))
     size, _ = fit_animation_frames(base_size, occupied, bounded_size, count, minimum_frames=count)
     if size[0] * size[1] > MAX_VIDEO_FRAME_PIXELS or size[0] * size[1] * count > MAX_OUTPUT_PIXELS:
         raise ValueError("动画输出超过解码像素限制，请缩短视频或腾出图集空间。")
@@ -315,17 +349,20 @@ class VisualAnimationWorkspace:
             raise ValueError("作品集里没有此动态资源。")
         sprites = {row["id"]: row for row in package["sprites"]}
         atlas = read_atlas(atlas_path)
-        frames = []
-        for frame in clip["frames"]:
-            sprite = sprites[frame["sprite_id"]]
-            x, y, width, height = sprite["rect"]
-            pixels = atlas.crop((x, y, x + width, y + height))
-            canvas = Image.new("RGBA", (clip["width"], clip["height"]))
-            canvas.paste(pixels, tuple(frame["rect"][:2]))
-            frames.append(canvas)
-        return _preview(frames, [f"第 {index + 1} 帧" for index in range(len(frames))],
-                        [frame["duration_ms"] for frame in clip["frames"]], len(frames),
-                        info={"animation_kind": "native_movieclip", "notice": "从生成的界面包和图集回读，游戏内效果仍需实测。"})
+        def frames():
+            for frame in clip["frames"]:
+                sprite = sprites[frame["sprite_id"]]
+                x, y, width, height = sprite["rect"]
+                pixels = atlas.crop((x, y, x + width, y + height))
+                canvas = Image.new("RGBA", (clip["width"], clip["height"]))
+                canvas.paste(pixels, tuple(frame["rect"][:2]))
+                yield canvas
+        content_width, content_height = clip["frames"][0]["rect"][2:]
+        return _preview(frames(), [f"第 {index + 1} 帧" for index in range(len(clip["frames"]))],
+                        [frame["duration_ms"] for frame in clip["frames"]], len(clip["frames"]),
+                        info={"animation_kind": "native_movieclip", "content_width": content_width,
+                              "content_height": content_height,
+                              "notice": f"实际帧像素 {content_width} × {content_height}。从生成的界面包和图集回读，游戏内效果仍需实测。"})
 
     def draft_preview(self) -> dict:
         selection, _ = self._selection()
@@ -363,7 +400,9 @@ class VisualAnimationWorkspace:
         if kind == "video":
             frames, video_info = adapt_video_source(
                 source, {"width": source_size[0], "height": source_size[1], "fps": 12}, work_dir=folder,
-                output_planner=lambda duration: plan_card_video(context["base_size"], occupied, source_size, duration))
+                source_planner=lambda info: plan_card_video(
+                    context["base_size"], occupied, source_size, info["duration_ms"],
+                    video_size=(info["width"], info["height"]), display_aspect=info["display_aspect"]))
             decoded_size = (video_info["width"], video_info["height"])
             total_ms = round(video_info["source_duration_ms"])
             durations = [round((index + 1) * total_ms / len(frames)) - round(index * total_ms / len(frames))
@@ -374,6 +413,7 @@ class VisualAnimationWorkspace:
             frames, durations, _ = _read_replacement(source)
         original_count = len(frames)
         size, placements = fit_animation_frames(context["base_size"], occupied, decoded_size, len(frames))
+        canvas_size, frame_rect = card_video_canvas(source_size, size) if video_info is not None else (size, [0, 0, *size])
         frames, durations = sample_frames(frames, durations, len(placements))
         placements = placements[:len(frames)]
         atlas = Image.new("RGBA", (MAX_ATLAS_EDGE, MAX_ATLAS_EDGE))
@@ -386,10 +426,10 @@ class VisualAnimationWorkspace:
         for frame, duration, rect in zip(frames, durations, placements):
             fitted = _fit_frame(frame, *size)
             atlas.paste(fitted, tuple(rect[:2]))
-            records.append({"rect": [0, 0, *size], "atlas_rect": rect, "duration_ms": duration})
+            records.append({"rect": frame_rect, "atlas_rect": rect, "duration_ms": duration})
         if atlas.crop((0, 0, *context["base_size"])).tobytes() != before_original:
             raise ValueError("动态帧覆盖了原版界面像素，未保存。")
-        raw = append_movieclip(raw, item_id=item_id, atlas_id="atlas0", width=size[0], height=size[1],
+        raw = append_movieclip(raw, item_id=item_id, atlas_id="atlas0", width=canvas_size[0], height=canvas_size[1],
                                frames=records, atlas_width=MAX_ATLAS_EDGE, atlas_height=MAX_ATLAS_EDGE)
         ui_output = folder / context["ui_bundle"]
         atlas_output = folder / context["atlas_bundle"]
@@ -407,17 +447,19 @@ class VisualAnimationWorkspace:
         item = {"kind": "visual_animation", "bundle": context["config_bundle"], "name": selection["name"],
                 "source_bundle": selection["bundle"], "extra_bundles": [context["ui_bundle"], context["atlas_bundle"]],
                 "tables": support["tables"], "movieclip_url": url, "frame_count": len(frames), "duration_ms": sum(durations),
-                "width": size[0], "height": size[1], "source_width": source_size[0], "source_height": source_size[1],
+                "width": canvas_size[0], "height": canvas_size[1], "source_width": source_size[0], "source_height": source_size[1],
+                "content_width": size[0], "content_height": size[1],
                 "note": source.name, "at": datetime.now().isoformat(timespec="seconds")}
         if any(_digest(Path(path)) != digest for path, digest in fingerprints.items()):
             raise ValueError("素材或草稿在制作过程中改变，请重新导入。")
         preview = self.preview(selection["name"], ui_output, atlas_output)
-        notice = f"输出 {len(frames)} 帧 · {sum(durations) / 1000:.2f} 秒 · {size[0]} × {size[1]}。"
+        notice = f"输出 {len(frames)} 帧 · {sum(durations) / 1000:.2f} 秒 · 画布 {canvas_size[0]} × {canvas_size[1]}，实际帧像素 {size[0]} × {size[1]}。"
         if len(frames) < original_count:
             notice += "已按图集剩余空间抽帧。"
         if video_info is not None:
-            notice += f"视频按实际时长采样为 {video_info['fps']:.2f} 帧/秒，忽略音轨。"
-        if size != source_size:
+            item.update(video_source_width=video_info["source_width"], video_source_height=video_info["source_height"])
+            notice += f"源视频 {video_info['source_width']} × {video_info['source_height']}，按实际时长采样为 {video_info['fps']:.2f} 帧/秒，忽略音轨。"
+        elif size != source_size:
             notice += f"原卡面 {source_size[0]} × {source_size[1]}，动画已等比缩小，由游戏按显示框缩放。"
         return {"item": item, "staged": {context["config_bundle"]: config_output, context["ui_bundle"]: ui_output, context["atlas_bundle"]: atlas_output},
                 "catalog_source_key": self._source_key,

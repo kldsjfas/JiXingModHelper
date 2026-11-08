@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
@@ -10,6 +11,7 @@ from PIL import Image
 
 from astral_party_auto.modkit.visual_animation import VisualAnimationWorkspace, _clear_clip_pixels, animation_identity, fit_animation_frames, pack_frames, plan_card_video, sample_frames
 from astral_party_auto.web_app import DesktopApi
+from test_fairygui_movieclip import package_fixture
 
 
 def overlaps(first, second):
@@ -82,6 +84,240 @@ class AtlasLayoutTests(unittest.TestCase):
         plan = plan_card_video((512, 512), [], (3500, 2200), 100)
         self.assertLessEqual(plan["width"] * plan["height"], 4_194_304)
         self.assertEqual(round(100 * plan["fps"] / 1000), 2)
+
+    def test_video_content_resolution_is_independent_of_target_texture_size(self):
+        plans = []
+        for reference_size in ((1120, 1740), (420, 684), (128, 308)):
+            with self.subTest(reference_size=reference_size):
+                plan = plan_card_video((1920, 1920), [], reference_size, 2000,
+                                       video_size=(1920, 1080), display_aspect=16 / 9)
+                plans.append(plan)
+                self.assertGreater(plan["width"], 128)
+                self.assertGreater(plan["height"], 72)
+                self.assertAlmostEqual(plan["width"] / plan["height"], 16 / 9, delta=0.01)
+                self.assertEqual(plan["fps"], 12)
+                self.assertLessEqual(plan["width"] * plan["height"] * 24, 32_000_000)
+                self.assertEqual(len(pack_frames((1920, 1920), [], (plan["width"], plan["height"]), 24)), 24)
+        self.assertEqual(plans[0], plans[1])
+        self.assertEqual(plans[1], plans[2])
+
+    def test_video_planning_respects_display_aspect_and_small_source_resolution(self):
+        for video_size, display_aspect in (((720, 576), 16 / 9), ((1920, 1080), 9 / 16)):
+            with self.subTest(video_size=video_size, display_aspect=display_aspect):
+                plan = plan_card_video((1920, 1920), [], (128, 308), 2000,
+                                       video_size=video_size, display_aspect=display_aspect)
+                self.assertAlmostEqual(plan["width"] / plan["height"], display_aspect, delta=0.01)
+                self.assertLessEqual(plan["width"] * plan["height"] * 24, 32_000_000)
+        small = plan_card_video((1920, 1920), [], (1120, 1740), 2000,
+                                video_size=(96, 64), display_aspect=1.5)
+        self.assertEqual((small["width"], small["height"]), (96, 64))
+
+    def test_video_content_planning_keeps_duration_and_reserves_existing_frames(self):
+        occupied = [[1921, 1, 512, 512]]
+        for duration, expected_count, expected_fps in ((100, 2, 20), (2000, 24, 12), (30000, 120, 4)):
+            with self.subTest(duration=duration):
+                plan = plan_card_video((1920, 1920), occupied, (128, 308), duration,
+                                       video_size=(1920, 1080), display_aspect=16 / 9)
+                self.assertEqual(plan["fps"], expected_fps)
+                self.assertEqual(round(duration * plan["fps"] / 1000), expected_count)
+                self.assertLessEqual(plan["width"] * plan["height"], 4_194_304)
+                self.assertLessEqual(plan["width"] * plan["height"] * expected_count, 32_000_000)
+                placements = pack_frames((1920, 1920), occupied, (plan["width"], plan["height"]), expected_count)
+                self.assertEqual(len(placements), expected_count)
+                self.assertTrue(all(not overlaps(rect, occupied[0]) for rect in placements))
+        with self.assertRaises(ValueError):
+            plan_card_video((4096, 4096), [], (128, 308), 2000,
+                            video_size=(1920, 1080), display_aspect=16 / 9)
+
+    def test_video_content_planning_rejects_invalid_source_geometry(self):
+        for video_size in ((0, 1080), (1920, 0), (-1, 1080)):
+            with self.subTest(video_size=video_size), self.assertRaises(ValueError):
+                plan_card_video((1920, 1920), [], (128, 308), 2000, video_size=video_size)
+        for display_aspect in (0, -1, float("nan"), float("inf")):
+            with self.subTest(display_aspect=display_aspect), self.assertRaises(ValueError):
+                plan_card_video((1920, 1920), [], (128, 308), 2000,
+                                video_size=(1920, 1080), display_aspect=display_aspect)
+
+
+class VideoCanvasTests(unittest.TestCase):
+    def test_video_canvas_preserves_card_aspect_and_centers_unscaled_content(self):
+        from astral_party_auto.modkit.visual_animation import card_video_canvas
+
+        frame_size = (512, 288)
+        for reference_size in ((1120, 1740), (420, 684), (128, 308), (1740, 1120)):
+            with self.subTest(reference_size=reference_size):
+                canvas_size, rect = card_video_canvas(reference_size, frame_size)
+                width, height = canvas_size
+                left, top, content_width, content_height = rect
+                self.assertEqual((content_width, content_height), frame_size)
+                self.assertGreaterEqual(left, 0)
+                self.assertGreaterEqual(top, 0)
+                self.assertLessEqual(left + content_width, width)
+                self.assertLessEqual(top + content_height, height)
+                self.assertLessEqual(max(canvas_size), 4096)
+                self.assertLessEqual(abs(2 * left + content_width - width), 1)
+                self.assertLessEqual(abs(2 * top + content_height - height), 1)
+                self.assertLessEqual(abs(width * reference_size[1] - height * reference_size[0]),
+                                     max(reference_size))
+
+    def test_matching_aspect_does_not_add_transparent_canvas_padding(self):
+        from astral_party_auto.modkit.visual_animation import card_video_canvas
+
+        size, rect = card_video_canvas((1920, 1080), (640, 360))
+        self.assertEqual(tuple(size), (640, 360))
+        self.assertEqual(tuple(rect), (0, 0, 640, 360))
+
+    def test_transposing_reference_and_content_transposes_the_canvas(self):
+        from astral_party_auto.modkit.visual_animation import card_video_canvas
+
+        canvas, rect = card_video_canvas((404, 400), (1280, 720))
+        transposed_canvas, transposed_rect = card_video_canvas((400, 404), (720, 1280))
+        self.assertEqual(tuple(transposed_canvas), tuple(reversed(canvas)))
+        self.assertEqual(tuple(transposed_rect), (rect[1], rect[0], rect[3], rect[2]))
+
+    def test_invalid_or_unrepresentable_canvases_fail_without_scaling_content(self):
+        from astral_party_auto.modkit.visual_animation import card_video_canvas
+
+        for reference, frame in (((0, 308), (512, 288)), ((128, -1), (512, 288)),
+                                 ((128, 308), (0, 288)), ((128, 308), (512, -1)),
+                                 ((1, 4096), (4096, 1)), ((4096, 1), (1, 4096)),
+                                 ((1, 1), (4097, 1))):
+            with self.subTest(reference=reference, frame=frame), self.assertRaises(ValueError):
+                card_video_canvas(reference, frame)
+        canvas, rect = card_video_canvas((1, 1), (1, 1))
+        self.assertEqual(tuple(canvas), (1, 1))
+        self.assertEqual(tuple(rect), (0, 0, 1, 1))
+
+    def test_preview_reads_content_at_its_offset_and_creates_canvases_lazily(self):
+        from astral_party_auto.modkit import visual_animation
+        from astral_party_auto.modkit.fairygui_movieclip import append_movieclip
+
+        name = "UT_Hero_ThinCard_114"
+        descriptor = append_movieclip(
+            package_fixture(), item_id=animation_identity(name), atlas_id="atlas0", width=8, height=12,
+            frames=[{"rect": [2, 3, 4, 5], "atlas_rect": [0, 32, 4, 5], "duration_ms": 100},
+                    {"rect": [2, 3, 4, 5], "atlas_rect": [4, 32, 4, 5], "duration_ms": 200}],
+            atlas_width=32, atlas_height=40)
+        atlas = Image.new("RGBA", (32, 40))
+        atlas.paste((220, 30, 40, 255), (0, 32, 4, 37))
+        atlas.paste((20, 50, 230, 255), (4, 32, 8, 37))
+
+        def inspect_frames(frames, names, durations, total, **_options):
+            self.assertNotIsInstance(frames, (list, tuple))
+            canvases = list(frames)
+            self.assertEqual(len(canvases), 2)
+            self.assertEqual(durations, [100, 200])
+            self.assertEqual(total, 2)
+            for frame, color in zip(canvases, ((220, 30, 40, 255), (20, 50, 230, 255))):
+                self.assertEqual(frame.size, (8, 12))
+                self.assertEqual(frame.getchannel("A").getbbox(), (2, 3, 6, 8))
+                self.assertEqual(frame.getpixel((2, 3)), color)
+                self.assertEqual(frame.getpixel((0, 0)), (0, 0, 0, 0))
+            return {"checked": True}
+
+        with patch.object(visual_animation, "read_descriptor", return_value=descriptor), \
+                patch.object(visual_animation, "read_atlas", return_value=atlas), \
+                patch.object(visual_animation, "_preview", side_effect=inspect_frames):
+            self.assertEqual(VisualAnimationWorkspace(Mock()).preview(name, Path("ui.bundle"), Path("atlas.bundle")),
+                             {"checked": True})
+
+
+class VisualVideoPreparationTests(unittest.TestCase):
+    def test_prepare_separates_video_pixels_from_canvas_and_preserves_image_import(self):
+        from astral_party_auto.modkit import emote_media, visual_animation, visual_config
+        from astral_party_auto.modkit.fairygui_movieclip import inspect_movieclip_package
+        from test_visual_config import NAME, fixture
+
+        for kind in ("video", "image"):
+            with self.subTest(kind=kind), TemporaryDirectory(prefix="jixing-video-canvas-") as folder:
+                root = Path(folder)
+                originals = root / "originals"
+                originals.mkdir()
+                paths = {name: originals / name for name in ("config.bundle", "ui.bundle", "atlas.bundle", "image.bundle")}
+                paths["config.bundle"].write_bytes(fixture("Skin"))
+                paths["ui.bundle"].write_bytes(package_fixture().replace(b"test1234", b"xuaw6o8j", 1))
+                paths["image.bundle"].write_bytes(b"selected original image")
+                Image.new("RGBA", (32, 32), (50, 70, 90, 255)).save(paths["atlas.bundle"], format="PNG")
+                original_bytes = {name: path.read_bytes() for name, path in paths.items()}
+                source = root / "input.media"
+                source.write_bytes(b"isolated source fixture")
+                draft = root / "draft"
+                draft.mkdir()
+                candidate_folder = root / "candidate"
+                candidate_folder.mkdir()
+                selection = {"asset_type": "texture", "bundle": "image.bundle", "name": NAME,
+                             "width": 40, "height": 64}
+                controller = Mock(selection=selection, draft_items=[])
+                controller.original_bundle_path.side_effect = paths.get
+                controller._draft_dir.return_value = draft
+
+                def commit(staged, items):
+                    for name, path in staged.items():
+                        (draft / name).write_bytes(path.read_bytes())
+                    controller.draft_items = items
+
+                controller.emote_workspace._commit.side_effect = commit
+                workspace = VisualAnimationWorkspace(controller)
+                context = {"config_bundle": "config.bundle", "ui_bundle": "ui.bundle", "atlas_bundle": "atlas.bundle",
+                           "base_size": (32, 32), "package_id": "xuaw6o8j",
+                           "originals": {name: paths[name] for name in ("config.bundle", "ui.bundle", "atlas.bundle")}}
+                workspace.context = Mock(return_value=context)
+                workspace._selection = Mock(return_value=(selection, {"tables": ["Skin"]}))
+                frames = [Image.new("RGBA", (16, 9), color) for color in ((220, 30, 40, 255), (20, 50, 230, 255))]
+                video_info = {"width": 16, "height": 9, "fps": 1, "source_width": 1920,
+                              "source_height": 1080, "source_duration_ms": 2000}
+
+                def read_atlas(path):
+                    with Image.open(path) as image:
+                        return image.convert("RGBA")
+
+                def replace_config(source_path, output_path, table, old, new):
+                    changed = visual_config.replace_visual_address(source_path.read_bytes(), table, old, new)
+                    output_path.write_bytes(changed)
+
+                with ExitStack() as patches:
+                    patches.enter_context(patch.object(visual_animation, "MAX_ATLAS_EDGE", 128))
+                    patches.enter_context(patch.object(emote_media, "detect_emote_media", return_value=kind))
+                    adapted = patches.enter_context(patch.object(emote_media, "adapt_video_source", return_value=(frames, video_info)))
+                    patches.enter_context(patch.object(visual_animation, "_read_replacement", return_value=(frames, [120, 240], [])))
+                    canvas = patches.enter_context(patch.object(visual_animation, "card_video_canvas", wraps=visual_animation.card_video_canvas))
+                    patches.enter_context(patch.object(visual_animation, "read_descriptor", side_effect=lambda path: path.read_bytes()))
+                    patches.enter_context(patch.object(visual_animation, "read_atlas", side_effect=read_atlas))
+                    patches.enter_context(patch.object(visual_animation, "write_descriptor",
+                                                     side_effect=lambda source, output, raw: output.write_bytes(raw)))
+                    patches.enter_context(patch.object(visual_animation, "write_atlas",
+                                                     side_effect=lambda source, output, image: image.save(output, format="PNG")))
+                    patches.enter_context(patch.object(visual_config, "replace_visual_config_bundle", side_effect=replace_config))
+                    candidate = workspace.prepare(source, candidate_folder)
+                    item = workspace.save(candidate)
+                    actual_preview = workspace.draft_preview()
+                package = inspect_movieclip_package((draft / "ui.bundle").read_bytes())
+                clip = next(row for row in package["movieclips"] if row["id"] == animation_identity(NAME))
+                sprites = {row["id"]: row for row in package["sprites"]}
+                self.assertEqual(actual_preview, candidate["animation"])
+                self.assertEqual((item["width"], item["height"]), (clip["width"], clip["height"]))
+                self.assertEqual((item["source_width"], item["source_height"]), (40, 64))
+                self.assertEqual(len(controller.draft_items), 1)
+                self.assertEqual({name: path.read_bytes() for name, path in paths.items()}, original_bytes)
+                if kind == "video":
+                    canvas.assert_called_once_with((40, 64), (16, 9))
+                    self.assertIn("source_planner", adapted.call_args.kwargs)
+                    self.assertNotIn("output_planner", adapted.call_args.kwargs)
+                    self.assertEqual((item["content_width"], item["content_height"]), (16, 9))
+                    self.assertEqual((item["video_source_width"], item["video_source_height"]), (1920, 1080))
+                    self.assertEqual(item["duration_ms"], 2000)
+                    self.assertGreater(clip["height"], 9)
+                    for frame in clip["frames"]:
+                        self.assertEqual(frame["rect"][2:], [16, 9])
+                        self.assertGreater(frame["rect"][1], 0)
+                        self.assertEqual(sprites[frame["sprite_id"]]["rect"][2:], [16, 9])
+                else:
+                    canvas.assert_not_called()
+                    adapted.assert_not_called()
+                    self.assertNotIn("video_source_width", item)
+                    self.assertEqual(item["duration_ms"], 360)
+                    self.assertEqual((clip["width"], clip["height"]), (40, 64))
+                    self.assertTrue(all(frame["rect"] == [0, 0, 40, 64] for frame in clip["frames"]))
 
 
 class VisualSelectionTests(unittest.TestCase):
