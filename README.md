@@ -5,8 +5,8 @@
 <h1 align="center">吉星派对 Mod 助手</h1>
 
 <p align="center">
-  <b>Astral Party · 本地换皮 Mod 工具</b><br>
-  一个界面里搞定:找资源 → 看图 → 换图 → 打包 → 装进游戏 → 不满意一键还原
+  <b>Astral Party · 资源创作与功能插件工具</b><br>
+  中文资源库、替换作品集与 CesiumLoader 插件工程
 </p>
 
 <p align="center">
@@ -17,6 +17,8 @@
 </p>
 
 ---
+
+**1.4.0 正式版** 窗口恢复旧版默认大小，字号调大，修复鼠标移开导航后收起和精灵动作播放。动作可导出完整 PNG 帧包，修改后导入角色动画工作台继续制作。包含中文资源库、Toys 兼容角色动画包和 C# 功能插件工程，游戏内效果待实测。完整步骤见 [使用指南](PREVIEW_GUIDE.md)。
 
 给 Steam / TapTap 版《**吉星派对**》（ **星引擎 Party / Astral Party**）用的本地换皮工具。
 

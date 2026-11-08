@@ -21,7 +21,11 @@ from .core.config import APP_ROOT, RESOURCE_ROOT
 from . import __version__
 from .core.updates import REPOSITORY_URL, RELEASES_URL, UpdateChecker
 from .mod_controller import DATA_DIR, MADE_DIR, ModController
-from .modkit.categories import ASSET_TYPES, annotate_texture_name_duplicates
+from .modkit.categories import (
+    ASSET_TYPES, annotate_texture_name_duplicates, asset_category,
+    category_group, category_label,
+    resource_display_name,
+)
 
 
 def _web_dir() -> Path:
@@ -535,6 +539,27 @@ class DesktopApi:
         if not selection:
             return None
         payload = dict(selection)
+        payload["display_name"] = resource_display_name(
+            payload.get("name", ""), payload.get("asset_type", "texture"), payload.get("bundle", ""),
+        )
+        if payload.get("asset_type") == "anim":
+            from .modkit.clip_frame_export import resolve_clip_identity
+            try:
+                identity = resolve_clip_identity(self.controller.aa_dirs, payload["bundle"], payload["name"])
+            except (OSError, ValueError, KeyError) as exc:
+                identity = {"role_id": None, "reason": str(exc)}
+            fps = float(payload.get("clip_sample_rate") or 30)
+            runtime_action = payload.get("clip_runtime_action") if payload.get("playable") else None
+            reason = payload.get("clip_runtime_binding_reason") or payload.get("reason", "")
+            if runtime_action and identity.get("role_id"):
+                reason = "导出逐帧包后可修改 PNG，再到角色动画工作台导入并制作动作包。"
+            elif runtime_action:
+                reason = identity.get("reason") or "尚未核对到唯一的角色编号，可先导出逐帧包。"
+            payload["frame_animation"] = {
+                "exportable": bool(payload.get("playable")), "role_id": identity.get("role_id"),
+                "action": runtime_action or "", "source_action": payload.get("name", ""),
+                "fps": fps, "loop": bool(payload.get("clip_loop")), "reason": reason,
+            }
         payload["preview_data"] = self._image_data(selection.get("preview"))
         comparison = self.controller.selection_comparison(selection, force=force_preview)
         payload["comparison"] = {"modified": None, "notice": ""}
@@ -922,10 +947,134 @@ class DesktopApi:
     def preview_mod_bundle(self, bundle_name: str) -> dict:
         return self._preview_mod_bundle_impl(bundle_name)
 
+    def _character_animations(self):
+        if getattr(self, "_character_animation_workspace", None) is None:
+            from .modkit.character_animation import CharacterAnimationWorkspace
+            self._character_animation_workspace = CharacterAnimationWorkspace(MADE_DIR / "character-animations")
+        return self._character_animation_workspace
+
+    @exposed
+    def character_animation_state(self, role_id: int = 101) -> dict:
+        return self._character_animations().status(role_id)
+
+    @exposed
+    def character_animation_import(self, role_id: int, action: str, options: dict, folder: bool = False) -> dict | None:
+        source = (self._pick_path("folder") if folder else self._pick_path(
+            "open", file_types=("图片、动图或视频 (*.png;*.jpg;*.jpeg;*.gif;*.apng;*.webp;*.mp4;*.webm;*.mov;*.mkv;*.avi)",),
+        ))
+        if source is None:
+            return None
+        return self._character_animations().import_action(
+            role_id, action, source, fps=options.get("fps", 15), loop=options.get("loop", True),
+        )
+
+    @exposed
+    def character_animation_preview(self, role_id: int, action: str) -> dict:
+        return self._character_animations().preview(role_id, action)
+
+    @exposed
+    def character_animation_originals(self, role_id: int, action: str, preferred_bundle: str = "") -> dict:
+        from .modkit.clip_frame_export import find_character_clip_targets
+
+        targets = find_character_clip_targets(
+            self.controller.aa_dirs, role_id, "", typed_index=self.controller.typed_index,
+            preferred_bundle=preferred_bundle,
+        )
+        actions = {}
+        for target in targets:
+            actions.setdefault(target["action"], {"action": target["action"], "label": target.get("action_label") or target["action"]})
+        items = [target for target in targets if target["action"] == action]
+        if not items and action:
+            from .modkit.clip_preview import inspect_clip_preview
+
+            # 已保存工程使用运行时键，重新打开时按真实 Sprite 前缀找回原片段。
+            bindings = getattr(self, "_character_clip_bindings", {})
+            for target in targets:
+                source = self.controller.original_bundle_path(target["bundle"])
+                if source is None:
+                    continue
+                stat = source.stat()
+                key = (str(source.resolve()), stat.st_mtime_ns, stat.st_size, target["name"])
+                if key not in bindings:
+                    if len(bindings) >= 256:
+                        bindings.clear()
+                    bindings[key] = inspect_clip_preview(source, target["name"]).get("runtime_action")
+                if bindings[key] == action:
+                    items.append(target)
+            self._character_clip_bindings = bindings
+        return {
+            "items": items, "action_choices": list(actions.values()),
+            "reason": "" if items else "未找到同名的游戏原动作，请选择实际原动作或核对角色编号。",
+        }
+
+    @exposed
+    def character_animation_original_preview(self, role_id: int, action: str, bundle: str) -> dict:
+        from .modkit.clip_frame_export import find_character_clip_targets
+
+        targets = find_character_clip_targets(
+            self.controller.aa_dirs, role_id, action, typed_index=self.controller.typed_index,
+        )
+        target = next((item for item in targets if item["bundle"] == bundle and item["name"] == action), None)
+        if target is None:
+            raise ValueError("原版参考不属于当前角色或动作，请重新选择。")
+        source = self.controller.original_bundle_path(bundle)
+        if source is None:
+            raise ValueError("原版动作资源包缺失，请刷新资源索引。")
+        return self._animation_preview(source, target["name"], "sprite_clip")
+
+    @exposed
+    def character_animation_remove(self, role_id: int, action: str) -> dict:
+        return self._character_animations().remove_action(role_id, action)
+
+    @exposed
+    def character_animation_export(self, role_id: int, name: str = "", author: str = "") -> dict:
+        return self._character_animations().export(role_id, name, author)
+
+    def _plugins(self):
+        if getattr(self, "_plugin_workspace", None) is None:
+            from .modkit.plugin_studio import PluginWorkspace
+            self._plugin_workspace = PluginWorkspace(DATA_DIR / "plugin-studio", MADE_DIR / "plugins")
+        return self._plugin_workspace
+
+    @exposed
+    def plugin_status(self) -> dict:
+        return self._plugins().status(getattr(self.controller, "game_executable", None))
+
+    @exposed
+    def plugin_choose_sdk(self) -> dict | None:
+        directory = self._pick_path("folder")
+        if directory is None:
+            return None
+        self._plugins().set_sdk(directory)
+        return self._plugins().status(getattr(self.controller, "game_executable", None))
+
+    @exposed
+    def plugin_fetch_sdk(self) -> dict:
+        self._plugins().fetch_sdk()
+        return self._plugins().status(getattr(self.controller, "game_executable", None))
+
+    @exposed
+    def plugin_create_project(self, options: dict) -> dict:
+        return self._plugins().create(options)
+
+    @exposed
+    def plugin_open_project(self) -> dict | None:
+        directory = self._pick_path("folder")
+        return self._plugins().open(directory) if directory else None
+
+    @exposed
+    def plugin_save_source(self, source: str, expected_hash: str) -> dict:
+        return self._plugins().save(source, expected_hash)
+
+    @exposed
+    def plugin_build_project(self) -> dict:
+        return self._plugins().build()
+
     @exposed
     def get_categories(self, asset_type: str) -> list[dict]:
         return [
-            {"id": category_id, "label": label, "count": count}
+            {"id": category_id, "label": label, "count": count,
+             "group": category_group(category_id, asset_type)}
             for category_id, label, count in self.controller.categories(
                 include_advanced=False,
                 asset_type=asset_type,
@@ -943,7 +1092,7 @@ class DesktopApi:
         page_size: int = 50,
     ) -> dict:
         page = max(0, int(page or 0))
-        page_size = max(1, int(page_size or 50))
+        page_size = min(100, max(1, int(page_size or 50)))
         offset = page * page_size
         total = self.controller.count_labelled(
             category_id,
@@ -961,18 +1110,60 @@ class DesktopApi:
         )
         names_only = [(bundle, name) for bundle, name, _char in rows]
         annotated = annotate_texture_name_duplicates(names_only)
-        return {
-            "items": [
-                {
-                    "bundle": bundle,
-                    "name": name,
-                    "character": char,
-                    "duplicates": duplicates,
-                }
-                for (bundle, name, char), (_b, _n, duplicates) in zip(rows, annotated)
-            ],
-            "total": total,
-        }
+        actions = {
+            "texture": ["导出图片", "检查替换能力"],
+            "text": ["文字对照编辑"],
+            "mesh": ["导出 OBJ"],
+            "anim": ["动作预览", "动画导入入口"],
+            "dynamic": ["动画预览", "检查替换能力"],
+        }.get(asset_type, [])
+        items = []
+        for (bundle, name, char), (_b, _n, duplicates) in zip(rows, annotated):
+            category_id = (self.controller._dynamic_kind(bundle, name) if asset_type == "dynamic"
+                           else asset_category(name, asset_type, bundle))
+            items.append({
+                "bundle": bundle, "name": name, "character": char, "duplicates": duplicates,
+                "category_id": category_id, "category_label": category_label(category_id),
+                "actions": actions, "display_name": resource_display_name(name, asset_type, bundle),
+            })
+        return {"items": items, "total": total}
+
+    @exposed
+    def get_resource_thumbnails(self, asset_type: str, items: list[dict]) -> dict:
+        from .modkit.thumbnails import ResourceThumbnails
+
+        if asset_type != "texture":
+            raise ValueError("当前仅为图片资源生成缩略图。")
+        if not isinstance(items, list) or len(items) > 8:
+            raise ValueError("每批最多读取 8 张缩略图。")
+        if getattr(self, "_resource_thumbnails", None) is None:
+            self._resource_thumbnails = ResourceThumbnails()
+        index = self.controller.typed_index.get("texture") or {}
+        groups = {}
+        results = []
+        for item in items:
+            if not isinstance(item, dict):
+                raise ValueError("缩略图参数应包含资源包和资源名。")
+            bundle, name = item.get("bundle"), item.get("name")
+            result = {"bundle": bundle, "name": name}
+            results.append(result)
+            if (not isinstance(bundle, str) or not isinstance(name, str)
+                    or bundle not in index or name not in index[bundle]):
+                result["error"] = "资源已不在当前索引中，请刷新索引。"
+                continue
+            groups.setdefault(bundle, []).append(result)
+        for bundle, rows in groups.items():
+            try:
+                source = self.controller.original_bundle_path(bundle)
+                if source is None:
+                    raise ValueError("原资源包缺失，请刷新索引。")
+                thumbnails = self._resource_thumbnails.read(source, [row["name"] for row in rows])
+                for row in rows:
+                    row.update(thumbnails[row["name"]])
+            except Exception as exc:
+                for row in rows:
+                    row["error"] = str(exc) or "缩略图读取失败。"
+        return {"items": results}
 
     def _animation_preview(self, path: Path, name: str, kind: str, fps: float = 30) -> dict:
         from .modkit.animation import read_animation_preview
@@ -1439,6 +1630,30 @@ class DesktopApi:
             return None
         output = self.controller.export_selection(file_path, fmt=fmt)
         return {"path": str(output)}
+
+    @exposed
+    def export_clip_frames(self) -> dict | None:
+        from .modkit.clip_frame_export import export_clip_frames, resolve_clip_identity
+
+        selection = dict(self.controller.selection or {})
+        if selection.get("asset_type") != "anim" or not selection.get("playable"):
+            raise ValueError(selection.get("reason") or "请选择可播放的动作片段。")
+        source = selection.get("original_path")
+        if not source:
+            raise ValueError("当前动作的原始资源包缺失，请刷新资源。")
+        clip_name = selection["name"]
+        filename = "".join(character for character in clip_name if character.isalnum() or character in "_-")[:60] or "animation"
+        output = self._pick_path("save", file_types=("PNG 逐帧动画包 (*.zip)",), save_filename=f"{filename}-frames.zip")
+        if output is None:
+            return None
+        if self.controller.selection != selection:
+            raise ValueError("当前动作已经改变，请重新导出。")
+        try:
+            identity = resolve_clip_identity(self.controller.aa_dirs, selection["bundle"], clip_name)
+        except (OSError, ValueError, KeyError) as exc:
+            identity = {"role_id": None, "action": clip_name, "reason": str(exc)}
+        return export_clip_frames(Path(source), clip_name, output, bundle_name=selection["bundle"],
+                                  role_id=identity.get("role_id"), identity=identity)
 
     @exposed
     def choose_replacement(self, sequence_folder: bool = False) -> dict | None:
