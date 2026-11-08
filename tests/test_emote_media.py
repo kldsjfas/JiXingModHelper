@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import shutil
 import subprocess
@@ -311,6 +312,99 @@ class EmoteMediaTests(unittest.TestCase):
                     self.assertLessEqual(info["width"] * info["height"] * len(frames), emote_media.MAX_OUTPUT_PIXELS)
             self.assertEqual([path.name for path in Path(folder).iterdir()], ["input.video"])
 
+    def test_source_planner_receives_native_geometry_display_aspect_and_real_duration(self):
+        for rotation, expected_aspect, expected_fitted in ((0, 3, (300, 100)), (90, 1 / 3, (100, 300))):
+            with self.subTest(rotation=rotation), tempfile.TemporaryDirectory() as folder:
+                source = Path(folder) / "input.video"
+                source.write_bytes(b"video")
+                stream = {"width": 96, "height": 64, "duration": "2", "sample_aspect_ratio": "2:1",
+                          "codec_name": "h264", "pix_fmt": "yuv420p"}
+                if rotation:
+                    stream["side_data_list"] = [{"rotation": rotation}]
+                probe = {"streams": [stream], "format": {"format_name": "mov,mp4", "duration": "9"}}
+                counted = {"streams": [{"nb_read_frames": "24"}]}
+                planned_sources = []
+
+                def planner(info):
+                    planned_sources.append(dict(info))
+                    return {"width": 300, "height": 300, "fps": 12}
+
+                def write_decoded(command, *_args):
+                    with Path(command[-1]).open("wb") as decoded:
+                        decoded.truncate(300 * 300 * 4 * 24)
+
+                with patch.object(emote_media, "find_ffmpeg", return_value=Path("ffmpeg")), \
+                        patch.object(emote_media, "find_ffprobe", return_value=Path("ffprobe")), \
+                        patch.object(emote_media, "_probe_result", side_effect=[probe, counted]), \
+                        patch.object(emote_media, "_logged_process", side_effect=write_decoded):
+                    frames, info = emote_media.adapt_video_source(
+                        source, {"width": 9000, "height": 9000, "fps": 12},
+                        work_dir=folder, source_planner=planner)
+                self.assertEqual(len(planned_sources), 1)
+                self.assertEqual((planned_sources[0]["width"], planned_sources[0]["height"]), (96, 64))
+                self.assertEqual(planned_sources[0]["duration_ms"], 2000)
+                self.assertAlmostEqual(planned_sources[0]["display_aspect"], expected_aspect)
+                self.assertEqual(len(frames), 24)
+                self.assertEqual(frames[0].size, (300, 300))
+                self.assertEqual((info["fitted_width"], info["fitted_height"]), expected_fitted)
+                self.assertEqual(info["source_duration_ms"], 2000)
+                self.assertEqual(info["duration_ms"], 2000)
+                self.assertEqual([path.name for path in Path(folder).iterdir()], ["input.video"])
+
+    def test_source_and_duration_planners_cannot_be_combined(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "input.video"
+            source.write_bytes(b"video")
+            duration_planner = Mock()
+            source_planner = Mock()
+            with patch.object(emote_media, "find_ffmpeg", return_value=Path("ffmpeg")), \
+                    patch.object(emote_media, "find_ffprobe", return_value=Path("ffprobe")), \
+                    patch.object(emote_media, "_probe_result") as probe, \
+                    patch.object(emote_media, "_logged_process") as decode:
+                with self.assertRaises(ValueError):
+                    emote_media.adapt_video_source(source, self.reference, work_dir=folder,
+                                                   output_planner=duration_planner, source_planner=source_planner)
+            duration_planner.assert_not_called()
+            source_planner.assert_not_called()
+            probe.assert_not_called()
+            decode.assert_not_called()
+            self.assertEqual([path.name for path in Path(folder).iterdir()], ["input.video"])
+
+    def test_source_planner_keeps_source_and_output_decode_budgets(self):
+        cases = [
+            {"label": "source frame", "source_size": (3500, 2200), "duration": "2", "source_count": 24,
+             "output": {"width": 320, "height": 180, "fps": 12}, "planner_called": False},
+            {"label": "duration", "source_size": (96, 64), "duration": "30.001", "source_count": 24,
+             "output": {"width": 320, "height": 180, "fps": 12}, "planner_called": False},
+            {"label": "source frame count", "source_size": (96, 64), "duration": "2", "source_count": 513,
+             "output": {"width": 320, "height": 180, "fps": 12}, "planner_called": True},
+            {"label": "source total pixels", "source_size": (2000, 1000), "duration": "2", "source_count": 33,
+             "output": {"width": 320, "height": 180, "fps": 12}, "planner_called": True},
+            {"label": "output frame", "source_size": (96, 64), "duration": "2", "source_count": 24,
+             "output": {"width": 4096, "height": 2048, "fps": 12}, "planner_called": True},
+            {"label": "output total pixels", "source_size": (96, 64), "duration": "2", "source_count": 24,
+             "output": {"width": 2000, "height": 1000, "fps": 12}, "planner_called": True},
+            {"label": "output fps", "source_size": (96, 64), "duration": "2", "source_count": 24,
+             "output": {"width": 320, "height": 180, "fps": 61}, "planner_called": True},
+        ]
+        for case in cases:
+            with self.subTest(case=case["label"]), tempfile.TemporaryDirectory() as folder:
+                source = Path(folder) / "input.video"
+                source.write_bytes(b"video")
+                probe = {"streams": [{"width": case["source_size"][0], "height": case["source_size"][1],
+                                      "duration": case["duration"]}], "format": {"format_name": "mov,mp4"}}
+                counted = {"streams": [{"nb_read_frames": str(case["source_count"])}]}
+                planner = Mock(return_value=case["output"])
+                with patch.object(emote_media, "find_ffmpeg", return_value=Path("ffmpeg")), \
+                        patch.object(emote_media, "find_ffprobe", return_value=Path("ffprobe")), \
+                        patch.object(emote_media, "_probe_result", side_effect=[probe, counted]), \
+                        patch.object(emote_media, "_logged_process") as decode:
+                    with self.assertRaises(ValueError):
+                        emote_media.adapt_video_source(source, self.reference, work_dir=folder, source_planner=planner)
+                self.assertEqual(planner.call_count, int(case["planner_called"]))
+                decode.assert_not_called()
+                self.assertEqual([path.name for path in Path(folder).iterdir()], ["input.video"])
+
     def test_card_planner_does_not_bypass_original_video_decode_limits(self):
         probe = {"streams": [{"width": 3500, "height": 2200, "duration": "2"}],
                  "format": {"format_name": "mov,mp4"}}
@@ -347,6 +441,87 @@ class EmoteMediaTests(unittest.TestCase):
                     self.assertLessEqual(info["width"] * info["height"] * len(frames), emote_media.MAX_OUTPUT_PIXELS)
             self.assertEqual(source.read_bytes(), original)
             self.assertEqual([path.name for path in Path(folder).iterdir()], ["fixture.mp4"])
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg/FFprobe is not installed")
+    def test_same_detailed_video_keeps_content_resolution_across_card_texture_sizes(self):
+        from astral_party_auto.modkit.visual_animation import plan_card_video
+
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "detail.mkv"
+            subprocess.run(
+                [shutil.which("ffmpeg"), "-v", "error", "-nostdin", "-y", "-threads", "1",
+                 "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=12,drawgrid=width=16:height=16:thickness=1:color=white",
+                 "-frames:v", "24", "-c:v", "ffv1", "-pix_fmt", "bgra", str(source)],
+                capture_output=True, check=True, timeout=30,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            source_digest = hashlib.sha256(source.read_bytes()).hexdigest()
+            results = []
+            for reference_size in ((1120, 1740), (420, 684), (128, 308)):
+                with self.subTest(reference_size=reference_size):
+                    def planner(info):
+                        return plan_card_video(
+                            (1920, 1920), [], reference_size, info["duration_ms"],
+                            video_size=(info["width"], info["height"]), display_aspect=info["display_aspect"])
+
+                    frames, info = emote_media.adapt_video_source(
+                        source, {"width": reference_size[0], "height": reference_size[1], "fps": 12},
+                        work_dir=folder, source_planner=planner)
+                    self.assertEqual((len(frames), info["source_frames"]), (24, 24))
+                    self.assertEqual((info["source_width"], info["source_height"]), (1280, 720))
+                    self.assertAlmostEqual(info["source_display_aspect"], 16 / 9)
+                    self.assertAlmostEqual(info["source_duration_ms"], 2000)
+                    self.assertAlmostEqual(info["duration_ms"], 2000)
+                    self.assertGreater(info["fitted_width"], 256)
+                    self.assertGreater(info["fitted_height"], 144)
+                    self.assertLessEqual(info["width"] * info["height"] * len(frames), emote_media.MAX_OUTPUT_PIXELS)
+                    first_digest = hashlib.sha256(frames[0].tobytes()).hexdigest()
+                    last_digest = hashlib.sha256(frames[-1].tobytes()).hexdigest()
+                    self.assertNotEqual(first_digest, last_digest)
+                    self.assertGreater(sum(count > 0 for count in frames[0].convert("L").histogram()), 128)
+                    results.append((frames[0].size, first_digest, last_digest))
+            self.assertEqual(results[0], results[1])
+            self.assertEqual(results[1], results[2])
+            self.assertEqual(hashlib.sha256(source.read_bytes()).hexdigest(), source_digest)
+            self.assertEqual([path.name for path in Path(folder).iterdir()], ["detail.mkv"])
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg/FFprobe is not installed")
+    def test_source_planner_preserves_real_anamorphic_and_rotated_video(self):
+        from astral_party_auto.modkit.visual_animation import plan_card_video
+
+        with tempfile.TemporaryDirectory() as folder:
+            source = save_video(folder, "mp4", frame_count=24, frame_rate=12)
+            anamorphic = Path(folder) / "anamorphic.mp4"
+            rotated = Path(folder) / "rotated.mp4"
+            subprocess.run(
+                [shutil.which("ffmpeg"), "-v", "error", "-nostdin", "-y", "-i", str(source),
+                 "-vf", "setsar=2", "-c:v", "mpeg4", "-pix_fmt", "yuv420p", str(anamorphic)],
+                capture_output=True, check=True, timeout=20,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            subprocess.run(
+                [shutil.which("ffmpeg"), "-v", "error", "-nostdin", "-y", "-display_rotation:v:0", "90",
+                 "-i", str(anamorphic), "-map", "0:v:0", "-c:v", "copy", str(rotated)],
+                capture_output=True, check=True, timeout=20,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            for video, expected_aspect in ((anamorphic, 3), (rotated, 1 / 3)):
+                with self.subTest(video=video.name):
+                    original = video.read_bytes()
+
+                    def planner(info):
+                        return plan_card_video(
+                            (1920, 1920), [], (128, 308), info["duration_ms"],
+                            video_size=(info["width"], info["height"]), display_aspect=info["display_aspect"])
+
+                    frames, info = emote_media.adapt_video_source(
+                        video, {"width": 128, "height": 308, "fps": 12}, work_dir=folder, source_planner=planner)
+                    self.assertEqual((len(frames), info["source_frames"]), (24, 24))
+                    self.assertAlmostEqual(info["source_display_aspect"], expected_aspect)
+                    self.assertAlmostEqual(info["fitted_width"] / info["fitted_height"], expected_aspect, delta=0.01)
+                    self.assertAlmostEqual(info["duration_ms"], 2000)
+                    self.assertNotEqual(frames[0].tobytes(), frames[-1].tobytes())
+                    self.assertEqual(frames[0].getchannel("A").getbbox(), (0, 0, *frames[0].size))
+                    self.assertEqual(video.read_bytes(), original)
+            self.assertEqual(sorted(path.name for path in Path(folder).iterdir()),
+                             ["anamorphic.mp4", "fixture.mp4", "rotated.mp4"])
 
     @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg is not installed")
     def test_real_gif_conversion_and_final_dual_stream_preview(self):

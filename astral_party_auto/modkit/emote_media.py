@@ -353,13 +353,16 @@ def _video_display_aspect(stream: dict, width: int, height: int) -> float:
 
 def adapt_video_source(path: str | Path, reference_info: dict, *, work_dir: str | Path | None = None,
                        ffmpeg_path: str | Path | None = None,
-                       output_planner: Callable[[float], dict] | None = None) -> tuple[list[Image.Image], dict]:
+                       output_planner: Callable[[float], dict] | None = None,
+                       source_planner: Callable[[dict], dict] | None = None) -> tuple[list[Image.Image], dict]:
     """有界检测视频内容，用真实时间戳重采样，忽略音轨并保留可解码 alpha。"""
     source = Path(path)
     if detect_emote_media(source) != "video":
         raise ValueError("所选素材是动图或 USM，请按实际内容导入。")
     ffmpeg = find_ffmpeg(ffmpeg_path)
     ffprobe = find_ffprobe(ffmpeg)
+    if output_planner is not None and source_planner is not None:
+        raise ValueError("视频输出只能选择一种规划方式。")
     def output_settings(info):
         width, height, fps = info["width"], info["height"], info["fps"]
         if (not isinstance(width, int) or not isinstance(height, int) or width <= 0 or height <= 0
@@ -368,7 +371,7 @@ def adapt_video_source(path: str | Path, reference_info: dict, *, work_dir: str 
         return width, height, fps
 
     # 默认表情路径仍先核对参考资源；卡面可在读出真实时长后规划输出。
-    if output_planner is None:
+    if output_planner is None and source_planner is None:
         width, height, fps = output_settings(reference_info)
     with tempfile.TemporaryDirectory(prefix="emote-video-", dir=_work_parent(work_dir)) as folder:
         scratch = Path(folder)
@@ -395,7 +398,12 @@ def adapt_video_source(path: str | Path, reference_info: dict, *, work_dir: str 
             timing_source = "video_packet_pts"
         if duration > MAX_SOURCE_DURATION_MS:
             raise ValueError("导入视频目前限制 30 秒，请先剪短素材。")
-        if output_planner is not None:
+        if source_planner is not None:
+            width, height, fps = output_settings(source_planner({
+                "width": source_width, "height": source_height,
+                "display_aspect": display_aspect, "duration_ms": duration,
+            }))
+        elif output_planner is not None:
             width, height, fps = output_settings(output_planner(duration))
         output_count = max(1, math.floor(duration * fps / 1000 + 0.5))
         if output_count > cri_emote.MAX_FRAMES or width * height * output_count > MAX_OUTPUT_PIXELS:
