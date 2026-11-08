@@ -12,6 +12,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\emote\fetch_ffmpeg.p
 
 脚本校验原 ZIP 的固定大小和 SHA256，再逐文件校验并启动 FFmpeg、FFprobe 检查版本。安装位置为 `tools/emote/ffmpeg/bin/`，程序优先使用这里的组件；共享构建必须保留配套 DLL，不能只拷两个 EXE。脚本不修改系统 PATH，不安装驱动或服务。
 
+1.4.1 使用清单中固定的 GitHub 发行资产 API 地址获取原 ZIP，修复浏览器下载地址返回504的问题。下载文件仍需通过完整的大小与 SHA256 校验。
+
 下载和解压在本组件的 `cache/` 中进行，成功后清理可重建的下载和解压缓存。失败不会用未校验文件覆盖旧组件，可以修好网络后重试。替换不同版本时先完整准备新组件，再保留旧目录为 `ffmpeg.previous-*`；旧组件不自动删除。安装结果及清理摘要保存在本机 `setup-result.json`，不纳入源码。
 
 ## 来源与许可

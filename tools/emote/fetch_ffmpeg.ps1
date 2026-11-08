@@ -99,7 +99,11 @@ try {
     if (-not (Test-Archive)) {
         $downloadPath = Join-Path $stagePath 'download.zip'
         Write-Host ("Downloading pinned FFmpeg {0} from BtbN GitHub ({1:N1} MB)..." -f $manifest.version, ($manifest.archive_size / 1MB))
-        Invoke-WebRequest -UseBasicParsing -Uri $manifest.archive_url -OutFile $downloadPath -TimeoutSec 300
+        if ($manifest.archive_api_url) {
+            Invoke-WebRequest -UseBasicParsing -Uri $manifest.archive_api_url -Headers @{ Accept = 'application/octet-stream' } -OutFile $downloadPath -TimeoutSec 300
+        } else {
+            Invoke-WebRequest -UseBasicParsing -Uri $manifest.archive_url -OutFile $downloadPath -TimeoutSec 300
+        }
         $download = Get-Item -LiteralPath $downloadPath
         if ($download.Length -ne $manifest.archive_size -or
             (Get-FileHash -LiteralPath $downloadPath -Algorithm SHA256).Hash -ne $manifest.archive_sha256) {
