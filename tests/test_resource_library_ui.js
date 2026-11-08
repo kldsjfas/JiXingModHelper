@@ -50,7 +50,7 @@ function loadFrontend(responder) {
   });
   const calls = [];
   const context = vm.createContext({
-    console, URLSearchParams, setTimeout, clearTimeout,
+    console, URLSearchParams, setTimeout: () => 0, clearTimeout() {},
     window: { location: { hash: "" }, addEventListener() {} },
     document: {
       readyState: "loading", addEventListener() {},
@@ -69,13 +69,15 @@ function loadFrontend(responder) {
     },
   });
   const source = fs.readFileSync(path.join(__dirname, "../astral_party_auto/webui/app.js"), "utf8");
-  vm.runInContext(source.replace(/\}\)\(\);\s*$/, "globalThis.ui = { state, renderResources, renderCategories, setResourceView, toggleSelectedResource, retryResourceThumbnails, selectResource, openResourceDetails, closeResourceDetails, handleWorkspaceEscape, handleResourceDetailFocus, toggleNavigationPinned, bindEvents, showPage, setCropStateForTest: (value) => { cropState = value; } };\n})();"), context);
+  vm.runInContext(source.replace(/\}\)\(\);\s*$/, "globalThis.ui = { state, renderResources, renderCategories, setResourceView, toggleSelectedResource, retryResourceThumbnails, selectResource, openResourceDetails, closeResourceDetails, handleWorkspaceEscape, handleResourceDetailFocus, toggleNavigationPinned, bindEvents, showPage, updateExportButtons, exportSelection, renderFrameAnimationTools, useFrameAnimationTarget, setCropStateForTest: (value) => { cropState = value; } };\n})();"), context);
   const ui = context.ui;
   ui.state.page = "browse";
   ui.state.assetTypes = [{ id: "texture", label: "贴图" }, { id: "mesh", label: "3D 模型" }];
   find("#lightbox-overlay").classList.add("is-hidden");
   return { ...ui, find, calls, switches, body: context.document.body,
-    setDrawerViewport: (matches) => { context.window.matchMedia = (query) => ({ matches: query.startsWith("(max-width") ? matches : !matches }); } };
+    setDrawerViewport: (matches) => { context.window.matchMedia = (query) => ({ matches: query.startsWith("(max-width") ? matches : !matches }); },
+    setCharacterAnimationBridge: (bridge) => { context.window.CharacterAnimation = bridge; },
+    setBrowserSelection: (selection) => { context.window.getSelection = () => selection; } };
 }
 
 const thumbnailData = "data:image/png;base64,YQ==";
@@ -219,6 +221,15 @@ async function checkDetailsPreserveSelectionAndReturnFocus() {
   await ui.selectResource(resource.bundle, resource.name, card);
   assert.equal(ui.state.resourceDetailOpen, true);
   assert.equal(ui.calls.length, 0);
+  const refresh = loadFrontend(async () => ({ ...resource, asset_type: "texture", editable: true }));
+  refresh.state.resources = [resource];
+  refresh.state.selection = selection;
+  refresh.state.replacement = candidate;
+  refresh.state.thumbnailCache.set("characters.bundle::selected", { data: thumbnailData });
+  await refresh.selectResource(resource.bundle, resource.name, null, true);
+  assert.equal(refresh.calls[0].url, "/api/select_asset", "Explicit refresh reused the old selected payload");
+  assert.notEqual(refresh.state.selection, selection);
+  assert.equal(refresh.state.replacement, null);
 }
 
 async function checkEscapePriorityAndNavigationPin() {
@@ -325,6 +336,13 @@ async function checkLayoutStructure() {
   const styles = fs.readFileSync(path.join(__dirname, "../astral_party_auto/webui/styles.css"), "utf8");
   assert.match(styles, /\.workspace\s*\{\s*grid-column:\s*2\s*;/, "The fixed navigation rail left the workspace in the narrow grid column");
   assert.match(styles, /\.resource-list\.is-grid\s*\{[^}]*grid-auto-rows:\s*max-content/, "Grid rows can shrink below the thumbnail content");
+  assert.match(styles, /\.sidebar:is\(:hover, :has\(:focus-visible\)\)/, "Keyboard navigation needs a focus-visible expansion path");
+  assert.doesNotMatch(styles, /\.sidebar[^\{]*:focus-within/, "Mouse-click focus can keep the hover navigation expanded");
+  assert.match(styles, /--font-body:\s*16px/);
+  assert.match(styles, /--font-control:\s*15px/);
+  assert.match(styles, /--font-card-title:\s*16px/);
+  assert.match(styles, /body,[\s\S]*?user-select:\s*none/);
+  assert.match(styles, /\.resource-name,[\s\S]*?user-select:\s*text/);
 }
 
 async function checkCharacterAnimationWorkbenchStructure() {
@@ -336,10 +354,89 @@ async function checkCharacterAnimationWorkbenchStructure() {
     "character-animation-actions", "character-animation-preview", "character-animation-status",
     "character-animation-notice", "character-animation-name", "character-animation-author"];
   controls.forEach((id) => assert.ok(section.includes(`id="${id}"`), `Missing animation workbench control ${id}`));
-  assert.equal((section.match(/<option value=/g) || []).length, 17);
+  ["character-animation-original", "character-original-variant", "character-original-status"].forEach((id) => assert.ok(section.includes(`id="${id}"`)));
+  const actions = section.match(/<select id="character-action">([\s\S]*?)<\/select>/)[1];
+  assert.equal((actions.match(/<option value=/g) || []).length, 17);
   assert.match(section, /CharacterSkinMod 0\.2\.7 \/ SDK 2\.8\.6/);
   assert.match(section, /id="character-animation-loop" type="checkbox" checked/);
   assert.match(html, /src="character-animation\.js"/);
+}
+
+async function checkClipFrameExportKeepsExistingFormats() {
+  const ui = loadFrontend(async () => ({ path: "output.zip" }));
+  ui.state.selection = { asset_type: "anim", bundle: "role.bundle", name: "Idle",
+    frame_animation: { exportable: true, role_id: null, action: "Idle", reason: "没有可靠的角色编号。" } };
+  ui.updateExportButtons();
+  assert.equal(ui.find("#export-primary").textContent, "导出 PNG 帧包");
+  assert.equal(ui.find("#export-primary").disabled, false);
+  assert.equal(ui.find("#use-frame-animation-browse").disabled, true);
+  assert.match(ui.find("#frame-animation-browse-reason").textContent, /没有可靠的角色编号/);
+  await ui.exportSelection("primary");
+  await ui.exportSelection("secondary");
+  assert.equal(ui.calls[0].url, "/api/export_clip_frames");
+  assert.deepEqual(ui.calls[0].args, []);
+  assert.equal(ui.calls[1].url, "/api/export_selection");
+  assert.deepEqual(ui.calls[1].args, ["secondary"]);
+  ui.state.selection.frame_animation.exportable = false;
+  ui.updateExportButtons();
+  assert.equal(ui.find("#export-primary").textContent, "导出 JSON");
+  await ui.exportSelection("primary");
+  for (const kind of ["texture", "text", "mesh", "dynamic"]) {
+    ui.state.selection = { asset_type: kind, bundle: "other.bundle", name: "resource" };
+    await ui.exportSelection("primary");
+  }
+  assert.ok(ui.calls.slice(2).every((request) => request.url === "/api/export_selection" && request.args[0] === "primary"));
+}
+
+async function checkClipFrameTargetPrefillsCharacterWorkbench() {
+  const ui = loadFrontend(async () => ({}));
+  const events = [];
+  ui.setCharacterAnimationBridge({
+    enter: () => events.push("enter"),
+    selectTarget: (target) => events.push({ roleId: target.roleId, action: target.action, fps: target.fps, loop: target.loop,
+      preferred_source: { bundle: target.preferred_source.bundle, name: target.preferred_source.name } }),
+  });
+  ui.state.selection = { asset_type: "anim", bundle: "role.bundle", name: "Hit",
+    frame_animation: { exportable: true, role_id: 115, action: "Hit", fps: 30, loop: false, reason: "" } };
+  ui.renderFrameAnimationTools();
+  assert.equal(ui.find("#use-frame-animation-browse").disabled, false);
+  assert.equal(ui.find("#use-frame-animation-studio").disabled, false);
+  assert.match(ui.find("#frame-animation-studio-reason").textContent, /Toys 兼容/);
+  await ui.useFrameAnimationTarget();
+  assert.equal(ui.state.page, "character-animation");
+  assert.deepEqual(events, ["enter", { roleId: 115, action: "Hit", fps: 30, loop: false,
+    preferred_source: { bundle: "role.bundle", name: "Hit" } }]);
+  ui.state.selection.frame_animation.action = "";
+  ui.renderFrameAnimationTools();
+  assert.equal(ui.find("#use-frame-animation-browse").disabled, true);
+  assert.match(ui.find("#frame-animation-studio-reason").textContent, /动作名称/);
+}
+
+async function checkResourceCopyAndActivationRemainSeparate() {
+  const resource = row("copyable");
+  function setup() {
+    const ui = loadFrontend(async () => ({ ...resource, asset_type: "texture", editable: true }));
+    ui.state.resources = [resource];
+    ui.state.thumbnailCache.set("characters.bundle::copyable", { data: thumbnailData });
+    ui.renderResources();
+    const card = ui.find("#resource-list").children[0];
+    const anchor = {};
+    card.contains = (node) => node === anchor;
+    ui.setBrowserSelection({ anchorNode: anchor, toString: () => "可复制资源名称" });
+    return { ui, card };
+  }
+  const pointer = setup();
+  pointer.card.trigger("click", { detail: 1 });
+  assert.equal(pointer.ui.calls.length, 0, "Dragging a resource name activated the card and cleared the selection");
+  assert.equal(pointer.ui.state.selection, null);
+  pointer.ui.setBrowserSelection({ toString: () => "" });
+  pointer.card.trigger("click", { detail: 1 });
+  await settleUntil(() => pointer.ui.state.selection !== null);
+  assert.equal(pointer.ui.calls[0].url, "/api/select_asset");
+  const keyboard = setup();
+  keyboard.card.trigger("click", { detail: 0 });
+  await settleUntil(() => keyboard.ui.state.selection !== null);
+  assert.equal(keyboard.ui.calls[0].url, "/api/select_asset", "Keyboard activation was blocked by a text selection");
 }
 
 async function main() {
@@ -347,7 +444,9 @@ async function main() {
     checkTypesAndMetadataAreEscaped, checkCategoryGroups, checkDetailsPreserveSelectionAndReturnFocus,
     checkEscapePriorityAndNavigationPin, checkLateSelectionCannotReopenDetails,
     checkDrawerClosesBeforeFocusCanBeObscured, checkWideDetailsKeepSelectedCardVisible,
-    checkLayoutStructure, checkCharacterAnimationWorkbenchStructure];
+    checkLayoutStructure, checkCharacterAnimationWorkbenchStructure,
+    checkClipFrameExportKeepsExistingFormats, checkClipFrameTargetPrefillsCharacterWorkbench,
+    checkResourceCopyAndActivationRemainSeparate];
   for (const check of checks) {
     await check();
     console.log(`PASS: ${check.name}`);

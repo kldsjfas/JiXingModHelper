@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import re
 import struct
 from dataclasses import dataclass
 from pathlib import Path
@@ -77,7 +78,12 @@ def _compiled_keys(tree: dict) -> tuple[list, float, float]:
     stream = clip.get("m_StreamedClip", {})
     dense = clip.get("m_DenseClip", {})
     constant = clip.get("m_ConstantClip", {}).get("data", [])
-    counts = (stream.get("curveCount", 0), dense.get("m_CurveCount", 0), len(constant))
+    # Current Unity clips count their Sprite pointer curve separately from float curves.
+    # Both layouts use the same streamed key records and original timestamps.
+    streamed_counts = (stream.get("curveCount", 0), stream.get("discreteCurveCount", 0))
+    if any(type(count) is not int or count < 0 for count in streamed_counts):
+        raise ValueError("动画流曲线计数无效。")
+    counts = (sum(streamed_counts), dense.get("m_CurveCount", 0), len(constant))
     if counts == (1, 0, 0):
         indices = _streamed_keys(stream)
     elif counts == (0, 1, 0):
@@ -197,7 +203,8 @@ def _sprite_frame(sprite, reader) -> SpriteFrame:
 
 def _read_clip(env, name: str):
     clip = _clip(env, name)
-    pointers, durations, duration = _timeline(clip.read_typetree())
+    tree = clip.read_typetree()
+    pointers, durations, duration = _timeline(tree)
     unique, frames = {}, []
     for pointer in pointers:
         key = (int(pointer["m_FileID"]), int(pointer["m_PathID"]))
@@ -226,10 +233,45 @@ def _read_clip(env, name: str):
     top = math.ceil(max(row.top for row in visible) * ppu - 0.001)
     width, height = right - left, top - bottom
     _size_limit(width, height)
+    action_prefixes = {re.sub(r"_\d+$", "", frame.name) for frame in frames if frame is not None and frame.name}
+    runtime_action = None
+    binding_reason = ""
+    if not action_prefixes:
+        binding_reason = "此片段缺少非空精灵名称，无法自动确定运行时动作键。"
+    elif len(action_prefixes) > 1:
+        binding_reason = "此片段包含多个精灵动作前缀，无法自动确定运行时动作键。"
+    else:
+        candidate = next(iter(action_prefixes))
+        if re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,79}", candidate):
+            runtime_action = candidate
+        else:
+            binding_reason = "精灵动作前缀的字符或长度不符合角色动画格式，无法自动绑定。"
     info = {"animation_kind": "sprite_clip", "playable": True, "reason": "", "notice": NOTICE,
             "width": width, "height": height, "total": len(frames), "duration": duration,
-            "fps": len(frames) / duration, "frame_names": [row.name if row else "空白帧" for row in frames]}
+            "fps": len(frames) / duration, "frame_names": [row.name if row else "空白帧" for row in frames],
+            "loop": bool(tree.get("m_MuscleClip", {}).get("m_LoopTime", False)),
+            "sample_rate": tree.get("m_SampleRate", 0), "runtime_action": runtime_action,
+            "runtime_binding_reason": binding_reason}
     return frames, durations, info, (ppu, left, top)
+
+
+def iter_clip_canvases(frames, info: dict, origin: tuple, indices=None):
+    """Yield complete, aligned transparent frames. Omitted indices render every original key."""
+    ppu, left, top = origin
+    if indices is None:
+        indices = range(len(frames))
+    for index in indices:
+        canvas = Image.new("RGBA", (info["width"], info["height"]))
+        frame = frames[index]
+        if frame is not None:
+            sprite_image = frame.sprite.image.convert("RGBA")
+            size = (round((frame.right - frame.left) * ppu), round((frame.top - frame.bottom) * ppu))
+            if sprite_image.size != size:
+                sprite_image = sprite_image.resize(size, Image.Resampling.LANCZOS)
+            position = (round(frame.left * ppu - left), round(top - frame.top * ppu))
+            # alpha_composite also clears the atlas RGB hidden under alpha=0.
+            canvas.alpha_composite(sprite_image, dest=position)
+        yield canvas
 
 
 @_release_readers
@@ -244,22 +286,7 @@ def inspect_clip_preview(bundle_path: str | Path, name: str) -> dict:
 
 @_release_readers
 def read_clip_preview(bundle_path: str | Path, name: str) -> dict:
-    frames, durations, info, (ppu, left, top) = _read_clip(_load_bundle(bundle_path), name)
+    frames, durations, info, origin = _read_clip(_load_bundle(bundle_path), name)
     indices, sampled_durations = _preview_indices(len(frames), durations)
-
-    def images():
-        for index in indices:
-            canvas = Image.new("RGBA", (info["width"], info["height"]))
-            frame = frames[index]
-            if frame is not None:
-                sprite_image = frame.sprite.image.convert("RGBA")
-                size = (round((frame.right - frame.left) * ppu), round((frame.top - frame.bottom) * ppu))
-                if sprite_image.size != size:
-                    sprite_image = sprite_image.resize(size, Image.Resampling.LANCZOS)
-                position = (round(frame.left * ppu - left), round(top - frame.top * ppu))
-                # alpha_composite also clears the atlas RGB hidden under alpha=0.
-                canvas.alpha_composite(sprite_image, dest=position)
-            yield canvas
-
-    return _preview(images(), [info["frame_names"][index] for index in indices],
+    return _preview(iter_clip_canvases(frames, info, origin, indices), [info["frame_names"][index] for index in indices],
                     sampled_durations, len(frames), info=info)

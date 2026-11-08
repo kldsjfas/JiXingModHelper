@@ -278,6 +278,7 @@
               <div class="preview-header"><div><span class="eyebrow">资源详情</span><h2 id="preview-title">还没选资源</h2></div><button id="close-resource-details" class="icon-button" type="button" aria-label="关闭资源详情" title="关闭资源详情">×</button></div>
               <div id="resource-detail-scroll" class="preview-scroll">
               <p id="preview-description">点中间列表的一项</p>
+              <p id="frame-animation-browse-reason" class="editor-status is-hidden"></p>
               <div id="preview-comparison" class="resource-comparison">
                 <div><h3 id="preview-original-heading" class="is-hidden">游戏原图</h3><div id="preview-media" class="preview-media"><span>等待选择</span></div></div>
                 <div id="preview-modified-card" class="is-hidden"><h3>作品集修改后</h3><div id="preview-modified" class="preview-media"><span>当前作品集无修改</span></div></div>
@@ -296,10 +297,12 @@
               <div class="resource-technical-details">
                 <h3>原始资源信息</h3>
                 <dl><dt>资源名称</dt><dd id="resource-original-name"></dd><dt>资源包</dt><dd id="resource-original-bundle"></dd></dl>
+                <p id="resource-animation-notice" class="editor-status"></p>
               </div>
               </details>
               </div>
               <div class="preview-actions">
+                <button id="use-frame-animation-browse" class="button purple wide is-hidden" type="button" disabled>用帧素材替换此动作</button>
                 <button id="go-studio" class="button primary wide" disabled>去制作替换</button>
                 <div class="action-row two-up">
                   <button id="export-primary" class="button ghost" disabled>导出</button>
@@ -315,6 +318,11 @@
           <div id="studio-empty" class="empty-state"><strong>从你想制作的内容开始</strong><span>图片、文字、动作与动态素材先到资源库选择，再查看对应的制作方式。音频和功能插件有独立工作台。</span><div class="action-row"><button class="button primary" data-page-link="browse">浏览资源</button><button class="button ghost" data-page-link="audio">语音与音乐</button><button class="button ghost" data-page-link="plugins">制作功能插件</button></div></div>
           <div id="studio-content" class="is-hidden">
             <article class="selection-banner"><span class="eyebrow">当前资源</span><h2 id="studio-title"></h2><p id="studio-description"></p></article>
+            <article id="frame-animation-studio-tools" class="card is-hidden">
+              <h3>使用逐帧素材制作动作</h3>
+              <p id="frame-animation-studio-reason" class="editor-status"></p>
+              <button id="use-frame-animation-studio" class="button purple" type="button" disabled>用帧素材替换此动作</button>
+            </article>
             <article id="emote-settings" class="card emote-settings is-hidden">
               <h3>自定义动态表情</h3>
               <p id="emote-current" class="editor-status"></p>
@@ -510,14 +518,8 @@
 
         <section id="page-character-animation" class="page">
           <article class="card character-animation-intro">
-            <div class="section-heading"><div><h2>替换角色动作</h2><p>将静态图片、动图或视频制作成角色动作，按动作分别保存到同一个素材包。</p></div><span class="count-badge">Toys 兼容 · 试用</span></div>
-            <p class="notice">需要 CharacterSkinMod 0.2.7 / SDK 2.8.6 或更新版本。导出 ZIP 后，在 Toys「角色素材库」中导入并加入方案。游戏内效果待实测。</p>
-            <p class="editor-status">角色编号按游戏内部 ID 填写，当前作品会用于同角色所有皮肤（SkinItemId 0）。</p>
-          </article>
-          <div class="character-animation-layout">
-            <article class="card character-animation-controls">
-              <h3>选择角色与动作</h3>
-              <div class="character-animation-fields">
+            <div class="section-heading"><h2>角色动作对照</h2><span class="count-badge">Toys 兼容 · 试用</span></div>
+              <div class="character-animation-fields character-animation-targets">
                 <label for="character-role-id">角色编号<input id="character-role-id" type="number" min="1" value="101"></label>
                 <label for="character-action">当前动作
                   <select id="character-action">
@@ -540,30 +542,46 @@
                     <option value="Fight">战斗</option>
                   </select>
                 </label>
-                <label for="character-animation-fps">序列帧帧率<input id="character-animation-fps" type="number" min="1" max="60" value="15"></label>
-                <label class="character-animation-loop" for="character-animation-loop"><input id="character-animation-loop" type="checkbox" checked>循环播放</label>
               </div>
-              <div class="action-row">
+            <p class="editor-status">需要 CharacterSkinMod 0.2.7 / SDK 2.8.6 或更新版本。导出 ZIP 后，在 Toys「角色素材库」中导入并加入方案。游戏内效果待实测。</p>
+          </article>
+          <div class="character-animation-comparison">
+            <article class="card character-animation-preview-card">
+              <h3>游戏原动作</h3>
+              <label class="character-animation-source-label" for="character-original-variant">原版外观参考
+                <select id="character-original-variant" disabled><option value="">选择角色与动作后读取</option></select>
+              </label>
+              <div id="character-animation-original" class="preview-media"><span>等待读取游戏原动作</span></div>
+              <p id="character-original-status" class="editor-status" role="status" aria-live="polite">选择角色与动作后读取可用的原版动画。</p>
+            </article>
+            <article class="card character-animation-preview-card">
+              <h3>你的替换动作</h3>
+              <div class="character-animation-source-label"><span>替换素材</span><div class="action-row">
                 <button id="character-import-media" class="button primary compact" type="button">导入图片、动图或视频</button>
                 <button id="character-import-folder" class="button ghost compact" type="button">导入 PNG 帧目录</button>
+              </div></div>
+              <div id="character-animation-preview" class="preview-media"><span>导入素材后预览当前动作</span></div>
+              <p id="character-animation-status" class="editor-status" role="status" aria-live="polite">选择动作，再导入对应的素材。</p>
+              <div class="action-row">
+                <button id="character-export-animation" class="button purple" type="button" disabled>导出角色动画 ZIP</button>
                 <button id="character-remove-action" class="button ghost compact" type="button" disabled>移除当前动作</button>
               </div>
+            </article>
+          </div>
+          <details class="card character-animation-settings">
+              <summary>动作列表与导出设置</summary>
               <p class="editor-status">静态图片作为单帧动作，动图保留原有时长，PNG 帧目录使用上面的帧率。视频导入需要 FFmpeg。</p>
+              <p class="editor-status">角色编号按游戏内部 ID 填写，当前作品会用于同角色所有皮肤（SkinItemId 0）。</p>
               <h3>已添加的动作</h3>
               <div id="character-animation-actions" class="character-animation-actions"><p class="notice">还没有添加动作。</p></div>
-              <p id="character-animation-notice" class="editor-status">缺失动作时，运行时会回退到待机动作或上一张自定义帧。建议至少添加待机、行走与战斗动作。</p>
+              <p id="character-animation-notice" class="editor-status">动作名按原版保留。缺失动作时，运行时会回退到待机动作或上一张自定义帧，建议补齐待机、行走及实际战斗动作。</p>
               <div class="character-animation-fields">
+                <label for="character-animation-fps">序列帧帧率<input id="character-animation-fps" type="number" min="1" max="60" value="15"></label>
+                <label class="character-animation-loop" for="character-animation-loop"><input id="character-animation-loop" type="checkbox" checked>循环播放</label>
                 <label for="character-animation-name">作品名称<input id="character-animation-name" type="text" value="我的角色动画" maxlength="80"></label>
                 <label for="character-animation-author">作者<input id="character-animation-author" type="text" maxlength="80" placeholder="可选，填写公开昵称"></label>
               </div>
-              <button id="character-export-animation" class="button purple wide" type="button" disabled>导出角色动画 ZIP</button>
-            </article>
-            <article class="card character-animation-preview-card">
-              <h3>当前动作预览</h3>
-              <div id="character-animation-preview" class="preview-media"><span>导入素材后预览当前动作</span></div>
-              <p id="character-animation-status" class="editor-status" role="status" aria-live="polite">选择动作，再导入对应的素材。</p>
-            </article>
-          </div>
+          </details>
         </section>
 
         <section id="page-plugins" class="page">

@@ -809,7 +809,9 @@
       item.title = `${displayName}
 ${row.name}
 ${row.bundle}`;
-      item.addEventListener("click", () => {
+      item.addEventListener("click", (event) => {
+        const selectedText = window.getSelection?.();
+        if (event?.detail > 0 && selectedText?.toString() && item.contains(selectedText.anchorNode)) return;
         if (state.multiSelectMode) {
           toggleSelectedResource(row.bundle, row.name);
         } else {
@@ -981,9 +983,9 @@ ${row.bundle}`;
     if (detail && !detail.contains(event.target)) closeResourceDetails(false);
   }
 
-  async function selectResource(bundle, name, trigger = null) {
+  async function selectResource(bundle, name, trigger = null, force = false) {
     if (trigger) state.resourceDetailTrigger = trigger;
-    if (state.selection?.bundle === bundle && state.selection?.name === name &&
+    if (!force && state.selection?.bundle === bundle && state.selection?.name === name &&
         (state.selection.asset_type || state.selection.kind) === state.assetType) {
       openResourceDetails();
       return;
@@ -1072,6 +1074,9 @@ ${row.bundle}`;
     const media = $("#preview-media");
     const go = $("#go-studio");
     syncResourceDetails();
+    $("#resource-detail")?.classList.toggle("is-animation-detail", isPlayableAnimation(sel));
+    const animationNotice = $("#resource-animation-notice");
+    if (animationNotice) animationNotice.textContent = state.previewAnimation?.notice || "";
     disposeAnimation("preview-media");
     renderBrowseComparison();
     if (!sel) {
@@ -1122,6 +1127,7 @@ ${row.bundle}`;
 
   function updateExportButtons() {
     const sel = state.selection;
+    renderFrameAnimationTools();
     const a = $("#export-primary");
     const b = $("#export-secondary");
     if (!a || !b) return;
@@ -1144,7 +1150,7 @@ ${row.bundle}`;
       a.textContent = "导出 OBJ";
       b.textContent = "导出";
     } else if (kind === "anim") {
-      a.textContent = "导出 JSON";
+      a.textContent = sel.frame_animation?.exportable ? "导出 PNG 帧包" : "导出 JSON";
       b.textContent = "导出二进制";
     } else if (kind === "dynamic") {
       if (sel.animation_kind === "cri_usm") {
@@ -1163,6 +1169,54 @@ ${row.bundle}`;
       a.textContent = "导出";
       b.textContent = "导出";
     }
+  }
+
+  function frameAnimationTarget(selection = state.selection) {
+    if ((selection?.asset_type || selection?.kind) !== "anim") return null;
+    const target = selection.frame_animation;
+    if (!Number.isInteger(target?.role_id) || target.role_id < 1 || target.role_id > 2147483647) return null;
+    if (typeof target.action !== "string" || !target.action.trim()) return null;
+    const result = { roleId: target.role_id, action: target.action };
+    if (Number.isFinite(target.fps) && target.fps >= 1 && target.fps <= 60) result.fps = target.fps;
+    if (typeof target.loop === "boolean") result.loop = target.loop;
+    result.preferred_source = { bundle: selection.bundle, name: selection.name };
+    return result;
+  }
+
+  function renderFrameAnimationTools() {
+    const selection = state.selection;
+    const animatedClip = (selection?.asset_type || selection?.kind) === "anim";
+    const target = frameAnimationTarget(selection);
+    const route = target ? "帧素材替换使用 Toys 兼容动作包，可在角色动画工作台导入图片、动图、帧目录或视频。"
+      : "请到角色动画工作台手动选择角色与动作，使用 Toys 兼容动作包替换。";
+    const missingAction = animatedClip && selection?.frame_animation?.role_id && !selection.frame_animation.action;
+    const detail = selection?.frame_animation?.reason || (missingAction ? "尚未识别当前动作名称，需要手动选择动作。" : "");
+    const reason = [detail, route].filter(Boolean).join(" ");
+    ["browse", "studio"].forEach((page) => {
+      const button = $(`#use-frame-animation-${page}`);
+      if (button) {
+        button.classList.toggle("is-hidden", !animatedClip);
+        button.disabled = !target;
+        button.title = animatedClip ? reason : "";
+      }
+      const message = $(`#frame-animation-${page}-reason`);
+      if (message) {
+        message.classList.toggle("is-hidden", !animatedClip || (page === "browse" && !!target));
+        message.textContent = animatedClip ? reason : "";
+        message.title = animatedClip ? reason : "";
+      }
+    });
+    $("#frame-animation-studio-tools")?.classList.toggle("is-hidden", !animatedClip);
+  }
+
+  async function useFrameAnimationTarget() {
+    const target = frameAnimationTarget();
+    if (!target) {
+      toast(state.selection?.frame_animation?.reason || "当前动作没有可靠的角色编号，请到角色动画工作台手动选择目标。", true);
+      return;
+    }
+    showPage("character-animation");
+    await window.CharacterAnimation?.selectTarget(target);
   }
 
   function selectionKey(selection = state.selection) {
@@ -1655,6 +1709,7 @@ ${row.bundle}`;
       state.emoteDraftVideoName = "";
     }
     state.selection = sel;
+    renderFrameAnimationTools();
     renderBrowseComparison();
     if (typeof sel?.emote?.draft_video_name === "string" && state.emoteDraftVideoName !== sel.emote.draft_video_name) {
       state.emoteDraftVideoName = sel.emote.draft_video_name;
@@ -1810,6 +1865,10 @@ ${row.bundle}`;
     const frameDurations = animation.frames.map((_, index) => Number(animation.durations?.[index]) || 1000 / (Number(animation.fps) || 30));
     const durationSeconds = frameDurations.reduce((total, duration) => total + duration, 0) / 1000;
     notice.textContent = [animation.notice, animation.truncated ? `抽样显示 ${animation.frames.length} / ${animation.total} 帧` : ""].filter(Boolean).join("；");
+    if (media.id === "preview-media") {
+      const detailsNotice = $("#resource-animation-notice");
+      if (detailsNotice) detailsNotice.textContent = notice.textContent;
+    }
     state.animationPlayers.set(media.id, player);
     const renderFrame = () => {
       img.src = animation.frames[player.index];
@@ -2442,6 +2501,8 @@ ${row.bundle}`;
     });
     $("#export-primary")?.addEventListener("click", () => exportSelection("primary"));
     $("#export-secondary")?.addEventListener("click", () => exportSelection("secondary"));
+    $("#use-frame-animation-browse")?.addEventListener("click", useFrameAnimationTarget);
+    $("#use-frame-animation-studio")?.addEventListener("click", useFrameAnimationTarget);
     $("#refresh-resource")?.addEventListener("click", refreshResource);
 
     $("#choose-replacement")?.addEventListener("click", () => chooseReplacement(false));
@@ -2723,9 +2784,14 @@ ${row.bundle}`;
   async function exportSelection(variant) {
     if (!state.selection) return;
     try {
-      const data = await call("export_selection", { busy: true, busyText: "导出中…" }, variant);
+      const kind = state.selection.asset_type || state.selection.kind;
+      const frameExport = variant === "primary" && kind === "anim" && state.selection.frame_animation?.exportable;
+      let data;
+      if (frameExport) data = await call("export_clip_frames", { busy: true, busyText: "导出逐帧 PNG…" });
+      else data = await call("export_selection", { busy: true, busyText: "导出中…" }, variant);
       if (!data) return;
-      toast(`已导出：${data.path}`);
+      if (frameExport) toast(`已导出 ${data.frame_count} 帧，保存在 ${data.path}`);
+      else toast(`已导出：${data.path}`);
     } catch (_) {}
   }
 
@@ -2735,7 +2801,7 @@ ${row.bundle}`;
     try {
       const sel = await call("refresh_selection", { busy: true, busyText: "刷新资源…" });
       if (key !== selectionKey() || !sel) return;
-      await selectResource(sel.bundle, sel.name);
+      await selectResource(sel.bundle, sel.name, null, true);
       toast("资源已刷新");
     } catch (_) {}
   }

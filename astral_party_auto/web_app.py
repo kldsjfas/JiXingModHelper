@@ -542,6 +542,24 @@ class DesktopApi:
         payload["display_name"] = resource_display_name(
             payload.get("name", ""), payload.get("asset_type", "texture"), payload.get("bundle", ""),
         )
+        if payload.get("asset_type") == "anim":
+            from .modkit.clip_frame_export import resolve_clip_identity
+            try:
+                identity = resolve_clip_identity(self.controller.aa_dirs, payload["bundle"], payload["name"])
+            except (OSError, ValueError, KeyError) as exc:
+                identity = {"role_id": None, "reason": str(exc)}
+            fps = float(payload.get("clip_sample_rate") or 30)
+            runtime_action = payload.get("clip_runtime_action") if payload.get("playable") else None
+            reason = payload.get("clip_runtime_binding_reason") or payload.get("reason", "")
+            if runtime_action and identity.get("role_id"):
+                reason = "导出逐帧包后可修改 PNG，再到角色动画工作台导入并制作动作包。"
+            elif runtime_action:
+                reason = identity.get("reason") or "尚未核对到唯一的角色编号，可先导出逐帧包。"
+            payload["frame_animation"] = {
+                "exportable": bool(payload.get("playable")), "role_id": identity.get("role_id"),
+                "action": runtime_action or "", "source_action": payload.get("name", ""),
+                "fps": fps, "loop": bool(payload.get("clip_loop")), "reason": reason,
+            }
         payload["preview_data"] = self._image_data(selection.get("preview"))
         comparison = self.controller.selection_comparison(selection, force=force_preview)
         payload["comparison"] = {"modified": None, "notice": ""}
@@ -953,6 +971,56 @@ class DesktopApi:
     @exposed
     def character_animation_preview(self, role_id: int, action: str) -> dict:
         return self._character_animations().preview(role_id, action)
+
+    @exposed
+    def character_animation_originals(self, role_id: int, action: str, preferred_bundle: str = "") -> dict:
+        from .modkit.clip_frame_export import find_character_clip_targets
+
+        targets = find_character_clip_targets(
+            self.controller.aa_dirs, role_id, "", typed_index=self.controller.typed_index,
+            preferred_bundle=preferred_bundle,
+        )
+        actions = {}
+        for target in targets:
+            actions.setdefault(target["action"], {"action": target["action"], "label": target.get("action_label") or target["action"]})
+        items = [target for target in targets if target["action"] == action]
+        if not items and action:
+            from .modkit.clip_preview import inspect_clip_preview
+
+            # 已保存工程使用运行时键，重新打开时按真实 Sprite 前缀找回原片段。
+            bindings = getattr(self, "_character_clip_bindings", {})
+            for target in targets:
+                source = self.controller.original_bundle_path(target["bundle"])
+                if source is None:
+                    continue
+                stat = source.stat()
+                key = (str(source.resolve()), stat.st_mtime_ns, stat.st_size, target["name"])
+                if key not in bindings:
+                    if len(bindings) >= 256:
+                        bindings.clear()
+                    bindings[key] = inspect_clip_preview(source, target["name"]).get("runtime_action")
+                if bindings[key] == action:
+                    items.append(target)
+            self._character_clip_bindings = bindings
+        return {
+            "items": items, "action_choices": list(actions.values()),
+            "reason": "" if items else "未找到同名的游戏原动作，请选择实际原动作或核对角色编号。",
+        }
+
+    @exposed
+    def character_animation_original_preview(self, role_id: int, action: str, bundle: str) -> dict:
+        from .modkit.clip_frame_export import find_character_clip_targets
+
+        targets = find_character_clip_targets(
+            self.controller.aa_dirs, role_id, action, typed_index=self.controller.typed_index,
+        )
+        target = next((item for item in targets if item["bundle"] == bundle and item["name"] == action), None)
+        if target is None:
+            raise ValueError("原版参考不属于当前角色或动作，请重新选择。")
+        source = self.controller.original_bundle_path(bundle)
+        if source is None:
+            raise ValueError("原版动作资源包缺失，请刷新资源索引。")
+        return self._animation_preview(source, target["name"], "sprite_clip")
 
     @exposed
     def character_animation_remove(self, role_id: int, action: str) -> dict:
@@ -1562,6 +1630,30 @@ class DesktopApi:
             return None
         output = self.controller.export_selection(file_path, fmt=fmt)
         return {"path": str(output)}
+
+    @exposed
+    def export_clip_frames(self) -> dict | None:
+        from .modkit.clip_frame_export import export_clip_frames, resolve_clip_identity
+
+        selection = dict(self.controller.selection or {})
+        if selection.get("asset_type") != "anim" or not selection.get("playable"):
+            raise ValueError(selection.get("reason") or "请选择可播放的动作片段。")
+        source = selection.get("original_path")
+        if not source:
+            raise ValueError("当前动作的原始资源包缺失，请刷新资源。")
+        clip_name = selection["name"]
+        filename = "".join(character for character in clip_name if character.isalnum() or character in "_-")[:60] or "animation"
+        output = self._pick_path("save", file_types=("PNG 逐帧动画包 (*.zip)",), save_filename=f"{filename}-frames.zip")
+        if output is None:
+            return None
+        if self.controller.selection != selection:
+            raise ValueError("当前动作已经改变，请重新导出。")
+        try:
+            identity = resolve_clip_identity(self.controller.aa_dirs, selection["bundle"], clip_name)
+        except (OSError, ValueError, KeyError) as exc:
+            identity = {"role_id": None, "action": clip_name, "reason": str(exc)}
+        return export_clip_frames(Path(source), clip_name, output, bundle_name=selection["bundle"],
+                                  role_id=identity.get("role_id"), identity=identity)
 
     @exposed
     def choose_replacement(self, sequence_folder: bool = False) -> dict | None:

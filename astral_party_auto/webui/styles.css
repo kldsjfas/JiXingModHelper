@@ -18,7 +18,14 @@
   --danger-hover: #ff7c88;
   --radius: 16px;
   --sidebar-width: 232px;
+  --font-body: 16px;
+  --font-control: 15px;
+  --font-secondary: 14px;
+  --font-caption: 13px;
+  --font-technical: 12px;
+  --font-card-title: 16px;
   font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+  font-size: var(--font-body);
   color: var(--text);
   background: var(--window);
 }
@@ -951,8 +958,16 @@ input {
 .plugin-build-log { max-height: 260px; overflow: auto; padding: 12px; border-radius: 9px; background: var(--window); color: var(--muted); font-size: 11px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .plugin-build-log:empty { display: none; }
 
-.character-animation-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, 1fr); gap: 16px; align-items: start; }
-.character-animation-layout .card { min-width: 0; margin-bottom: 0; }
+.character-animation-comparison { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: start; margin-bottom: 16px; }
+.character-animation-comparison .card { min-width: 0; margin-bottom: 0; }
+.character-animation-intro { padding: 14px; }
+.character-animation-fields.character-animation-targets label { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+.character-animation-targets input,
+.character-animation-targets select { min-width: 0; }
+.character-animation-source-label { display: grid; gap: 6px; min-height: 68px; margin: 12px 0; color: var(--muted); font-size: var(--font-secondary); }
+.character-animation-source-label .action-row { align-content: start; }
+.character-animation-settings > summary { cursor: pointer; font-size: var(--font-control); font-weight: 600; }
+.character-animation-settings > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .character-animation-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 14px 0; }
 .character-animation-fields label { display: grid; gap: 6px; min-width: 0; color: var(--muted); font-size: 12px; }
 .character-animation-fields .character-animation-loop { display: flex; align-items: center; align-self: end; min-height: 36px; gap: 8px; }
@@ -962,8 +977,8 @@ input {
 .character-animation-preview-card .preview-media { display: flex; align-items: center; justify-content: center; height: clamp(220px, 42vh, 380px); max-height: 380px; }
 .character-animation-preview-card .preview-media img { width: 100%; height: 100%; min-width: 0; min-height: 0; max-width: 100%; max-height: 100%; object-fit: contain; }
 
-@media (max-width: 999px) {
-  .character-animation-layout { grid-template-columns: minmax(0, 1fr); }
+@media (max-width: 899px) {
+  .character-animation-comparison { grid-template-columns: minmax(0, 1fr); }
 }
 
 @media (max-width: 480px) {
@@ -1762,18 +1777,18 @@ body.nav-open .sidebar {
   transition: width 120ms ease;
   box-shadow: none;
 }
-.sidebar:is(:hover, :focus-within),
+.sidebar:is(:hover, :has(:focus-visible)),
 body.nav-open .sidebar { width: 210px; box-shadow: 10px 0 28px #0005; }
 .sidebar .brand { min-height: 58px; padding: 0 2px 10px; justify-content: flex-start; }
 .sidebar .brand-logo { width: 44px; height: 44px; border-radius: 12px; }
 .sidebar .brand-copy,
 .sidebar .nav-label,
 .sidebar .nav-button em { display: none; }
-.sidebar:is(:hover, :focus-within) .brand-copy,
+.sidebar:is(:hover, :has(:focus-visible)) .brand-copy,
 body.nav-open .sidebar .brand-copy { display: grid; }
-.sidebar:is(:hover, :focus-within) .nav-label,
+.sidebar:is(:hover, :has(:focus-visible)) .nav-label,
 body.nav-open .sidebar .nav-label { display: inline; }
-.sidebar:is(:hover, :focus-within) .nav-button em,
+.sidebar:is(:hover, :has(:focus-visible)) .nav-button em,
 body.nav-open .sidebar .nav-button em { display: block; }
 .sidebar .brand-copy { max-width: 94px; }
 .sidebar .brand-copy strong { font-size: 17px; }
@@ -1786,7 +1801,8 @@ body.nav-open .sidebar .nav-button em { display: block; }
 .topbar h1 { flex: 1 1 auto; font-size: 22px; }
 .navigation-toggle-slot { display: inline-flex; flex: 0 0 34px; width: 34px; height: 34px; }
 #mobile-nav-toggle { position: relative; z-index: 71; display: inline-flex; flex: 0 0 34px; width: 34px; height: 34px; margin: 0; }
-.app-shell:has(.sidebar:is(:hover, :focus-within)) #mobile-nav-toggle,
+.app-shell:has(.sidebar:hover) #mobile-nav-toggle,
+.app-shell:has(.sidebar :focus-visible) #mobile-nav-toggle,
 body.nav-open #mobile-nav-toggle { position: fixed; top: 15px; left: 166px; }
 .topbar .status-pill { min-height: 30px; margin-left: 0; padding: 0 10px; font-size: 11px; }
 .header-game-actions { display: flex; flex: 0 0 auto; gap: 6px; }
@@ -1904,4 +1920,162 @@ body.nav-open #mobile-nav-toggle { position: fixed; top: 15px; left: 166px; }
 
 @media (prefers-reduced-motion: reduce) {
   .sidebar { transition: none; }
+}
+
+/* 共用字号覆盖各工作台，短窗口继续使用原来的独立滚动布局。 */
+body,
+.card p,
+.card li { font-size: var(--font-body); line-height: 1.65; }
+body,
+button,
+summary,
+h1,
+h2,
+h3,
+h4 { -webkit-user-select: none; user-select: none; }
+input:not([type="checkbox"]):not([type="range"]),
+textarea,
+[contenteditable="true"],
+.resource-name,
+.resource-bundle,
+.resource-technical-details dd,
+#game-path,
+#plugin-project-path,
+pre,
+code,
+[role="alert"],
+.is-error { -webkit-user-select: text; user-select: text; }
+.button,
+.button.compact,
+.project-button,
+.sidebar .nav-button,
+.sidebar-footer .nav-label,
+input,
+select,
+textarea { font-size: var(--font-control); }
+.button { min-height: 40px; }
+.button.compact { min-height: 36px; padding: 6px 11px; }
+input:not([type="checkbox"]):not([type="range"]),
+select { min-height: 40px; }
+.page label,
+.category-panel label,
+.character-animation-fields label,
+.plugin-form-grid label,
+.pack-header label,
+.text-tools label,
+.audio-editor label { font-size: var(--font-secondary); }
+.card .notice,
+.page .editor-status,
+.page .comparison-status,
+.page .section-heading p,
+.preview-panel p,
+.resource-technical-details,
+.resource-more-info > summary,
+.character-animation-intro .editor-status { font-size: var(--font-secondary); line-height: 1.6; }
+.card h2,
+.section-heading h2 { font-size: 21px; }
+.card h3,
+.preview-panel h2 { font-size: 18px; }
+.topbar h1 { font-size: 24px; }
+.topbar .status-pill { flex: 0 1 auto; min-width: 0; max-width: 160px; font-size: var(--font-caption); }
+.topbar .status-pill span { overflow: hidden; text-overflow: ellipsis; }
+.topbar-menu > summary,
+.header-game-actions .button { font-size: var(--font-secondary); }
+.header-game-actions .button { min-height: 38px; }
+.sidebar .nav-button { flex-basis: 42px; min-height: 42px; }
+.sidebar .brand-copy strong { font-size: 18px; }
+.browse-layout { grid-template-columns: 184px minmax(0, 1fr); }
+.category-button { min-height: 44px; font-size: var(--font-secondary); }
+.category-button small { font-size: var(--font-technical); }
+.category-group-title { font-size: var(--font-secondary); }
+.category-panel > p,
+.list-meta,
+#thumbnail-status,
+.resource-list .resource-category,
+.resource-list .resource-capabilities,
+.resource-list .character-badge,
+.resource-list .resource-duplicate { font-size: var(--font-caption); }
+.brand-copy span,
+.nav-button em,
+.list-row-main span,
+.mod-preview-caption,
+.draft-item small,
+.audio-resource small,
+.audio-source-badge,
+.audio-file-name,
+.audio-meta,
+.resource-thumbnail,
+.animation-position,
+.animation-notice { font-size: var(--font-caption); }
+.list-row-main strong,
+.audio-resource strong { font-size: var(--font-card-title); }
+.audio-detail-heading p,
+.audio-player-status,
+.audio-edit-hint,
+.audio-draft-item > span,
+.toast,
+#sequence-fps-label { font-size: var(--font-secondary); }
+.eyebrow,
+.mod-bundle-button,
+.resource-comparison h3 { font-size: var(--font-technical); }
+.resource-list .resource-name { font-size: var(--font-card-title); }
+.resource-list.is-grid { grid-template-columns: repeat(auto-fill, minmax(166px, 1fr)); }
+.resource-list.is-grid .resource-summary { min-height: 64px; }
+.preview-panel .preview-actions .button { min-height: 36px; }
+.preview-panel.is-animation-detail #preview-description { display: none; }
+.preview-panel .preview-media.has-animation { align-items: stretch; height: auto; max-height: none; }
+.preview-panel .preview-media.has-animation .animation-stage { display: flex; flex: 0 0 132px; align-items: center; justify-content: center; height: 132px; min-height: 132px; }
+.preview-panel .animation-controls { gap: 5px; padding: 8px; }
+.preview-panel .animation-buttons .button { min-height: 36px; padding: 6px 7px; font-size: var(--font-secondary); }
+.preview-panel .animation-buttons select { min-width: 68px; width: 68px; min-height: 36px; padding: 4px; font-size: var(--font-secondary); }
+.preview-panel .animation-notice { display: none; }
+.character-animation-comparison .preview-media.has-animation { align-items: stretch; height: auto; max-height: none; }
+.character-animation-comparison .preview-media.has-animation .animation-stage { display: flex; flex: 0 0 160px; align-items: center; justify-content: center; height: 160px; min-height: 160px; }
+.character-animation-comparison .animation-controls { gap: 5px; padding: 8px; }
+.character-animation-comparison .animation-buttons .button,
+.character-animation-comparison .animation-buttons select { font-size: var(--font-secondary); }
+.resource-technical-details dd,
+.resource-more-info .resource-technical-details h3,
+.resource-list .resource-bundle { font-size: var(--font-technical); }
+.count-badge,
+.app-version,
+.stat-card > span,
+.draft-item,
+.audio-item,
+.audio-summary,
+.audio-status,
+.update-panel small { font-size: var(--font-caption); }
+.plugin-source,
+#studio-text,
+#studio-original-text { font-size: var(--font-secondary); }
+.plugin-build-log,
+#log-output,
+.preview-media pre,
+.draft-detail .preview-media pre { font-size: var(--font-caption); line-height: 1.65; }
+#page-workshop .workshop-description,
+#page-workshop .workshop-item-description { font-size: var(--font-body); }
+#page-workshop .workshop-status,
+#page-workshop .workshop-safety-note,
+#page-workshop .workshop-item-meta,
+#page-workshop .workshop-list-hint,
+#page-workshop .workshop-facts,
+#page-workshop .workshop-check-result,
+#page-workshop .workshop-conflict-warning,
+#page-workshop .workshop-extra,
+#page-workshop .workshop-upload-notice,
+#page-workshop .workshop-submit-grid label { font-size: var(--font-secondary); }
+#page-workshop .workshop-category-tag,
+#page-workshop .workshop-count,
+#page-workshop .workshop-hash,
+#page-workshop .workshop-review-status,
+#page-workshop .workshop-receipt-number { font-size: var(--font-caption); }
+
+@media (min-width: 1100px) {
+  .browse-layout.is-detail-open { grid-template-columns: 184px minmax(0, 1fr) 300px; }
+}
+
+@media (max-width: 650px) {
+  .browse-layout { grid-template-columns: 148px minmax(0, 1fr); }
+  .resource-list.is-grid { grid-template-columns: repeat(auto-fill, minmax(128px, 1fr)); }
+  .topbar .status-pill { max-width: 118px; }
 }

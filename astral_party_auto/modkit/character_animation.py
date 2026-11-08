@@ -35,7 +35,7 @@ ACTION_CHOICES = [
 NOTICE = (
     "试用。导出的角色动画包需要 CesiumLoader 与 CharacterSkinMod，导入 Toys 后加入角色方案并应用。"
     "目标为该角色的全部皮肤。动作名必须与原角色实际动作一致，未填写动作可能播放待机或保留上一张自定义帧。"
-    "建议先补齐 Idle（待机）、Walk（行走）、Fight（战斗）及该角色的其它实际动作。游戏内效果仍需实测。"
+    "建议补齐待机、行走及角色实际使用的战斗动作，具体动作名以原版为准。游戏内效果仍需实测。"
 )
 DEFAULT_LAYOUT = {"PivotX": 0.5, "PivotY": 0.1, "PixelsPerUnit": 100.0,
                   "Scale": 1.0, "HudScale": 1.0, "HudOffsetX": 0.0, "HudOffsetY": 0.0}
@@ -214,6 +214,11 @@ class CharacterAnimationWorkspace:
             sizes = [path.stat().st_size for path in files]
             if any(not 0 < size <= MAX_FILE_BYTES for size in sizes) or sum(sizes) > MAX_PACKAGE_BYTES:
                 raise ValueError("单帧文件超过 64 MiB，或帧目录总大小超过 256 MiB。")
+            metadata = source / "clip-frames.json"
+            if metadata.is_file():
+                if metadata.stat().st_size > 2 * 1024 * 1024:
+                    raise ValueError("动作帧包清单超过支持范围。")
+                files.append(metadata)
             return files
         if not source.is_file() or not 0 < source.stat().st_size <= MAX_FILE_BYTES:
             raise ValueError("请选择不超过 64 MiB 的图片、动画或视频。")
@@ -222,6 +227,10 @@ class CharacterAnimationWorkspace:
     @staticmethod
     def _decode(source: Path, fps: float, scratch: Path):
         if source.is_dir():
+            if (source / "clip-frames.json").is_file():
+                from .clip_frame_export import read_clip_frame_directory
+                frames, durations, _metadata = read_clip_frame_directory(source)
+                return frames, durations
             files = CharacterAnimationWorkspace._source_files(source)
             if len(files) == 1:
                 source = files[0]
@@ -292,8 +301,12 @@ class CharacterAnimationWorkspace:
                     try:
                         if not 1 <= len(frames) <= MAX_SOURCE_FRAMES or len(frames) != len(durations):
                             raise ValueError("导入动作的帧数或时长不完整。")
-                        if sum(frame.width * frame.height for frame in frames) > MAX_TOTAL_PIXELS:
-                            raise ValueError("导入动作超过 6400 万总像素。")
+                        pixel_limit = MAX_TOTAL_PIXELS
+                        if source.is_dir() and (source / "clip-frames.json").is_file():
+                            from .clip_frame_export import MAX_CLIP_PACKAGE_PIXELS
+                            pixel_limit = MAX_CLIP_PACKAGE_PIXELS
+                        if sum(frame.width * frame.height for frame in frames) > pixel_limit:
+                            raise ValueError("导入动作超过支持的总像素范围。")
                         rounded_durations, elapsed, emitted = [], 0.0, 0
                         for duration in durations:
                             if not isinstance(duration, (int, float)) or not math.isfinite(duration) or not 0 < duration <= 60000:
