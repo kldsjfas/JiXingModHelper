@@ -33,6 +33,9 @@ function loadFrontend(responder) {
       addEventListener: (name, callback) => handlers.set(name, callback),
       trigger: (name, event) => handlers.get(name)?.(event),
       appendChild(child) { this.children.push(child); },
+      focus() { this.focused = true; },
+      scrollIntoView(options) { this.scrolledIntoView = options; },
+      querySelector() { return makeElement(); },
       remove() {},
     };
   }
@@ -51,8 +54,11 @@ function loadFrontend(responder) {
     window: { location: { hash: "" }, addEventListener() {} },
     document: {
       readyState: "loading", addEventListener() {},
+      body: makeElement(),
       querySelector: find,
-      querySelectorAll: (selector) => selector === "[data-resource-view]" ? switches : [],
+      getElementById: (id) => find(`#${id}`),
+      querySelectorAll: (selector) => selector === "[data-resource-view]" ? switches
+        : selector === ".resource-item" ? find("#resource-list").children : [],
       createElement: makeElement,
     },
     fetch: async (url, options) => {
@@ -63,11 +69,13 @@ function loadFrontend(responder) {
     },
   });
   const source = fs.readFileSync(path.join(__dirname, "../astral_party_auto/webui/app.js"), "utf8");
-  vm.runInContext(source.replace(/\}\)\(\);\s*$/, "globalThis.ui = { state, renderResources, renderCategories, setResourceView, toggleSelectedResource, retryResourceThumbnails };\n})();"), context);
+  vm.runInContext(source.replace(/\}\)\(\);\s*$/, "globalThis.ui = { state, renderResources, renderCategories, setResourceView, toggleSelectedResource, retryResourceThumbnails, selectResource, openResourceDetails, closeResourceDetails, handleWorkspaceEscape, handleResourceDetailFocus, toggleNavigationPinned, bindEvents, showPage, setCropStateForTest: (value) => { cropState = value; } };\n})();"), context);
   const ui = context.ui;
   ui.state.page = "browse";
   ui.state.assetTypes = [{ id: "texture", label: "贴图" }, { id: "mesh", label: "3D 模型" }];
-  return { ...ui, find, calls, switches };
+  find("#lightbox-overlay").classList.add("is-hidden");
+  return { ...ui, find, calls, switches, body: context.document.body,
+    setDrawerViewport: (matches) => { context.window.matchMedia = (query) => ({ matches: query.startsWith("(max-width") ? matches : !matches }); } };
 }
 
 const thumbnailData = "data:image/png;base64,YQ==";
@@ -188,9 +196,158 @@ async function checkCategoryGroups() {
   assert.equal(active.getAttribute("aria-pressed"), "true");
 }
 
+async function checkDetailsPreserveSelectionAndReturnFocus() {
+  const ui = loadFrontend(async () => { throw new Error("Reopening a selected resource must stay local"); });
+  const resource = row("selected");
+  const selection = { ...resource, asset_type: "texture" };
+  const candidate = { name: "keep-candidate.png" };
+  ui.state.resources = [resource];
+  ui.state.selection = selection;
+  ui.state.replacement = candidate;
+  ui.state.thumbnailCache.set("characters.bundle::selected", { data: thumbnailData });
+  ui.renderResources();
+  const card = ui.find("#resource-list").children[0];
+  await ui.selectResource(resource.bundle, resource.name, card);
+  assert.equal(ui.state.resourceDetailOpen, true);
+  assert.equal(ui.find("#resource-detail").getAttribute("aria-hidden"), "false");
+  assert.equal(ui.find("#close-resource-details").focused, true);
+  ui.closeResourceDetails();
+  assert.equal(ui.state.resourceDetailOpen, false);
+  assert.equal(card.focused, true);
+  assert.equal(ui.state.selection, selection);
+  assert.equal(ui.state.replacement, candidate);
+  await ui.selectResource(resource.bundle, resource.name, card);
+  assert.equal(ui.state.resourceDetailOpen, true);
+  assert.equal(ui.calls.length, 0);
+}
+
+async function checkEscapePriorityAndNavigationPin() {
+  const ui = loadFrontend(async () => ({}));
+  ui.state.selection = { bundle: "sample.bundle", name: "selected", asset_type: "texture" };
+  ui.openResourceDetails();
+  const menu = ui.find("#project-menu");
+  menu.open = true;
+  let prevented = 0;
+  const escape = () => ({ key: "Escape", preventDefault() { prevented += 1; } });
+  ui.handleWorkspaceEscape(escape());
+  assert.equal(menu.open, false);
+  assert.equal(ui.state.resourceDetailOpen, true, "The menu and resource drawer closed together");
+  ui.setCropStateForTest({ active: true });
+  ui.handleWorkspaceEscape(escape());
+  assert.equal(ui.state.resourceDetailOpen, true, "The crop dialog's Escape was consumed by the resource drawer");
+  ui.setCropStateForTest(null);
+  ui.handleWorkspaceEscape(escape());
+  assert.equal(ui.state.resourceDetailOpen, false);
+  assert.equal(prevented, 2);
+  ui.toggleNavigationPinned();
+  assert.equal(ui.state.navigationPinned, true);
+  assert.equal(ui.body.classList.contains("nav-open"), true);
+  assert.equal(ui.find("#sidebar-pin").getAttribute("aria-pressed"), "true");
+  ui.openResourceDetails();
+  ui.showPage("plugins");
+  assert.equal(ui.state.resourceDetailOpen, false);
+  assert.equal(ui.body.classList.contains("nav-open"), true, "Page navigation cleared a pinned navigation rail");
+  ui.toggleNavigationPinned();
+  assert.equal(ui.body.classList.contains("nav-open"), false);
+  ui.bindEvents();
+  ui.toggleNavigationPinned();
+  ui.find("#mobile-nav-toggle").trigger("click");
+  assert.equal(ui.state.navigationPinned, false, "Explicit collapse kept the navigation pinned");
+  assert.equal(ui.body.classList.contains("nav-open"), false);
+  assert.equal(ui.find("#sidebar-pin").getAttribute("aria-pressed"), "false");
+  assert.equal(ui.find("#mobile-nav-toggle").getAttribute("aria-expanded"), "false");
+}
+
+async function checkLateSelectionCannotReopenDetails() {
+  const response = deferred();
+  const ui = loadFrontend(async () => await response.promise);
+  const pending = ui.selectResource("sample.bundle", "late");
+  ui.state.page = "plugins";
+  ui.state.browseRefreshSeq += 1;
+  response.resolve({ bundle: "sample.bundle", name: "late", asset_type: "texture" });
+  await pending;
+  assert.equal(ui.state.selection, null);
+  assert.equal(ui.state.resourceDetailOpen, false);
+}
+
+async function checkDrawerClosesBeforeFocusCanBeObscured() {
+  const ui = loadFrontend(async () => ({}));
+  const inside = {};
+  const outside = {};
+  const selection = { bundle: "sample.bundle", name: "selected", asset_type: "texture" };
+  const candidate = { name: "keep-candidate.png" };
+  ui.state.selection = selection;
+  ui.state.replacement = candidate;
+  ui.find("#resource-detail").contains = (target) => target === inside;
+  ui.setDrawerViewport(true);
+  ui.openResourceDetails();
+  ui.handleResourceDetailFocus({ target: inside });
+  assert.equal(ui.state.resourceDetailOpen, true);
+  ui.handleResourceDetailFocus({ target: outside });
+  assert.equal(ui.state.resourceDetailOpen, false);
+  assert.equal(ui.state.selection, selection);
+  assert.equal(ui.state.replacement, candidate);
+  ui.setDrawerViewport(false);
+  ui.openResourceDetails();
+  ui.handleResourceDetailFocus({ target: outside });
+  assert.equal(ui.state.resourceDetailOpen, true, "The side-by-side detail panel behaved like a modal drawer");
+}
+
+async function checkWideDetailsKeepSelectedCardVisible() {
+  const ui = loadFrontend(async () => ({}));
+  const resource = row("last");
+  ui.state.resources = [resource];
+  ui.state.selection = { ...resource, asset_type: "texture" };
+  ui.state.thumbnailCache.set("characters.bundle::last", { data: thumbnailData });
+  ui.renderResources();
+  const card = ui.find("#resource-list").children[0];
+  ui.setDrawerViewport(false);
+  ui.openResourceDetails();
+  assert.equal(card.scrolledIntoView.block, "nearest");
+  assert.equal(card.scrolledIntoView.inline, "nearest");
+  card.scrolledIntoView = null;
+  ui.setDrawerViewport(true);
+  ui.openResourceDetails();
+  assert.equal(card.scrolledIntoView, null, "Opening an overlay drawer changed the grid scroll position");
+}
+
+async function checkLayoutStructure() {
+  const html = fs.readFileSync(path.join(__dirname, "../astral_party_auto/webui/index.html"), "utf8");
+  assert.equal((html.match(/id="sidebar-launch"/g) || []).length, 1);
+  assert.equal((html.match(/id="sidebar-restore"/g) || []).length, 1);
+  const navigation = html.slice(html.indexOf('<aside id="main-navigation"'), html.indexOf("</aside>"));
+  assert.doesNotMatch(navigation, /id="sidebar-(launch|restore)"/);
+  assert.equal((navigation.match(/class="nav-button[^\"]*" data-page=/g) || []).length, 10);
+  assert.equal((navigation.match(/data-page="[^\"]+" aria-label="[^\"]+" title="[^\"]+"/g) || []).length, 10);
+  assert.match(html, /id="resource-detail-scroll"/);
+  assert.match(html, /id="close-resource-details"/);
+  assert.match(html, /<details id="resource-more-info" class="resource-more-info">\s*<summary>更多资源信息<\/summary>/);
+  const styles = fs.readFileSync(path.join(__dirname, "../astral_party_auto/webui/styles.css"), "utf8");
+  assert.match(styles, /\.workspace\s*\{\s*grid-column:\s*2\s*;/, "The fixed navigation rail left the workspace in the narrow grid column");
+  assert.match(styles, /\.resource-list\.is-grid\s*\{[^}]*grid-auto-rows:\s*max-content/, "Grid rows can shrink below the thumbnail content");
+}
+
+async function checkCharacterAnimationWorkbenchStructure() {
+  const html = fs.readFileSync(path.join(__dirname, "../astral_party_auto/webui/index.html"), "utf8");
+  const start = html.indexOf('<section id="page-character-animation"');
+  const section = html.slice(start, html.indexOf("</section>", start));
+  const controls = ["character-role-id", "character-action", "character-animation-fps", "character-animation-loop",
+    "character-import-media", "character-import-folder", "character-remove-action", "character-export-animation",
+    "character-animation-actions", "character-animation-preview", "character-animation-status",
+    "character-animation-notice", "character-animation-name", "character-animation-author"];
+  controls.forEach((id) => assert.ok(section.includes(`id="${id}"`), `Missing animation workbench control ${id}`));
+  assert.equal((section.match(/<option value=/g) || []).length, 17);
+  assert.match(section, /CharacterSkinMod 0\.2\.7 \/ SDK 2\.8\.6/);
+  assert.match(section, /id="character-animation-loop" type="checkbox" checked/);
+  assert.match(html, /src="character-animation\.js"/);
+}
+
 async function main() {
   const checks = [checkBatchesAndReadOnlySelection, checkOldPageCannotPaintNewPage, checkFailureRetryAndUnsafeImage,
-    checkTypesAndMetadataAreEscaped, checkCategoryGroups];
+    checkTypesAndMetadataAreEscaped, checkCategoryGroups, checkDetailsPreserveSelectionAndReturnFocus,
+    checkEscapePriorityAndNavigationPin, checkLateSelectionCannotReopenDetails,
+    checkDrawerClosesBeforeFocusCanBeObscured, checkWideDetailsKeepSelectedCardVisible,
+    checkLayoutStructure, checkCharacterAnimationWorkbenchStructure];
   for (const check of checks) {
     await check();
     console.log(`PASS: ${check.name}`);

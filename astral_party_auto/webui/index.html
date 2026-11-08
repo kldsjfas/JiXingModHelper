@@ -10,7 +10,7 @@
 </head>
 <body>
   <div id="app" class="app-shell is-loading">
-    <aside class="sidebar" aria-label="主导航">
+    <aside id="main-navigation" class="sidebar" aria-label="主导航">
       <div class="brand">
         <img class="brand-logo" src="app_icon.png" alt="">
         <div class="brand-copy">
@@ -20,29 +20,30 @@
       </div>
 
       <nav class="nav-list">
-        <button class="nav-button is-active" data-page="dashboard"><span class="nav-icon">⌂</span><span>仪表盘</span></button>
-        <button class="nav-button" data-page="manage"><span class="nav-icon">◇</span><span>Mod 管理</span></button>
-        <button class="nav-button" data-page="workshop"><span class="nav-icon">▧</span><span>Mod 工坊</span></button>
-        <button class="nav-button" data-page="browse"><span class="nav-icon">⌕</span><span>浏览资源</span></button>
-        <button class="nav-button" data-page="audio"><span class="nav-icon">♫</span><span>音频工作台</span><em id="nav-audio-count"></em></button>
-        <button class="nav-button" data-page="plugins"><span class="nav-icon">⌘</span><span>功能插件</span></button>
-        <button class="nav-button" data-page="studio"><span class="nav-icon">✦</span><span>制作替换</span></button>
-        <button class="nav-button" data-page="pack"><span class="nav-icon">▣</span><span>我的作品集</span><em id="nav-pack-count"></em></button>
-        <button class="nav-button" data-page="logs"><span class="nav-icon">≡</span><span>运行日志</span></button>
+        <button class="nav-button is-active" data-page="dashboard" aria-label="仪表盘" title="仪表盘"><span class="nav-icon" aria-hidden="true">⌂</span><span class="nav-label">仪表盘</span></button>
+        <button class="nav-button" data-page="manage" aria-label="Mod 管理" title="Mod 管理"><span class="nav-icon" aria-hidden="true">◇</span><span class="nav-label">Mod 管理</span></button>
+        <button class="nav-button" data-page="workshop" aria-label="Mod 工坊" title="Mod 工坊"><span class="nav-icon" aria-hidden="true">▧</span><span class="nav-label">Mod 工坊</span></button>
+        <button class="nav-button" data-page="browse" aria-label="浏览资源" title="浏览资源"><span class="nav-icon" aria-hidden="true">⌕</span><span class="nav-label">浏览资源</span></button>
+        <button class="nav-button" data-page="character-animation" aria-label="角色动画" title="角色动画"><span class="nav-icon" aria-hidden="true">▥</span><span class="nav-label">角色动画</span></button>
+        <button class="nav-button" data-page="audio" aria-label="音频工作台" title="音频工作台"><span class="nav-icon" aria-hidden="true">♫</span><span class="nav-label">音频工作台</span><em id="nav-audio-count"></em></button>
+        <button class="nav-button" data-page="plugins" aria-label="功能插件" title="功能插件"><span class="nav-icon" aria-hidden="true">⌘</span><span class="nav-label">功能插件</span></button>
+        <button class="nav-button" data-page="studio" aria-label="制作替换" title="制作替换"><span class="nav-icon" aria-hidden="true">✦</span><span class="nav-label">制作替换</span></button>
+        <button class="nav-button" data-page="pack" aria-label="我的作品集" title="我的作品集"><span class="nav-icon" aria-hidden="true">▣</span><span class="nav-label">我的作品集</span><em id="nav-pack-count"></em></button>
+        <button class="nav-button" data-page="logs" aria-label="运行日志" title="运行日志"><span class="nav-icon" aria-hidden="true">≡</span><span class="nav-label">运行日志</span></button>
       </nav>
 
       <div class="sidebar-footer">
-        <button id="sidebar-launch" class="button primary wide">启动游戏</button>
-        <button id="sidebar-restore" class="button danger wide">完全还原</button>
-        <span>安装前自动备份，可随时还原</span>
+        <button id="sidebar-pin" class="nav-button" aria-label="固定展开导航" title="固定展开导航" aria-pressed="false"><span class="nav-icon" aria-hidden="true">⇥</span><span class="nav-label">固定展开</span></button>
       </div>
     </aside>
 
     <section class="workspace">
       <header class="topbar">
-        <button id="mobile-nav-toggle" class="icon-button" aria-label="展开导航">☰</button>
+        <span class="navigation-toggle-slot"><button id="mobile-nav-toggle" class="icon-button" aria-label="展开导航" title="展开导航" aria-controls="main-navigation" aria-expanded="false">☰</button></span>
         <h1 id="page-title">仪表盘</h1>
         <div id="header-status" class="status-pill"><i></i><span>正在连接后端…</span></div>
+        <div class="header-game-actions" role="group" aria-label="游戏操作"><button id="sidebar-launch" class="button primary compact">启动游戏</button><button id="sidebar-restore" class="button ghost compact restore-game-button">完全还原</button></div>
+        <details id="project-menu" class="topbar-menu"><summary title="更新、项目与交流群">更多</summary>
         <div id="project-tools" class="project-tools">
           <span id="app-version" class="app-version" title="当前助手版本">版本读取中</span>
           <button id="check-updates" class="project-button" aria-expanded="false" aria-controls="update-panel" disabled><span aria-hidden="true">↻</span><span id="update-button-label">检查更新</span></button>
@@ -56,6 +57,7 @@
             <small class="update-note">仅检查版本；下载和安装由你决定。</small>
           </section>
         </div>
+        </details>
       </header>
 
       <main id="main-content" class="main-content">
@@ -271,23 +273,18 @@
               </div>
             </section>
 
-            <aside class="panel preview-panel">
-              <div><span class="eyebrow">预览</span><h2 id="preview-title">还没选资源</h2><p id="preview-description">点中间列表的一项</p></div>
+            <button id="resource-detail-backdrop" class="resource-detail-backdrop" type="button" aria-label="关闭资源详情" tabindex="-1"></button>
+            <aside id="resource-detail" class="panel preview-panel" aria-label="资源详情" aria-hidden="true" tabindex="-1">
+              <div class="preview-header"><div><span class="eyebrow">资源详情</span><h2 id="preview-title">还没选资源</h2></div><button id="close-resource-details" class="icon-button" type="button" aria-label="关闭资源详情" title="关闭资源详情">×</button></div>
+              <div id="resource-detail-scroll" class="preview-scroll">
+              <p id="preview-description">点中间列表的一项</p>
               <div id="preview-comparison" class="resource-comparison">
                 <div><h3 id="preview-original-heading" class="is-hidden">游戏原图</h3><div id="preview-media" class="preview-media"><span>等待选择</span></div></div>
                 <div id="preview-modified-card" class="is-hidden"><h3>作品集修改后</h3><div id="preview-modified" class="preview-media"><span>当前作品集无修改</span></div></div>
               </div>
               <p id="preview-comparison-notice" class="comparison-status is-hidden" role="status"></p>
-              <div class="preview-actions">
-                <button id="go-studio" class="button primary wide" disabled>去制作替换</button>
-                <div class="action-row two-up">
-                  <button id="export-primary" class="button ghost" disabled>导出</button>
-                  <button id="export-secondary" class="button ghost" disabled>副格式</button>
-                </div>
-                <div class="action-row">
-                  <button id="refresh-resource" class="button ghost compact" disabled>刷新资源</button>
-                </div>
-              </div>
+              <details id="resource-more-info" class="resource-more-info">
+              <summary>更多资源信息</summary>
               <div class="character-label-box">
                 <label for="resource-character">角色标注</label>
                 <select id="resource-character"></select>
@@ -296,10 +293,20 @@
                   <button id="apply-bundle-character" class="button ghost compact" disabled>整包标注</button>
                 </div>
               </div>
-              <details class="resource-technical-details">
-                <summary>原始资源信息</summary>
+              <div class="resource-technical-details">
+                <h3>原始资源信息</h3>
                 <dl><dt>资源名称</dt><dd id="resource-original-name"></dd><dt>资源包</dt><dd id="resource-original-bundle"></dd></dl>
+              </div>
               </details>
+              </div>
+              <div class="preview-actions">
+                <button id="go-studio" class="button primary wide" disabled>去制作替换</button>
+                <div class="action-row two-up">
+                  <button id="export-primary" class="button ghost" disabled>导出</button>
+                  <button id="export-secondary" class="button ghost" disabled>副格式</button>
+                </div>
+                <button id="refresh-resource" class="button ghost compact" disabled>刷新资源</button>
+              </div>
             </aside>
           </div>
         </section>
@@ -501,6 +508,64 @@
           </article>
         </section>
 
+        <section id="page-character-animation" class="page">
+          <article class="card character-animation-intro">
+            <div class="section-heading"><div><h2>替换角色动作</h2><p>将静态图片、动图或视频制作成角色动作，按动作分别保存到同一个素材包。</p></div><span class="count-badge">Toys 兼容 · 试用</span></div>
+            <p class="notice">需要 CharacterSkinMod 0.2.7 / SDK 2.8.6 或更新版本。导出 ZIP 后，在 Toys「角色素材库」中导入并加入方案。游戏内效果待实测。</p>
+            <p class="editor-status">角色编号按游戏内部 ID 填写，当前作品会用于同角色所有皮肤（SkinItemId 0）。</p>
+          </article>
+          <div class="character-animation-layout">
+            <article class="card character-animation-controls">
+              <h3>选择角色与动作</h3>
+              <div class="character-animation-fields">
+                <label for="character-role-id">角色编号<input id="character-role-id" type="number" min="1" value="101"></label>
+                <label for="character-action">当前动作
+                  <select id="character-action">
+                    <option value="Idle">待机</option>
+                    <option value="Walk">行走</option>
+                    <option value="Walk-back">后退</option>
+                    <option value="Show">登场</option>
+                    <option value="Talent">天赋</option>
+                    <option value="Hit">受击</option>
+                    <option value="Hit-01">受击 1</option>
+                    <option value="Hit-02">受击 2</option>
+                    <option value="Cheer">欢呼</option>
+                    <option value="Cry">哭泣</option>
+                    <option value="Die">倒下</option>
+                    <option value="Eat">进食</option>
+                    <option value="Hospitalized">住院</option>
+                    <option value="Vomit">呕吐</option>
+                    <option value="Lose">失败</option>
+                    <option value="Electricshock">触电</option>
+                    <option value="Fight">战斗</option>
+                  </select>
+                </label>
+                <label for="character-animation-fps">序列帧帧率<input id="character-animation-fps" type="number" min="1" max="60" value="15"></label>
+                <label class="character-animation-loop" for="character-animation-loop"><input id="character-animation-loop" type="checkbox" checked>循环播放</label>
+              </div>
+              <div class="action-row">
+                <button id="character-import-media" class="button primary compact" type="button">导入图片、动图或视频</button>
+                <button id="character-import-folder" class="button ghost compact" type="button">导入 PNG 帧目录</button>
+                <button id="character-remove-action" class="button ghost compact" type="button" disabled>移除当前动作</button>
+              </div>
+              <p class="editor-status">静态图片作为单帧动作，动图保留原有时长，PNG 帧目录使用上面的帧率。视频导入需要 FFmpeg。</p>
+              <h3>已添加的动作</h3>
+              <div id="character-animation-actions" class="character-animation-actions"><p class="notice">还没有添加动作。</p></div>
+              <p id="character-animation-notice" class="editor-status">缺失动作时，运行时会回退到待机动作或上一张自定义帧。建议至少添加待机、行走与战斗动作。</p>
+              <div class="character-animation-fields">
+                <label for="character-animation-name">作品名称<input id="character-animation-name" type="text" value="我的角色动画" maxlength="80"></label>
+                <label for="character-animation-author">作者<input id="character-animation-author" type="text" maxlength="80" placeholder="可选，填写公开昵称"></label>
+              </div>
+              <button id="character-export-animation" class="button purple wide" type="button" disabled>导出角色动画 ZIP</button>
+            </article>
+            <article class="card character-animation-preview-card">
+              <h3>当前动作预览</h3>
+              <div id="character-animation-preview" class="preview-media"><span>导入素材后预览当前动作</span></div>
+              <p id="character-animation-status" class="editor-status" role="status" aria-live="polite">选择动作，再导入对应的素材。</p>
+            </article>
+          </div>
+        </section>
+
         <section id="page-plugins" class="page">
           <article class="card">
             <div class="section-heading"><div><h2>制作功能插件</h2><p>从模板创建可编辑的 C# 工程，编译为 CesiumLoader 插件 ZIP。</p></div></div>
@@ -583,6 +648,7 @@
   <script src="game-location.js" defer></script>
   <script src="emote-batch.js" defer></script>
   <script src="plugins.js" defer></script>
+  <script src="character-animation.js" defer></script>
   <script src="app.js" defer></script>
 </body>
 </html>

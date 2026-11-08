@@ -93,3 +93,5 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tests/test_plugin_studio_ui.js
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tests/test_character_animation_ui.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

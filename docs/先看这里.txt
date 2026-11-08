@@ -1,8 +1,8 @@
-吉星派对 Mod 助手 v1.4.0-preview.1
+吉星派对 Mod 助手 v1.4.0-preview.2
 
 一、第一次使用
 1. 将整个 ZIP 解压到你有写入权限的新文件夹，保留 _internal 和 tools。
-2. 双击 JiXingModHelper.exe，确认窗口顶部显示 v1.4.0-preview.1。
+2. 双击 JiXingModHelper.exe，确认窗口顶部显示 v1.4.0-preview.2。
 3. 首页会自动连接游戏；未找到或连接了另一服时，使用「选择游戏位置」指定安装目录或实际游戏 EXE。
 4. 到「浏览资源」刷新索引，按中文分类看缩略图，也可搜索中文用途、编号或原始名称。
 
@@ -42,3 +42,8 @@ https://developer.microsoft.com/microsoft-edge/webview2/
 在「功能插件」创建帧率或加载通知工程，可编辑源码并编译为独立 ZIP。
 工程与成品保存在 made_mods/plugins，配合 CesiumLoader 加载，游戏内效果待实测。
 这是预览版，完整操作与支持范围见「使用说明.md」。
+
+九、角色动画
+进入「角色动画」为同一角色分别导入待机、行走、战斗等素材，支持静态图片、动图、PNG帧目录和视频。
+预览读取已保存的真实帧，导出的ZIP在Toys角色素材库导入并加入方案，需要CesiumLoader与CharacterSkinMod。
+缺失动作可能播放待机或上一张自定义帧，角色编号需与游戏内部ID一致，游戏内效果待实测。

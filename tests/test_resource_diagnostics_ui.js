@@ -20,7 +20,7 @@ function loadUi() {
       classList: { add() {}, remove() {}, toggle() {} },
       querySelector: (selector) => find(`${id}-${selector}`),
       focus() { this.focused = true; }, select() { this.selected = true; },
-      remove() {}, removeAttribute() {},
+      remove() {}, setAttribute() {}, removeAttribute() {},
     });
     return elements.get(id);
   };

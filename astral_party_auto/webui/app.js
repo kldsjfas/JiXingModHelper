@@ -18,6 +18,7 @@
     browse: "浏览资源",
     audio: "音频工作台",
     plugins: "功能插件",
+    "character-animation": "角色动画",
     studio: "制作替换",
     pack: "我的作品集",
     logs: "运行日志",
@@ -32,6 +33,9 @@
 
   const state = {
     page: "dashboard",
+    navigationPinned: false,
+    resourceDetailOpen: false,
+    resourceDetailTrigger: null,
     dashboard: null,
     resourceDiagnosticsRequest: 0,
     resourceDiagnosticsLoading: false,
@@ -192,6 +196,7 @@
     if (state.page === "audio") window.AudioWorkbench?.leave();
     if (state.page === "workshop") window.ModWorkshop?.leave();
     if (state.page === "studio") window.VisualAnimation?.leave();
+    if (state.page === "character-animation") window.CharacterAnimation?.leave();
     if (state.page === "pack") window.EmoteBatch?.leave();
     rememberTextEdit();
     state.studioRequest += 1;
@@ -207,7 +212,9 @@
     renderResourceDiagnostics();
     stopAllAnimations();
     closeLightbox();
+    if (page !== "browse") closeResourceDetails(false);
     state.page = page;
+    $("#main-content")?.classList.toggle("is-browsing", page === "browse");
     $("#main-content").scrollTop = 0;
     $$(".page").forEach((el) => el.classList.toggle("is-active", el.id === `page-${page}`));
     $$(".nav-button").forEach((btn) =>
@@ -215,10 +222,11 @@
     );
     const title = $("#page-title");
     if (title) title.textContent = PAGE_TITLES[page];
-    document.body.classList.remove("nav-open");
+    if (!state.navigationPinned) setNavigationExpanded(false);
     if (page === "browse") { refreshBrowse(); renderPreview(); refreshSelectionComparison(); }
     if (page === "audio") window.AudioWorkbench?.enter();
     if (page === "plugins") window.PluginStudio?.enter();
+    if (page === "character-animation") window.CharacterAnimation?.enter();
     if (page === "workshop") window.ModWorkshop?.enter();
     if (page === "studio") refreshStudio();
     if (page === "pack") { window.EmoteBatch?.enter(); refreshPack(); }
@@ -768,6 +776,7 @@
       const item = document.createElement("button");
       item.type = "button";
       item.className = "resource-item";
+      item.dataset.resourceKey = key;
       const isSelected = state.multiSelectMode && isResourceSelected(row.bundle, row.name);
       if (!state.multiSelectMode && key === selKey) item.classList.add("is-active");
       if (isSelected) item.classList.add("is-selected");
@@ -804,7 +813,7 @@ ${row.bundle}`;
         if (state.multiSelectMode) {
           toggleSelectedResource(row.bundle, row.name);
         } else {
-          selectResource(row.bundle, row.name);
+          selectResource(row.bundle, row.name, item);
         }
       });
       list.appendChild(item);
@@ -900,10 +909,90 @@ ${row.bundle}`;
     loadResourceThumbnails();
   }
 
-  async function selectResource(bundle, name) {
+  function syncResourceDetails() {
+    const open = state.page === "browse" && !!state.selection && state.resourceDetailOpen;
+    $(".browse-layout")?.classList.toggle("has-selection", !!state.selection);
+    $(".browse-layout")?.classList.toggle("is-detail-open", open);
+    $("#resource-detail")?.setAttribute("aria-hidden", String(!open));
+  }
+
+  function openResourceDetails() {
+    if (!state.selection || state.page !== "browse") return;
+    state.resourceDetailOpen = true;
+    syncResourceDetails();
+    $("#close-resource-details")?.focus?.({ preventScroll: true });
+    if (window.matchMedia?.("(min-width: 1100px)")?.matches) {
+      const key = resourceKey(state.selection.bundle, state.selection.name);
+      const card = $$(".resource-item").find((item) => item.dataset.resourceKey === key);
+      card?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+    }
+  }
+
+  function closeResourceDetails(returnFocus = true) {
+    state.resourceDetailOpen = false;
+    syncResourceDetails();
+    if (returnFocus && state.page === "browse") {
+      const key = state.selection && resourceKey(state.selection.bundle, state.selection.name);
+      const card = $$(".resource-item").find((item) => item.dataset.resourceKey === key) || state.resourceDetailTrigger;
+      card?.focus?.({ preventScroll: true });
+    }
+  }
+
+  function setNavigationExpanded(expanded) {
+    document.body.classList.toggle("nav-open", expanded);
+    const toggle = $("#mobile-nav-toggle");
+    toggle?.setAttribute("aria-expanded", String(expanded));
+    toggle?.setAttribute("aria-label", expanded ? "收起导航" : "展开导航");
+    toggle?.setAttribute("title", expanded ? "收起导航" : "展开导航");
+  }
+
+  function toggleNavigationPinned() {
+    state.navigationPinned = !state.navigationPinned;
+    setNavigationExpanded(state.navigationPinned);
+    const pin = $("#sidebar-pin");
+    pin?.setAttribute("aria-pressed", String(state.navigationPinned));
+    pin?.setAttribute("aria-label", state.navigationPinned ? "取消固定导航" : "固定展开导航");
+    pin?.setAttribute("title", state.navigationPinned ? "取消固定导航" : "固定展开导航");
+  }
+
+  function handleWorkspaceEscape(event) {
+    if (event.key !== "Escape" || event.defaultPrevented || cropState || cropPending) return;
+    const lightbox = $("#lightbox-overlay");
+    if (lightbox && !lightbox.classList.contains("is-hidden")) return;
+    const menu = $("#project-menu");
+    if (menu?.open) {
+      menu.open = false;
+      menu.querySelector("summary")?.focus?.();
+      event.preventDefault();
+      return;
+    }
+    if (state.page === "browse" && state.resourceDetailOpen) {
+      closeResourceDetails();
+      event.preventDefault();
+      return;
+    }
+    if (!state.navigationPinned) setNavigationExpanded(false);
+  }
+
+  function handleResourceDetailFocus(event) {
+    const drawer = window.matchMedia?.("(max-width: 1099px)")?.matches;
+    if (!drawer || state.page !== "browse" || !state.resourceDetailOpen) return;
+    const detail = $("#resource-detail");
+    if (detail && !detail.contains(event.target)) closeResourceDetails(false);
+  }
+
+  async function selectResource(bundle, name, trigger = null) {
+    if (trigger) state.resourceDetailTrigger = trigger;
+    if (state.selection?.bundle === bundle && state.selection?.name === name &&
+        (state.selection.asset_type || state.selection.kind) === state.assetType) {
+      openResourceDetails();
+      return;
+    }
     closeCropModal();
     rememberTextEdit();
     const request = ++state.selectionRequest;
+    const browseRequest = state.browseRefreshSeq;
+    const selectionPage = state.page;
     state.studioRequest += 1;
     state.comparisonRequest += 1;
     state.replacementRequest += 1;
@@ -912,6 +1001,7 @@ ${row.bundle}`;
     closeLightbox();
     state.replacement = null;
     state.selection = null;
+    state.resourceDetailOpen = false;
     renderPreview();
     window.VisualAnimation?.leave();
     resetEmoteReplacement();
@@ -926,12 +1016,16 @@ ${row.bundle}`;
     state.sequenceFrames = [];
     try {
       const sel = await call("select_asset", { busy: true, busyText: "加载预览…" }, state.assetType, bundle, name);
-      if (request !== state.selectionRequest) return;
+      if (request !== state.selectionRequest || state.page !== selectionPage || browseRequest !== state.browseRefreshSeq) return;
       sel.display_name ||= state.resources.find((row) => row.bundle === bundle && row.name === name)?.display_name;
       state.selection = sel;
+      state.resourceDetailOpen = true;
+      $("#resource-more-info").open = false;
       state.previewLoading = !!isPlayableAnimation(sel) || !!sel.emote?.video_name;
       renderPreview();
+      $("#resource-detail-scroll").scrollTop = 0;
       renderResources();
+      openResourceDetails();
       updateExportButtons();
       fillResourceCharacterSelect();
       const eff = effectiveCharacter(bundle, name);
@@ -977,7 +1071,7 @@ ${row.bundle}`;
     const desc = $("#preview-description");
     const media = $("#preview-media");
     const go = $("#go-studio");
-    $(".browse-layout")?.classList.toggle("has-selection", !!sel);
+    syncResourceDetails();
     disposeAnimation("preview-media");
     renderBrowseComparison();
     if (!sel) {
@@ -2167,6 +2261,7 @@ ${row.bundle}`;
       },
     });
     window.PluginStudio?.init({ call, toast });
+    window.CharacterAnimation?.init({ call, toast, renderAnimation, renderAnimationState, disposeAnimation });
     window.AudioWorkbench?.init({
       call,
       toast,
@@ -2190,8 +2285,17 @@ ${row.bundle}`;
     }));
 
     $("#mobile-nav-toggle")?.addEventListener("click", () => {
-      document.body.classList.toggle("nav-open");
+      if (state.navigationPinned) {
+        toggleNavigationPinned();
+        return;
+      }
+      setNavigationExpanded(!document.body.classList.contains("nav-open"));
     });
+    $("#sidebar-pin")?.addEventListener("click", toggleNavigationPinned);
+    $("#close-resource-details")?.addEventListener("click", closeResourceDetails);
+    $("#resource-detail-backdrop")?.addEventListener("click", closeResourceDetails);
+    document.addEventListener("keydown", handleWorkspaceEscape);
+    document.addEventListener("focusin", handleResourceDetailFocus);
 
     $("#sidebar-launch")?.addEventListener("click", () => doAction("launch-game"));
     $("#sidebar-restore")?.addEventListener("click", () => doAction("restore-all"));

@@ -929,6 +929,39 @@ class DesktopApi:
     def preview_mod_bundle(self, bundle_name: str) -> dict:
         return self._preview_mod_bundle_impl(bundle_name)
 
+    def _character_animations(self):
+        if getattr(self, "_character_animation_workspace", None) is None:
+            from .modkit.character_animation import CharacterAnimationWorkspace
+            self._character_animation_workspace = CharacterAnimationWorkspace(MADE_DIR / "character-animations")
+        return self._character_animation_workspace
+
+    @exposed
+    def character_animation_state(self, role_id: int = 101) -> dict:
+        return self._character_animations().status(role_id)
+
+    @exposed
+    def character_animation_import(self, role_id: int, action: str, options: dict, folder: bool = False) -> dict | None:
+        source = (self._pick_path("folder") if folder else self._pick_path(
+            "open", file_types=("图片、动图或视频 (*.png;*.jpg;*.jpeg;*.gif;*.apng;*.webp;*.mp4;*.webm;*.mov;*.mkv;*.avi)",),
+        ))
+        if source is None:
+            return None
+        return self._character_animations().import_action(
+            role_id, action, source, fps=options.get("fps", 15), loop=options.get("loop", True),
+        )
+
+    @exposed
+    def character_animation_preview(self, role_id: int, action: str) -> dict:
+        return self._character_animations().preview(role_id, action)
+
+    @exposed
+    def character_animation_remove(self, role_id: int, action: str) -> dict:
+        return self._character_animations().remove_action(role_id, action)
+
+    @exposed
+    def character_animation_export(self, role_id: int, name: str = "", author: str = "") -> dict:
+        return self._character_animations().export(role_id, name, author)
+
     def _plugins(self):
         if getattr(self, "_plugin_workspace", None) is None:
             from .modkit.plugin_studio import PluginWorkspace

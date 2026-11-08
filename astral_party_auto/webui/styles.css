@@ -951,6 +951,25 @@ input {
 .plugin-build-log { max-height: 260px; overflow: auto; padding: 12px; border-radius: 9px; background: var(--window); color: var(--muted); font-size: 11px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .plugin-build-log:empty { display: none; }
 
+.character-animation-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, 1fr); gap: 16px; align-items: start; }
+.character-animation-layout .card { min-width: 0; margin-bottom: 0; }
+.character-animation-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 14px 0; }
+.character-animation-fields label { display: grid; gap: 6px; min-width: 0; color: var(--muted); font-size: 12px; }
+.character-animation-fields .character-animation-loop { display: flex; align-items: center; align-self: end; min-height: 36px; gap: 8px; }
+.character-animation-loop input { width: 16px; min-height: 16px; height: 16px; accent-color: var(--accent); }
+.character-animation-actions { display: grid; gap: 6px; margin: 10px 0; }
+.character-animation-actions button { width: 100%; text-align: left; }
+.character-animation-preview-card .preview-media { display: flex; align-items: center; justify-content: center; height: clamp(220px, 42vh, 380px); max-height: 380px; }
+.character-animation-preview-card .preview-media img { width: 100%; height: 100%; min-width: 0; min-height: 0; max-width: 100%; max-height: 100%; object-fit: contain; }
+
+@media (max-width: 999px) {
+  .character-animation-layout { grid-template-columns: minmax(0, 1fr); }
+}
+
+@media (max-width: 480px) {
+  .character-animation-fields { grid-template-columns: minmax(0, 1fr); }
+}
+
 .preview-panel {
   display: flex;
   flex-direction: column;
@@ -1727,33 +1746,162 @@ body.nav-open .sidebar {
   .browse-layout { min-height: calc(100vh - 102px); }
 }
 
-/* 先给图片留空间，选中资源后才展开制作详情。 */
-.browse-layout { grid-template-columns: 188px minmax(0, 1fr); }
-.browse-layout .preview-panel { display: none; }
-.browse-layout.has-selection .preview-panel { display: flex; grid-column: 2; position: static; }
-.resource-list.is-grid { grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 12px; }
-.resource-list.is-grid .resource-thumbnail { height: 150px; }
-.resource-list .resource-name { font-size: 13px; font-weight: 600; line-height: 1.5; }
+/* 导航展开覆盖在工作区上方，工作区始终保留同样的宽度。 */
+:root { --sidebar-width: 64px; }
+.app-shell { grid-template-columns: 64px minmax(0, 1fr); }
+.workspace { grid-column: 2; grid-row: 1; }
+.sidebar {
+  position: fixed;
+  z-index: 70;
+  inset: 0 auto 0 0;
+  display: flex;
+  width: 64px;
+  min-width: 64px;
+  padding: 8px;
+  transform: none;
+  transition: width 120ms ease;
+  box-shadow: none;
+}
+.sidebar:is(:hover, :focus-within),
+body.nav-open .sidebar { width: 210px; box-shadow: 10px 0 28px #0005; }
+.sidebar .brand { min-height: 58px; padding: 0 2px 10px; justify-content: flex-start; }
+.sidebar .brand-logo { width: 44px; height: 44px; border-radius: 12px; }
+.sidebar .brand-copy,
+.sidebar .nav-label,
+.sidebar .nav-button em { display: none; }
+.sidebar:is(:hover, :focus-within) .brand-copy,
+body.nav-open .sidebar .brand-copy { display: grid; }
+.sidebar:is(:hover, :focus-within) .nav-label,
+body.nav-open .sidebar .nav-label { display: inline; }
+.sidebar:is(:hover, :focus-within) .nav-button em,
+body.nav-open .sidebar .nav-button em { display: block; }
+.sidebar .brand-copy { max-width: 94px; }
+.sidebar .brand-copy strong { font-size: 17px; }
+.sidebar .nav-list { gap: 3px; padding-right: 0; }
+.sidebar .nav-button { flex-basis: 40px; min-height: 40px; padding: 0 12px; justify-content: flex-start; gap: 12px; }
+.sidebar .sidebar-footer { padding: 8px 0 0; }
+.sidebar-footer .nav-icon { display: inline-grid; color: inherit; font-size: 17px; }
+
+.topbar { flex: 0 0 64px; min-height: 64px; flex-wrap: nowrap; gap: 10px; padding: 10px 16px; }
+.topbar h1 { flex: 1 1 auto; font-size: 22px; }
+.navigation-toggle-slot { display: inline-flex; flex: 0 0 34px; width: 34px; height: 34px; }
+#mobile-nav-toggle { position: relative; z-index: 71; display: inline-flex; flex: 0 0 34px; width: 34px; height: 34px; margin: 0; }
+.app-shell:has(.sidebar:is(:hover, :focus-within)) #mobile-nav-toggle,
+body.nav-open #mobile-nav-toggle { position: fixed; top: 15px; left: 166px; }
+.topbar .status-pill { min-height: 30px; margin-left: 0; padding: 0 10px; font-size: 11px; }
+.header-game-actions { display: flex; flex: 0 0 auto; gap: 6px; }
+.header-game-actions .button { min-height: 34px; }
+.header-game-actions .restore-game-button { color: var(--danger); border: 1px solid #75414f; background: transparent; }
+.topbar-menu { position: relative; flex: 0 0 auto; }
+.topbar-menu > summary { display: flex; align-items: center; min-height: 34px; padding: 0 10px; border: 1px solid var(--line); border-radius: 9px; color: var(--muted); cursor: pointer; font-size: 12px; list-style: none; }
+.topbar-menu > summary::-webkit-details-marker { display: none; }
+.topbar-menu > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.topbar-menu .project-tools { position: absolute; z-index: 80; top: calc(100% + 8px); right: 0; width: min(340px, calc(100vw - 90px)); padding: 12px; flex-wrap: wrap; justify-content: flex-start; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); box-shadow: 0 12px 32px #0007; }
+.topbar-menu:not([open]) .project-tools { display: none; }
+.topbar-menu .update-panel { top: calc(100% + 8px); max-height: calc(100vh - 160px); overflow: auto; }
+
+/* 浏览页只滚动各自的内容区域，搜索和分页留在原位。 */
+.main-content.is-browsing { overflow: hidden; padding: 8px 16px 16px; }
+.browse-page { height: 100%; min-height: 0; max-width: none; }
+.browse-page.is-active { display: flex; animation: none; }
+.browse-layout {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  grid-template-columns: 168px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  align-items: stretch;
+}
+.browse-layout .panel { height: 100%; min-height: 0; max-height: none; padding: 12px; }
+.browse-layout .category-panel,
+.browse-layout .resource-panel { overflow: hidden; }
+.browse-layout .category-panel > label,
+.browse-layout .category-panel > select,
+.browse-layout .category-panel > p { flex-shrink: 0; }
+.browse-layout .category-list { flex: 1 1 auto; min-height: 0; max-height: none; overflow-y: auto; overscroll-behavior: contain; }
+.browse-layout .resource-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; scrollbar-gutter: stable; scroll-padding-block: 8px; }
+.resource-panel .search-row,
+.resource-panel .list-meta,
+.resource-panel .resource-view-toolbar,
+.resource-panel .pager { flex-shrink: 0; }
+.resource-panel .search-row input { flex-basis: 150px; min-width: 100px; }
+.resource-panel .search-row select { flex-basis: 112px; min-width: 100px; }
+.resource-panel .pager { padding-top: 8px; }
+.resource-list.is-grid { grid-template-columns: repeat(auto-fill, minmax(148px, 1fr)); grid-auto-rows: max-content; align-items: start; gap: 10px; }
+.resource-list.is-list { grid-template-columns: minmax(0, 1fr); grid-auto-rows: max-content; align-items: start; }
+.resource-list.is-list .resource-item { min-height: 78px; }
+.resource-list.is-grid .resource-item { height: auto; min-height: 218px; align-self: start; }
+.resource-list.is-grid .resource-thumbnail { flex: 0 0 140px; height: 140px; min-height: 140px; }
+.resource-list.is-grid .resource-summary { flex: 0 0 auto; min-height: 54px; }
+.resource-list .resource-name { font-size: 14px; font-weight: 600; line-height: 1.5; }
 .resource-list .resource-category { color: var(--muted); }
 .resource-list .resource-capabilities { color: var(--soft); }
 .category-panel label { font-size: 12px; }
 .category-panel > p { font-size: 11px; }
 .category-button { min-height: 40px; font-size: 12px; }
 .category-group-title { font-size: 12px; }
-.resource-list .resource-name { font-size: 14px; }
 .resource-list .resource-category,
 .resource-list .resource-capabilities,
 .list-meta,
 #thumbnail-status { font-size: 11px; }
 
-@media (min-width: 1500px) {
-  .browse-layout.has-selection { grid-template-columns: 188px minmax(0, 1fr) 300px; }
-  .browse-layout.has-selection .preview-panel { grid-column: auto; position: sticky; }
+.browse-layout .preview-panel { display: none; }
+.browse-layout.is-detail-open .preview-panel {
+  display: flex;
+  flex-direction: column;
+  grid-column: 3;
+  grid-row: 1;
+  position: relative;
+  top: auto;
+  gap: 8px;
+  overflow: hidden;
+}
+.preview-header { display: flex; flex: 0 0 auto; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.preview-header > div { min-width: 0; }
+.preview-header .icon-button { display: inline-grid; flex: 0 0 28px; width: 28px; height: 28px; margin: 0; }
+.preview-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; scroll-padding-block: 8px; }
+.preview-panel .preview-media,
+.preview-panel .resource-comparison.has-comparison .preview-media { display: flex; align-items: center; justify-content: center; height: clamp(96px, 24vh, 210px); max-height: clamp(96px, 24vh, 210px); }
+.preview-panel .preview-media img { display: block; width: 100%; height: 100%; min-width: 0; min-height: 0; max-width: 100%; max-height: 100%; object-fit: contain; object-position: center; }
+.preview-panel .preview-actions { display: grid; flex: 0 0 auto; gap: 7px; padding-top: 8px; border-top: 1px solid var(--line); }
+.preview-panel .preview-actions .button { min-height: 32px; }
+.preview-panel .character-label-box { margin-top: 12px; }
+.resource-more-info { margin-top: 10px; border-top: 1px solid var(--line); }
+.resource-more-info > summary { padding: 10px 0; color: var(--muted); font-size: 11px; cursor: pointer; }
+.resource-more-info > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.resource-more-info .resource-technical-details h3 { margin: 14px 0 6px; color: var(--muted); font-size: 11px; }
+.resource-detail-backdrop { display: none; }
+
+@media (min-width: 1100px) {
+  .browse-layout.is-detail-open { grid-template-columns: 168px minmax(0, 1fr) 280px; }
+}
+
+@media (max-width: 1099px) {
+  .browse-layout.is-detail-open .preview-panel { position: fixed; z-index: 55; inset: 74px 12px 12px auto; width: min(340px, calc(100vw - 88px)); height: auto; grid-column: auto; grid-row: auto; box-shadow: -12px 0 36px #0008; }
+  .browse-layout.is-detail-open .resource-detail-backdrop { display: block; position: fixed; z-index: 54; inset: 64px 0 0 64px; background: #0007; cursor: default; }
 }
 
 @media (max-width: 650px) {
-  .browse-layout { grid-template-columns: minmax(0, 1fr); }
-  .browse-layout.has-selection .preview-panel { grid-column: 1; }
-  .resource-list.is-grid { grid-template-columns: repeat(auto-fill, minmax(135px, 1fr)); gap: 8px; }
-  .resource-list.is-grid .resource-thumbnail { height: 128px; }
+  .main-content.is-browsing { padding: 6px 10px 10px; }
+  .browse-layout { grid-template-columns: 132px minmax(0, 1fr); gap: 8px; }
+  .browse-layout .panel { padding: 9px; }
+  .category-button { padding-inline: 5px; font-size: 11px; }
+  .resource-list.is-grid { grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 7px; }
+  .resource-list.is-grid .resource-thumbnail { flex-basis: 112px; height: 112px; min-height: 112px; }
+  .resource-list.is-grid .resource-item { min-height: 190px; }
+}
+
+@media (max-width: 600px) {
+  .topbar { flex: 0 0 104px; min-height: 104px; flex-wrap: wrap; gap: 6px; padding: 8px 10px; }
+  .topbar h1 { font-size: 20px; }
+  .topbar .status-pill { margin-left: auto; }
+  .topbar-menu { order: 4; }
+  .header-game-actions { order: 5; flex-basis: 100%; justify-content: flex-end; }
+  .browse-layout.is-detail-open .preview-panel { top: 114px; }
+  .browse-layout.is-detail-open .resource-detail-backdrop { top: 104px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar { transition: none; }
 }

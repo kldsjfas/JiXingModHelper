@@ -92,9 +92,9 @@ internal sealed class MainWindow : Form
         Text = Program.WindowTitle;
         var workingArea = Screen.FromPoint(Cursor.Position).WorkingArea;
         // 小屏幕和任务栏较高时也要能看到完整窗口及关闭按钮。
-        Size = new Size(Math.Min(1860, Math.Max(1, workingArea.Width - 40)),
-                        Math.Min(1160, Math.Max(1, workingArea.Height - 40)));
-        MinimumSize = new Size(Math.Min(960, Width), Math.Min(640, Height));
+        Size = new Size(Math.Min(1280, Math.Max(1, workingArea.Width - 40)),
+                        Math.Min(820, Math.Max(1, workingArea.Height - 40)));
+        MinimumSize = new Size(Math.Min(800, Width), Math.Min(600, Height));
         StartPosition = FormStartPosition.CenterScreen;
         Controls.Add(_webView);
 
