@@ -21,7 +21,11 @@ from .core.config import APP_ROOT, RESOURCE_ROOT
 from . import __version__
 from .core.updates import REPOSITORY_URL, RELEASES_URL, UpdateChecker
 from .mod_controller import DATA_DIR, MADE_DIR, ModController
-from .modkit.categories import ASSET_TYPES, annotate_texture_name_duplicates
+from .modkit.categories import (
+    ASSET_TYPES, annotate_texture_name_duplicates, asset_category,
+    category_group, category_label,
+    resource_display_name,
+)
 
 
 def _web_dir() -> Path:
@@ -535,6 +539,9 @@ class DesktopApi:
         if not selection:
             return None
         payload = dict(selection)
+        payload["display_name"] = resource_display_name(
+            payload.get("name", ""), payload.get("asset_type", "texture"), payload.get("bundle", ""),
+        )
         payload["preview_data"] = self._image_data(selection.get("preview"))
         comparison = self.controller.selection_comparison(selection, force=force_preview)
         payload["comparison"] = {"modified": None, "notice": ""}
@@ -922,10 +929,51 @@ class DesktopApi:
     def preview_mod_bundle(self, bundle_name: str) -> dict:
         return self._preview_mod_bundle_impl(bundle_name)
 
+    def _plugins(self):
+        if getattr(self, "_plugin_workspace", None) is None:
+            from .modkit.plugin_studio import PluginWorkspace
+            self._plugin_workspace = PluginWorkspace(DATA_DIR / "plugin-studio", MADE_DIR / "plugins")
+        return self._plugin_workspace
+
+    @exposed
+    def plugin_status(self) -> dict:
+        return self._plugins().status(getattr(self.controller, "game_executable", None))
+
+    @exposed
+    def plugin_choose_sdk(self) -> dict | None:
+        directory = self._pick_path("folder")
+        if directory is None:
+            return None
+        self._plugins().set_sdk(directory)
+        return self._plugins().status(getattr(self.controller, "game_executable", None))
+
+    @exposed
+    def plugin_fetch_sdk(self) -> dict:
+        self._plugins().fetch_sdk()
+        return self._plugins().status(getattr(self.controller, "game_executable", None))
+
+    @exposed
+    def plugin_create_project(self, options: dict) -> dict:
+        return self._plugins().create(options)
+
+    @exposed
+    def plugin_open_project(self) -> dict | None:
+        directory = self._pick_path("folder")
+        return self._plugins().open(directory) if directory else None
+
+    @exposed
+    def plugin_save_source(self, source: str, expected_hash: str) -> dict:
+        return self._plugins().save(source, expected_hash)
+
+    @exposed
+    def plugin_build_project(self) -> dict:
+        return self._plugins().build()
+
     @exposed
     def get_categories(self, asset_type: str) -> list[dict]:
         return [
-            {"id": category_id, "label": label, "count": count}
+            {"id": category_id, "label": label, "count": count,
+             "group": category_group(category_id, asset_type)}
             for category_id, label, count in self.controller.categories(
                 include_advanced=False,
                 asset_type=asset_type,
@@ -943,7 +991,7 @@ class DesktopApi:
         page_size: int = 50,
     ) -> dict:
         page = max(0, int(page or 0))
-        page_size = max(1, int(page_size or 50))
+        page_size = min(100, max(1, int(page_size or 50)))
         offset = page * page_size
         total = self.controller.count_labelled(
             category_id,
@@ -961,18 +1009,60 @@ class DesktopApi:
         )
         names_only = [(bundle, name) for bundle, name, _char in rows]
         annotated = annotate_texture_name_duplicates(names_only)
-        return {
-            "items": [
-                {
-                    "bundle": bundle,
-                    "name": name,
-                    "character": char,
-                    "duplicates": duplicates,
-                }
-                for (bundle, name, char), (_b, _n, duplicates) in zip(rows, annotated)
-            ],
-            "total": total,
-        }
+        actions = {
+            "texture": ["导出图片", "检查替换能力"],
+            "text": ["文字对照编辑"],
+            "mesh": ["导出 OBJ"],
+            "anim": ["动作预览", "动画导入入口"],
+            "dynamic": ["动画预览", "检查替换能力"],
+        }.get(asset_type, [])
+        items = []
+        for (bundle, name, char), (_b, _n, duplicates) in zip(rows, annotated):
+            category_id = (self.controller._dynamic_kind(bundle, name) if asset_type == "dynamic"
+                           else asset_category(name, asset_type, bundle))
+            items.append({
+                "bundle": bundle, "name": name, "character": char, "duplicates": duplicates,
+                "category_id": category_id, "category_label": category_label(category_id),
+                "actions": actions, "display_name": resource_display_name(name, asset_type, bundle),
+            })
+        return {"items": items, "total": total}
+
+    @exposed
+    def get_resource_thumbnails(self, asset_type: str, items: list[dict]) -> dict:
+        from .modkit.thumbnails import ResourceThumbnails
+
+        if asset_type != "texture":
+            raise ValueError("当前仅为图片资源生成缩略图。")
+        if not isinstance(items, list) or len(items) > 8:
+            raise ValueError("每批最多读取 8 张缩略图。")
+        if getattr(self, "_resource_thumbnails", None) is None:
+            self._resource_thumbnails = ResourceThumbnails()
+        index = self.controller.typed_index.get("texture") or {}
+        groups = {}
+        results = []
+        for item in items:
+            if not isinstance(item, dict):
+                raise ValueError("缩略图参数应包含资源包和资源名。")
+            bundle, name = item.get("bundle"), item.get("name")
+            result = {"bundle": bundle, "name": name}
+            results.append(result)
+            if (not isinstance(bundle, str) or not isinstance(name, str)
+                    or bundle not in index or name not in index[bundle]):
+                result["error"] = "资源已不在当前索引中，请刷新索引。"
+                continue
+            groups.setdefault(bundle, []).append(result)
+        for bundle, rows in groups.items():
+            try:
+                source = self.controller.original_bundle_path(bundle)
+                if source is None:
+                    raise ValueError("原资源包缺失，请刷新索引。")
+                thumbnails = self._resource_thumbnails.read(source, [row["name"] for row in rows])
+                for row in rows:
+                    row.update(thumbnails[row["name"]])
+            except Exception as exc:
+                for row in rows:
+                    row["error"] = str(exc) or "缩略图读取失败。"
+        return {"items": results}
 
     def _animation_preview(self, path: Path, name: str, kind: str, fps: float = 30) -> dict:
         from .modkit.animation import read_animation_preview

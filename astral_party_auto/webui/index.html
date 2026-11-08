@@ -25,6 +25,7 @@
         <button class="nav-button" data-page="workshop"><span class="nav-icon">▧</span><span>Mod 工坊</span></button>
         <button class="nav-button" data-page="browse"><span class="nav-icon">⌕</span><span>浏览资源</span></button>
         <button class="nav-button" data-page="audio"><span class="nav-icon">♫</span><span>音频工作台</span><em id="nav-audio-count"></em></button>
+        <button class="nav-button" data-page="plugins"><span class="nav-icon">⌘</span><span>功能插件</span></button>
         <button class="nav-button" data-page="studio"><span class="nav-icon">✦</span><span>制作替换</span></button>
         <button class="nav-button" data-page="pack"><span class="nav-icon">▣</span><span>我的作品集</span><em id="nav-pack-count"></em></button>
         <button class="nav-button" data-page="logs"><span class="nav-icon">≡</span><span>运行日志</span></button>
@@ -244,8 +245,8 @@
 
             <section class="panel resource-panel">
               <div class="search-row">
-                <input id="resource-search" type="search" placeholder="搜索资源名 / 包名…">
-                <select id="character-filter" title="按角色筛选（需先手动标注）">
+                <input id="resource-search" type="search" placeholder="搜索中文名称、原始名称…" aria-label="搜索资源">
+                <select id="character-filter" title="按角色归属筛选">
                   <option value="">全部</option>
                   <option value="__unmarked">未标注</option>
                 </select>
@@ -255,6 +256,14 @@
                 <button id="multi-select-toggle" class="button ghost compact" title="多选批量标注角色">☑ 多选</button>
               </div>
               <div class="list-meta"><span id="resource-status">请选择分类</span><span id="multi-select-info" class="multi-select-info is-hidden"></span><span id="resource-page-label"></span></div>
+              <div class="resource-view-toolbar">
+                <div class="resource-view-switch" role="group" aria-label="资源显示方式">
+                  <button class="button ghost compact is-active" type="button" data-resource-view="grid" aria-pressed="true">缩略图</button>
+                  <button class="button ghost compact" type="button" data-resource-view="list" aria-pressed="false">列表</button>
+                </div>
+                <span id="thumbnail-status" role="status" aria-live="polite"></span>
+                <button id="retry-thumbnails" class="button ghost compact is-hidden" type="button">重试缩略图</button>
+              </div>
               <div id="resource-list" class="resource-list"></div>
               <div class="pager">
                 <button id="resource-prev" class="button ghost compact">上一页</button>
@@ -284,15 +293,19 @@
                 <select id="resource-character"></select>
                 <div class="action-row two-up">
                   <button id="apply-resource-character" class="button ghost compact" disabled>标注当前资源</button>
-                  <button id="apply-bundle-character" class="button ghost compact" disabled>整个Bundle标注</button>
+                  <button id="apply-bundle-character" class="button ghost compact" disabled>整包标注</button>
                 </div>
               </div>
+              <details class="resource-technical-details">
+                <summary>原始资源信息</summary>
+                <dl><dt>资源名称</dt><dd id="resource-original-name"></dd><dt>资源包</dt><dd id="resource-original-bundle"></dd></dl>
+              </details>
             </aside>
           </div>
         </section>
 
         <section id="page-studio" class="page">
-          <div id="studio-empty" class="empty-state"><strong>还没选资源</strong><span>先到“浏览资源”选择一项。</span><button class="button ghost" data-page-link="browse">去浏览资源</button></div>
+          <div id="studio-empty" class="empty-state"><strong>从你想制作的内容开始</strong><span>图片、文字、动作与动态素材先到资源库选择，再查看对应的制作方式。音频和功能插件有独立工作台。</span><div class="action-row"><button class="button primary" data-page-link="browse">浏览资源</button><button class="button ghost" data-page-link="audio">语音与音乐</button><button class="button ghost" data-page-link="plugins">制作功能插件</button></div></div>
           <div id="studio-content" class="is-hidden">
             <article class="selection-banner"><span class="eyebrow">当前资源</span><h2 id="studio-title"></h2><p id="studio-description"></p></article>
             <article id="emote-settings" class="card emote-settings is-hidden">
@@ -488,6 +501,35 @@
           </article>
         </section>
 
+        <section id="page-plugins" class="page">
+          <article class="card">
+            <div class="section-heading"><div><h2>制作功能插件</h2><p>从模板创建可编辑的 C# 工程，编译为 CesiumLoader 插件 ZIP。</p></div></div>
+            <p class="notice">需要本机 .NET SDK 和 CesiumLoader SDK。插件 ZIP 交给 CesiumLoader 安装，资源替换仍在「我的作品集」导出。</p>
+            <p id="plugin-loader-status" class="editor-status" role="status">正在检查加载器状态…</p>
+            <p id="plugin-sdk-status" class="editor-status" role="status">尚未选择 CesiumLoader SDK。</p>
+            <div class="action-row"><button id="plugin-fetch-sdk" class="button purple" type="button">下载官方 SDK</button><button id="plugin-choose-sdk" class="button ghost" type="button">选择 SDK 目录…</button></div>
+            <p class="editor-status">下载时从 CesiumLoader 官方 GitHub 获取并校验 3.3.2 组件包（约 4.2 MB），只提取编译所需的 SDK。</p>
+            <div class="plugin-form-grid">
+              <label for="plugin-template">插件模板<select id="plugin-template"><option value="frame_rate">自定义帧率</option><option value="notification">初始化通知</option></select></label>
+              <label for="plugin-id">插件 ID<input id="plugin-id" type="text" value="MyFrameRateMod" maxlength="80" spellcheck="false"></label>
+              <label for="plugin-name">插件名称<input id="plugin-name" type="text" value="自定义帧率" maxlength="80"></label>
+              <label for="plugin-author">作者<input id="plugin-author" type="text" maxlength="80" placeholder="你的昵称"></label>
+              <label id="plugin-fps-field" for="plugin-fps">目标帧率<input id="plugin-fps" type="number" min="-1" max="1000" value="144"></label>
+              <label id="plugin-message-field" for="plugin-message">初始化通知文字<input id="plugin-message" type="text" value="插件已加载" maxlength="200"></label>
+            </div>
+            <div class="action-row"><button id="plugin-create" class="button primary" type="button">创建并选择工程</button><button id="plugin-open-project" class="button ghost" type="button">选择已有工程…</button></div>
+            <p><a href="https://github.com/higashitaniyume/CesiumLoader" target="_blank" rel="noopener noreferrer">CesiumLoader 官方仓库</a></p>
+          </article>
+          <article class="card plugin-editor">
+            <div class="section-heading"><h2>C# 源码</h2><small id="plugin-project-path">还没有选择工程</small></div>
+            <label class="is-hidden" for="plugin-source">插件 C# 源码</label>
+            <textarea id="plugin-source" class="plugin-source" spellcheck="false" placeholder="创建或选择工程后，在这里编辑源码。"></textarea>
+            <div class="action-row"><button id="plugin-save" class="button ghost" type="button" disabled>保存源码</button><button id="plugin-build" class="button purple" type="button" disabled>编译并导出插件 ZIP</button></div>
+            <p id="plugin-status" class="editor-status" role="status" aria-live="polite">选择模板创建工程。</p>
+            <pre id="plugin-build-log" class="plugin-build-log" aria-label="插件构建日志"></pre>
+          </article>
+        </section>
+
         <section id="page-logs" class="page">
           <article class="card log-card">
             <div class="section-heading"><div><h2>运行日志</h2><p>资源扫描、替换和安装记录都会显示在这里。</p></div><button id="clear-logs" class="button ghost compact">清空日志</button></div>
@@ -540,6 +582,7 @@
   <script src="visual-animation.js" defer></script>
   <script src="game-location.js" defer></script>
   <script src="emote-batch.js" defer></script>
+  <script src="plugins.js" defer></script>
   <script src="app.js" defer></script>
 </body>
 </html>

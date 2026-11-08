@@ -688,6 +688,19 @@ input {
 .category-button.is-active { color: #fff; background: var(--accent); }
 .category-button.is-active small { color: #ffd9e8; }
 
+.category-group-title {
+  margin: 14px 9px 5px;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.category-technical-group { margin-top: 8px; border-top: 1px solid var(--line); }
+.category-technical-group .category-group-title { cursor: pointer; color: var(--muted); }
+.category-technical-group .category-button { width: 100%; }
+.category-technical-group summary:focus-visible,
+.resource-technical-details summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
 .resource-panel {
   display: flex;
   flex-direction: column;
@@ -835,6 +848,92 @@ input {
 .resource-item.is-active,
 .draft-item.is-active { color: #fff; background: var(--accent); }
 
+.resource-view-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.resource-view-switch {
+  display: flex;
+  gap: 3px;
+  padding: 3px;
+  border-radius: 9px;
+  background: var(--window);
+}
+
+.resource-view-switch .button { min-height: 28px; }
+.resource-view-switch .is-active { color: var(--text); background: var(--panel-soft); }
+#thumbnail-status { flex: 1 1 130px; color: var(--muted); font-size: 10px; }
+
+.resource-list.is-grid {
+  grid-template-columns: repeat(auto-fill, minmax(145px, 1fr));
+  gap: 9px;
+}
+
+.resource-list.is-grid > .notice { grid-column: 1 / -1; }
+
+.resource-list .resource-item {
+  gap: 10px;
+  padding: 7px;
+  border: 1px solid transparent;
+}
+
+.resource-list .resource-item.is-active,
+.resource-list .resource-item.is-selected {
+  border-color: var(--accent);
+  background: #3a2340;
+}
+
+.resource-list .resource-item.is-selected { border-color: var(--purple); }
+
+.resource-list .resource-thumbnail {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  height: 62px;
+  width: 72px;
+  overflow: hidden;
+  border-radius: 6px;
+  color: var(--muted);
+  background: var(--window);
+  font-size: 10px;
+  text-align: center;
+  white-space: normal;
+}
+
+.resource-thumbnail.has-image {
+  background-color: #211c2a;
+  background-image: conic-gradient(#302939 25%, transparent 0 50%, #302939 0 75%, transparent 0);
+  background-size: 16px 16px;
+}
+
+.resource-thumbnail img { width: 100%; height: 100%; object-fit: contain; }
+.resource-thumbnail.has-error { color: var(--gold); }
+.resource-list .resource-summary { display: flex; flex: 1 1 auto; align-items: center; gap: 6px; min-width: 0; }
+.resource-summary .resource-main { flex: 1 1 auto; gap: 4px; }
+.resource-list .resource-category { color: var(--gold); font-size: 10px; }
+.resource-list .resource-capabilities { color: var(--muted); font-size: 10px; line-height: 1.4; }
+.resource-list .resource-bundle { font-size: 9px; line-height: 1.4; }
+.resource-list .resource-duplicate { color: var(--soft); font-size: 9px; }
+
+.resource-list.is-grid .resource-item { display: flex; flex-direction: column; align-items: stretch; gap: 8px; }
+.resource-list.is-grid .resource-thumbnail { width: 100%; height: 128px; }
+.resource-list.is-grid .resource-summary { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; }
+.resource-list.is-grid .resource-main { grid-column: 1 / -1; }
+.resource-list.is-grid .character-badge { justify-self: start; margin: 0; }
+.resource-list.is-grid .multi-check { justify-self: end; }
+
+.resource-technical-details { color: var(--muted); font-size: 11px; }
+.resource-technical-details summary { padding: 7px 0; cursor: pointer; }
+.resource-technical-details dl { margin: 8px 0; }
+.resource-technical-details dt { margin-top: 10px; color: var(--soft); }
+.resource-technical-details dd { margin: 4px 0 0; line-height: 1.6; overflow-wrap: anywhere; user-select: text; }
+
 .pager {
   display: flex;
   flex: 0 0 auto;
@@ -842,6 +941,15 @@ input {
   padding-top: 9px;
   justify-content: flex-end;
 }
+
+.plugin-form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 13px; margin: 18px 0; }
+.plugin-form-grid label { display: grid; gap: 7px; color: var(--muted); font-size: 12px; }
+.plugin-editor .section-heading { flex-wrap: wrap; }
+#plugin-project-path { overflow-wrap: anywhere; }
+.plugin-source { min-height: 340px; padding: 14px; resize: vertical; font-family: Consolas, "Microsoft YaHei UI", monospace; font-size: 12px; line-height: 1.6; tab-size: 4; }
+.plugin-editor .action-row { margin-top: 12px; }
+.plugin-build-log { max-height: 260px; overflow: auto; padding: 12px; border-radius: 9px; background: var(--window); color: var(--muted); font-size: 11px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.plugin-build-log:empty { display: none; }
 
 .preview-panel {
   display: flex;
@@ -1617,4 +1725,35 @@ body.nav-open .sidebar {
   .sidebar-footer .button { min-height: 36px; }
   .topbar { flex-basis: 66px; }
   .browse-layout { min-height: calc(100vh - 102px); }
+}
+
+/* 先给图片留空间，选中资源后才展开制作详情。 */
+.browse-layout { grid-template-columns: 188px minmax(0, 1fr); }
+.browse-layout .preview-panel { display: none; }
+.browse-layout.has-selection .preview-panel { display: flex; grid-column: 2; position: static; }
+.resource-list.is-grid { grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 12px; }
+.resource-list.is-grid .resource-thumbnail { height: 150px; }
+.resource-list .resource-name { font-size: 13px; font-weight: 600; line-height: 1.5; }
+.resource-list .resource-category { color: var(--muted); }
+.resource-list .resource-capabilities { color: var(--soft); }
+.category-panel label { font-size: 12px; }
+.category-panel > p { font-size: 11px; }
+.category-button { min-height: 40px; font-size: 12px; }
+.category-group-title { font-size: 12px; }
+.resource-list .resource-name { font-size: 14px; }
+.resource-list .resource-category,
+.resource-list .resource-capabilities,
+.list-meta,
+#thumbnail-status { font-size: 11px; }
+
+@media (min-width: 1500px) {
+  .browse-layout.has-selection { grid-template-columns: 188px minmax(0, 1fr) 300px; }
+  .browse-layout.has-selection .preview-panel { grid-column: auto; position: sticky; }
+}
+
+@media (max-width: 650px) {
+  .browse-layout { grid-template-columns: minmax(0, 1fr); }
+  .browse-layout.has-selection .preview-panel { grid-column: 1; }
+  .resource-list.is-grid { grid-template-columns: repeat(auto-fill, minmax(135px, 1fr)); gap: 8px; }
+  .resource-list.is-grid .resource-thumbnail { height: 128px; }
 }

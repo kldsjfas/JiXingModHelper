@@ -5,8 +5,8 @@
 <h1 align="center">吉星派对 Mod 助手</h1>
 
 <p align="center">
-  <b>Astral Party · 本地换皮 Mod 工具</b><br>
-  一个界面里搞定:找资源 → 看图 → 换图 → 打包 → 装进游戏 → 不满意一键还原
+  <b>Astral Party · 资源创作与功能插件工具</b><br>
+  中文资源库、替换作品集与 CesiumLoader 插件工程
 </p>
 
 <p align="center">
@@ -17,6 +17,8 @@
 </p>
 
 ---
+
+**1.4.0-preview.1** 新增中文缩略图资源库、分组分类和功能插件工作台。可生成、编辑并编译自定义帧率或加载通知的 CesiumLoader 插件。编译使用官方 SDK，游戏运行需要 CesiumLoader，预览版的游戏内效果待实测。完整步骤见 [使用指南](PREVIEW_GUIDE.md)。
 
 给 Steam / TapTap 版《**吉星派对**》（ **星引擎 Party / Astral Party**）用的本地换皮工具。
 

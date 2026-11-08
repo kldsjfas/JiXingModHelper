@@ -91,13 +91,16 @@ async function checkComparison() {
   // 不能根据作品集同 bundle 的其他条目推断当前图片已修改。
   ui.state.draft.items = [{ name: "Other", bundle: "sample.bundle", kind: "texture" }];
   ui.renderBrowseComparison();
-  assert.ok(ui.find("preview-comparison").classList.contains("has-comparison"));
+  assert.equal(ui.find("preview-comparison").classList.contains("has-comparison"), false);
+  assert.ok(ui.find("preview-modified-card").classList.contains("is-hidden"));
   assert.match(ui.find("preview-modified").innerHTML, /尚未修改/);
   assert.doesNotMatch(ui.find("preview-modified").innerHTML, /<img/);
   const modified = { preview_data: "data:image/png;base64,c2F2ZWQ=", width: 4, height: 4, label: "作品集修改图", draft_index: 0 };
   ui.state.selection = texture("Portrait", modified);
   ui.renderBrowseComparison();
   ui.renderReplacement();
+  assert.ok(ui.find("preview-comparison").classList.contains("has-comparison"));
+  assert.equal(ui.find("preview-modified-card").classList.contains("is-hidden"), false);
   assert.match(ui.find("preview-modified").innerHTML, /c2F2ZWQ=/);
   assert.match(ui.find("studio-replacement").innerHTML, /c2F2ZWQ=/);
   assert.match(ui.find("studio-replacement-heading").textContent, /已保存/);

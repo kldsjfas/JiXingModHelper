@@ -17,16 +17,17 @@
     workshop: "Mod 工坊",
     browse: "浏览资源",
     audio: "音频工作台",
+    plugins: "功能插件",
     studio: "制作替换",
     pack: "我的作品集",
     logs: "运行日志",
   };
   const TYPE_HINTS = {
-    texture: "图片资源。走路/攻击一帧帧图在细分类「角色动作帧」。",
+    texture: "按角色、卡牌、地图与装扮找图片，直接看缩略图。",
     text: "文案与配置。支持原文对照、查找替换；二进制内容只读。",
-    mesh: "3D 三角面模型，只导出不替换。",
-    anim: "Unity 动画片段。Sprite 动画按真实帧顺序播放；其他片段会说明预览限制。",
-    dynamic: "序列帧、GIF / WebP / APNG 可播放和替换；其他动态类型按资源能力显示。",
+    mesh: "角色与场景的三维模型，可导出后编辑。",
+    anim: "角色动作与界面动画。选中后查看播放与替换方式。",
+    dynamic: "动态表情、逐帧动画与界面动效。选中后查看支持的制作方式。",
   };
 
   const state = {
@@ -52,6 +53,13 @@
     selectedResources: [],
     browseRequestSeq: 0,
     browseRefreshSeq: 0,
+    resourceView: "grid",
+    resourceListLoading: false,
+    thumbnailRenderSeq: 0,
+    thumbnailLoading: false,
+    thumbnailCache: new Map(),
+    thumbnailTargets: new Map(),
+    openCategoryGroups: new Set(),
     query: "",
     characterFilter: "",
     characterList: [],
@@ -210,6 +218,7 @@
     document.body.classList.remove("nav-open");
     if (page === "browse") { refreshBrowse(); renderPreview(); refreshSelectionComparison(); }
     if (page === "audio") window.AudioWorkbench?.enter();
+    if (page === "plugins") window.PluginStudio?.enter();
     if (page === "workshop") window.ModWorkshop?.enter();
     if (page === "studio") refreshStudio();
     if (page === "pack") { window.EmoteBatch?.enter(); refreshPack(); }
@@ -503,7 +512,7 @@
     ]).forEach((t) => {
       const opt = document.createElement("option");
       opt.value = t.id;
-      opt.textContent = t.label;
+      opt.textContent = { texture: "图片", text: "文字与配置", mesh: "三维模型", anim: "动作片段", dynamic: "动态素材" }[t.id] || t.label;
       select.appendChild(opt);
     });
     select.value = state.assetType;
@@ -635,25 +644,59 @@
       host.innerHTML = `<div class="notice">无分类（可先刷新索引）</div>`;
       return;
     }
+    const groups = new Map();
     state.categories.forEach((cat) => {
       if (state.assetType === "texture" && cat.count === 0 && !["all", "hand_card"].includes(cat.id)) return;
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "category-button" + (cat.id === state.categoryId ? " is-active" : "");
-      btn.innerHTML = `<span>${escapeHtml(cat.label)}</span><small>${cat.count} ${state.assetType === "texture" ? "张" : "条"}</small>`;
-      btn.addEventListener("click", () => {
-        state.categoryId = cat.id;
-        state.resourcePage = 0;
-        exitMultiSelect();
-        renderCategories();
-        loadResources();
-      });
-      host.appendChild(btn);
+      const group = cat.id === "all" ? "" : cat.group || "";
+      if (!groups.has(group)) groups.set(group, []);
+      groups.get(group).push(cat);
     });
+    groups.forEach((categories, group) => {
+      let groupHost = host;
+      if (group) {
+        const technical = /技术|特效/.test(group);
+        const heading = document.createElement(technical ? "summary" : "h3");
+        heading.className = "category-group-title";
+        heading.textContent = group;
+        if (technical) {
+          groupHost = document.createElement("details");
+          groupHost.className = "category-technical-group";
+          groupHost.open = state.openCategoryGroups.has(group) || categories.some((cat) => cat.id === state.categoryId);
+          groupHost.addEventListener("toggle", () => {
+            if (groupHost.open) state.openCategoryGroups.add(group);
+            else state.openCategoryGroups.delete(group);
+          });
+          groupHost.appendChild(heading);
+          host.appendChild(groupHost);
+        } else host.appendChild(heading);
+      }
+      categories.forEach((cat) => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "category-button" + (cat.id === state.categoryId ? " is-active" : "");
+        btn.setAttribute("aria-pressed", String(cat.id === state.categoryId));
+        btn.innerHTML = `<span>${escapeHtml(resourceCategoryLabel(cat.id, cat.label))}</span><small>${cat.count} ${state.assetType === "texture" ? "张" : "条"}</small>`;
+        btn.addEventListener("click", () => {
+          state.categoryId = cat.id;
+          state.resourcePage = 0;
+          exitMultiSelect();
+          renderCategories();
+          loadResources();
+        });
+        groupHost.appendChild(btn);
+      });
+    });
+  }
+
+  function resourceCategoryLabel(id, fallback) {
+    return { fairygui: "界面动效", sequence: "逐帧动画", cri_usm: "技能演出与视频", buff: "状态图标", ui_icon: "界面图标", ui_atlas: "界面图集" }[id] || fallback;
   }
 
   async function loadResources() {
     const seq = ++state.browseRequestSeq;
+    state.resourceListLoading = true;
+    state.thumbnailRenderSeq += 1;
+    state.thumbnailTargets.clear();
     $("#resource-status").textContent = "加载中…";
     try {
       const data = await call(
@@ -668,6 +711,8 @@
       );
       if (seq !== state.browseRequestSeq || state.page !== "browse") return;
       state.resources = (data && data.items) || [];
+      state.thumbnailCache.clear();
+      state.resourceListLoading = false;
       state.totalResources = (data && data.total) || 0;
       const pages = Math.max(1, Math.ceil(state.totalResources / PAGE_SIZE));
       if (state.resourcePage > pages - 1) {
@@ -683,6 +728,8 @@
     } catch (err) {
       if (seq !== state.browseRequestSeq || state.page !== "browse") return;
       state.resources = [];
+      state.thumbnailCache.clear();
+      state.resourceListLoading = false;
       state.totalResources = 0;
       renderResources();
       $("#resource-status").textContent = err.message || "加载失败";
@@ -694,15 +741,25 @@
     const status = $("#resource-status");
     const pageLabel = $("#resource-page-label");
     if (!list) return;
+    const renderToken = ++state.thumbnailRenderSeq;
+    state.thumbnailTargets.clear();
     list.innerHTML = "";
+    list.classList.toggle("is-grid", state.resourceView === "grid");
+    list.classList.toggle("is-list", state.resourceView === "list");
+    $$("[data-resource-view]").forEach((button) => {
+      const active = button.dataset.resourceView === state.resourceView;
+      button.classList.toggle("is-active", active);
+      button.setAttribute("aria-pressed", String(active));
+    });
     const total = state.totalResources || state.resources.length || 0;
     const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
     state.resourcePage = Math.min(state.resourcePage, pages - 1);
     const items = state.resources || [];
-    if (status) status.textContent = total ? `共 ${total} 条（按 Bundle 排序，同名分开显示）` : "没有匹配";
+    if (status) status.textContent = total ? `共 ${total} 项，同名资源按包区分` : "没有匹配";
     if (pageLabel) pageLabel.textContent = total ? `第 ${state.resourcePage + 1}/${pages} 页` : "";
     if (!items.length) {
       list.innerHTML = `<div class="notice">没有匹配的资源。</div>`;
+      renderThumbnailStatus();
       return;
     }
     const selKey = state.selection ? `${state.selection.bundle}::${state.selection.name}` : "";
@@ -714,21 +771,34 @@
       const isSelected = state.multiSelectMode && isResourceSelected(row.bundle, row.name);
       if (!state.multiSelectMode && key === selKey) item.classList.add("is-active");
       if (isSelected) item.classList.add("is-selected");
+      item.setAttribute("aria-pressed", String(state.multiSelectMode ? isSelected : key === selKey));
       const char = row.character || effectiveCharacter(row.bundle, row.name);
       const badge = char ? `<span class="character-badge">${escapeHtml(char)}</span>` : "";
-      const bundleLabel = shortBundleName(row.bundle);
-      const detail = row.duplicates > 1 ? `同名 ${row.duplicates} 个 · ${bundleLabel}` : bundleLabel;
       const multiCheck = state.multiSelectMode ? `<span class="multi-check">${isSelected ? "✓" : ""}</span>` : "";
-      item.innerHTML = `
+      const thumbnail = document.createElement("span");
+      thumbnail.className = "resource-thumbnail";
+      thumbnail.setAttribute("aria-hidden", "true");
+      state.thumbnailTargets.set(key, thumbnail);
+      item.appendChild(thumbnail);
+      const summary = document.createElement("span");
+      summary.className = "resource-summary";
+      const category = resourceCategoryLabel(row.category_id, row.category_label) || state.assetTypes.find((type) => type.id === state.assetType)?.label || "资源";
+      const actions = Array.isArray(row.actions) ? row.actions.slice(0, 3).join(" / ") : "选择后查看制作方式";
+      const displayName = row.display_name || row.name;
+      const duplicateNotice = row.duplicates > 1 ? `<span class="resource-duplicate">同名资源 ${row.duplicates} 份</span>` : "";
+      summary.innerHTML = `
         <span class="resource-main">
-          <span class="resource-bundle">${escapeHtml(row.bundle)}</span>
-          <span class="resource-name">${escapeHtml(row.name)}</span>
+          <span class="resource-category">${escapeHtml(category)}</span>
+          <span class="resource-name">${escapeHtml(displayName)}</span>
+          <span class="resource-capabilities">${escapeHtml(actions)}</span>
+          ${duplicateNotice}
         </span>
         ${badge}
-        <small>${escapeHtml(detail)}</small>
         ${multiCheck}
       `;
-      item.title = `${row.name}
+      item.appendChild(summary);
+      item.title = `${displayName}
+${row.name}
 ${row.bundle}`;
       item.addEventListener("click", () => {
         if (state.multiSelectMode) {
@@ -739,6 +809,95 @@ ${row.bundle}`;
       });
       list.appendChild(item);
     });
+    paintResourceThumbnails(renderToken);
+    loadResourceThumbnails();
+  }
+
+  function thumbnailPlaceholder() {
+    const labels = { texture: "图片加载中…", text: "文字与配置", mesh: "3D 模型", anim: "动作片段", dynamic: "动态素材" };
+    return labels[state.assetType] || "资源";
+  }
+
+  function paintResourceThumbnails(renderToken) {
+    if (renderToken !== state.thumbnailRenderSeq) return;
+    state.thumbnailTargets.forEach((element, key) => {
+      const cached = state.thumbnailCache.get(key);
+      element.classList.toggle("has-image", !!cached?.data);
+      element.classList.toggle("has-error", !!cached?.error);
+      if (cached?.data) element.innerHTML = `<img src="${cached.data}" alt="" loading="lazy" decoding="async">`;
+      else element.textContent = cached?.error ? "缩略图未加载" : thumbnailPlaceholder();
+      element.title = cached?.error || "";
+    });
+    renderThumbnailStatus();
+  }
+
+  function renderThumbnailStatus() {
+    const status = $("#thumbnail-status");
+    const retry = $("#retry-thumbnails");
+    const isTexture = state.assetType === "texture";
+    const entries = (state.resources || []).map((row) => state.thumbnailCache.get(resourceKey(row.bundle, row.name)));
+    const failed = entries.filter((entry) => entry?.error).length;
+    const loaded = entries.filter((entry) => entry?.data).length;
+    let message = "";
+    if (entries.length) {
+      message = "选择资源可查看预览与制作方式";
+      if (isTexture) message = `正在加载缩略图 ${loaded}/${entries.length}…`;
+      if (isTexture && loaded === entries.length) message = "本页缩略图已加载";
+      if (isTexture && failed) message = `缩略图 ${loaded}/${entries.length}，${failed} 项未加载`;
+    }
+    if (status) status.textContent = message;
+    if (retry) retry.classList.toggle("is-hidden", !isTexture || !failed);
+  }
+
+  async function loadResourceThumbnails() {
+    if (state.thumbnailLoading || state.resourceListLoading || state.page !== "browse" || state.assetType !== "texture") return;
+    state.thumbnailLoading = true;
+    try {
+      while (state.page === "browse" && state.assetType === "texture" && !state.resourceListLoading) {
+        const batch = state.resources.filter((row) => !state.thumbnailCache.has(resourceKey(row.bundle, row.name))).slice(0, 8);
+        if (!batch.length) break;
+        const request = state.browseRequestSeq;
+        const renderToken = state.thumbnailRenderSeq;
+        let result;
+        try {
+          result = await call("get_resource_thumbnails", { quiet: true }, "texture", batch.map(({ bundle, name }) => ({ bundle, name })));
+        } catch (error) {
+          result = { items: batch.map((row) => ({ ...row, error: error.message || "缩略图读取失败" })) };
+        }
+        if (request !== state.browseRequestSeq || state.page !== "browse" || state.assetType !== "texture") break;
+        const previews = Array.isArray(result?.items) ? result.items : [];
+        const returned = new Map(previews.map((row) => [resourceKey(row.bundle, row.name), row]));
+        batch.forEach((row) => {
+          const key = resourceKey(row.bundle, row.name);
+          const preview = returned.get(key);
+          const data = preview?.thumbnail_data || "";
+          const validData = /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(data);
+          state.thumbnailCache.set(key, validData ? { data } : { error: preview?.error || "此资源暂时无法生成缩略图" });
+        });
+        // 多选或视图切换会重建卡片，只把结果绘制到当前这一轮的节点。
+        paintResourceThumbnails(renderToken === state.thumbnailRenderSeq ? renderToken : state.thumbnailRenderSeq);
+      }
+    } finally {
+      state.thumbnailLoading = false;
+      // 旧页请求结束后，让最新页面继续加载；同一时刻只运行一个批次。
+      if (!state.resourceListLoading && state.page === "browse" && state.assetType === "texture" && state.resources.some((row) => !state.thumbnailCache.has(resourceKey(row.bundle, row.name)))) {
+        loadResourceThumbnails();
+      }
+    }
+  }
+
+  function setResourceView(view) {
+    if (!["grid", "list"].includes(view)) return;
+    state.resourceView = view;
+    renderResources();
+  }
+
+  function retryResourceThumbnails() {
+    state.thumbnailCache.forEach((entry, key) => {
+      if (entry.error) state.thumbnailCache.delete(key);
+    });
+    paintResourceThumbnails(state.thumbnailRenderSeq);
+    loadResourceThumbnails();
   }
 
   async function selectResource(bundle, name) {
@@ -768,6 +927,7 @@ ${row.bundle}`;
     try {
       const sel = await call("select_asset", { busy: true, busyText: "加载预览…" }, state.assetType, bundle, name);
       if (request !== state.selectionRequest) return;
+      sel.display_name ||= state.resources.find((row) => row.bundle === bundle && row.name === name)?.display_name;
       state.selection = sel;
       state.previewLoading = !!isPlayableAnimation(sel) || !!sel.emote?.video_name;
       renderPreview();
@@ -817,6 +977,7 @@ ${row.bundle}`;
     const desc = $("#preview-description");
     const media = $("#preview-media");
     const go = $("#go-studio");
+    $(".browse-layout")?.classList.toggle("has-selection", !!sel);
     disposeAnimation("preview-media");
     renderBrowseComparison();
     if (!sel) {
@@ -834,7 +995,11 @@ ${row.bundle}`;
       return;
     }
     const emoteLabel = sel.emote?.choices?.find((choice) => choice.name === sel.emote.video_name)?.label;
-    if (title) title.textContent = sel.emote ? emoteLabel || "静态表情" : sel.caption || sel.name || "资源";
+    if (title) title.textContent = sel.display_name || (sel.emote ? emoteLabel || "静态表情" : sel.caption || sel.name || "资源");
+    const originalName = $("#resource-original-name");
+    const bundleName = $("#resource-original-bundle");
+    if (originalName) originalName.textContent = sel.name || "";
+    if (bundleName) bundleName.textContent = sel.bundle || "";
     if (desc) desc.textContent = sel.reason || sel.category_desc || "";
     if (media) {
       if (isPlayableAnimation(sel) || sel.emote?.video_name) {
@@ -914,9 +1079,9 @@ ${row.bundle}`;
     const selection = state.selection;
     const visible = (selection?.asset_type || selection?.kind) === "texture";
     const modified = selection?.comparison?.modified;
-    $("#preview-comparison")?.classList.toggle("has-comparison", visible);
+    $("#preview-comparison")?.classList.toggle("has-comparison", visible && !!modified);
     $("#preview-original-heading")?.classList.toggle("is-hidden", !visible);
-    $("#preview-modified-card")?.classList.toggle("is-hidden", !visible);
+    $("#preview-modified-card")?.classList.toggle("is-hidden", !visible || !modified);
     const notice = $("#preview-comparison-notice");
     if (notice) {
       notice.classList.toggle("is-hidden", !visible);
@@ -2001,6 +2166,7 @@ ${row.bundle}`;
         renderInstalled();
       },
     });
+    window.PluginStudio?.init({ call, toast });
     window.AudioWorkbench?.init({
       call,
       toast,
@@ -2104,6 +2270,8 @@ ${row.bundle}`;
     $("#multi-select-toggle")?.addEventListener("click", () => {
       setMultiSelectMode(!state.multiSelectMode);
     });
+    $$("[data-resource-view]").forEach((button) => button.addEventListener("click", () => setResourceView(button.dataset.resourceView)));
+    $("#retry-thumbnails")?.addEventListener("click", retryResourceThumbnails);
     $("#apply-resource-character")?.addEventListener("click", async () => {
       const char = $("#resource-character")?.value || "";
       if (state.multiSelectMode) {

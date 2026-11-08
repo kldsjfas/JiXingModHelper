@@ -52,10 +52,12 @@ from .modkit.bundles import INDEX_VERSION, TextureInfo, iter_bundle_entries, rea
 from .modkit.clip_edit import replace_clip_checked as replace_bundle_animation_raw
 from .modkit.categories import (
     ASSET_TYPES,
+    asset_category,
     category_desc,
     category_label,
     categorize,
     describe_selection,
+    resource_display_name,
 )
 
 
@@ -649,15 +651,22 @@ class ModController:
             return [
                 ("all", "全部", total),
                 ("sequence", "序列帧动画组", sequence_count),
-                ("fairygui", "FairyGUI", fairygui_count),
+                ("fairygui", "界面动画", fairygui_count),
                 ("cri_usm", "视频 / 技能演出", video_count),
             ]
 
         if asset_type != "texture":
-            # 非贴图：只有「全部」一类，避免硬套贴图分类
             block = self.typed_index.get(asset_type) or {}
-            total = sum(len(names) for names in block.values())
-            return [("all", "全部", total)]
+            counts = {"all": 0}
+            for bundle, names in block.items():
+                for name in names:
+                    category_id = asset_category(name, asset_type, bundle)
+                    counts["all"] += 1
+                    counts[category_id] = counts.get(category_id, 0) + 1
+            return [("all", "全部", counts["all"])] + [
+                (category_id, label, counts.get(category_id, 0))
+                for category_id, label in all_categories(asset_type=asset_type)
+            ]
 
         if self.index:
             self._ensure_texture_category_cache()
@@ -669,12 +678,11 @@ class ModController:
             return category_rows
         from .modkit.categories import ADVANCED_IDS
 
-        for category_id in ("fx", "lightmap", "other"):
+        for category_id, label in all_categories(include_advanced=True):
             if category_id in ADVANCED_IDS:
                 count = counts.get(category_id, 0)
                 if count:
-                    label = next((lb for cid, lb in all_categories(include_advanced=True) if cid == category_id), category_id)
-                    category_rows.append((category_id, f"{label}（少碰）", count))
+                    category_rows.append((category_id, label, count))
         return category_rows
 
     def browse(
@@ -685,7 +693,7 @@ class ModController:
         *,
         asset_type: str = "texture",
     ) -> list[tuple[str, str]]:
-        """分页列表用。绝不扫全库再 sort 上万条——会卡死 UI。"""
+        """与分页浏览共用分类及动态有效性过滤，保留原有返回数量上限。"""
         block = self.typed_index.get(asset_type) or {}
         if not block:
             return []
@@ -694,28 +702,11 @@ class ModController:
         else:
             limit = min(limit, 400)
 
-        q = (query or "").strip().lower()
         out: list[tuple[str, str]] = []
-
-        # 文本 / 网格 / 动画：无细分类，只搜全部
-        if asset_type != "texture" or cat_id in ("all", ""):
-            for bundle, names in block.items():
-                for name in names:
-                    if q and q not in name.lower() and q not in bundle.lower():
-                        continue
-                    out.append((bundle, name))
-                    if len(out) >= limit:
-                        return out
-            return out
-
-        category_rows = self._ensure_texture_category_cache().get(cat_id, ())
-        for bundle, name in category_rows:
-            if q and q not in name.lower() and q not in bundle.lower():
-                continue
+        for bundle, name in self._iter_browse_rows(asset_type, cat_id, query):
             out.append((bundle, name))
             if len(out) >= limit:
                 break
-        out.sort(key=lambda x: x[1].lower())
         return out
 
     def _iter_browse_rows(
@@ -726,10 +717,17 @@ class ModController:
     ):
         """按 bundle -> 资源名排序地产生 (bundle, name)。"""
         q = (query or "").strip().lower()
+
+        def matches_query(bundle: str, name: str, category_id: str = "") -> bool:
+            if not q or q in name.lower() or q in bundle.lower():
+                return True
+            category_id = category_id or asset_category(name, asset_type, bundle)
+            return q in resource_display_name(name, asset_type, bundle).lower() or q in category_label(category_id).lower()
+
         if asset_type == "texture" and cat_id not in ("all", ""):
             rows = self._ensure_texture_category_cache().get(cat_id, ())
             for bundle, name in sorted(rows, key=lambda x: (x[0].lower(), x[1].lower())):
-                if q and q not in name.lower() and q not in bundle.lower():
+                if not matches_query(bundle, name, cat_id):
                     continue
                 yield bundle, name
             return
@@ -749,7 +747,7 @@ class ModController:
                         continue
                     if cat_id == "cri_usm" and kind != "cri_usm":
                         continue
-                    if q and q not in name.lower() and q not in bundle.lower():
+                    if not matches_query(bundle, name, kind):
                         continue
                     yield bundle, name
             return
@@ -757,7 +755,9 @@ class ModController:
         for bundle in sorted(block.keys(), key=str.lower):
             names = block[bundle]
             for name in sorted(names, key=str.lower):
-                if q and q not in name.lower() and q not in bundle.lower():
+                if cat_id not in ("all", "") and asset_category(name, asset_type, bundle) != cat_id:
+                    continue
+                if not matches_query(bundle, name):
                     continue
                 yield bundle, name
 
@@ -1679,7 +1679,7 @@ class ModController:
         for item in self.draft_items:
             if item.get("bundle") != bundle or (item.get("kind") == kind and item.get("name") == name):
                 continue
-            occupied = set(item.get("frame_names") or [])
+            occupied = set(item.get("frame_names") or []) | set(item.get("affected_textures") or [])
             if item.get("kind") == "texture":
                 occupied.add(item.get("name"))
             if targets & occupied:
@@ -1695,7 +1695,8 @@ class ModController:
         info = inspect_animation(source, asset_name, animation_kind)
         if not info.get("editable"):
             raise RuntimeError(info.get("reason") or "此动画暂不支持替换。")
-        self._check_sequence_overlap(bundle_name, info.get("frame_names", []), "dynamic", asset_name)
+        affected = list(info.get("frame_names") or []) + list(info.get("affected_textures") or [])
+        self._check_sequence_overlap(bundle_name, affected, "dynamic", asset_name)
         out = self._draft_dir() / bundle_name
         source = out if out.exists() else source
         if animation_kind == "sequence":
@@ -1708,6 +1709,7 @@ class ModController:
             "kind": "dynamic", "bundle": bundle_name, "name": asset_name,
             "animation_kind": animation_kind, "fps": float(fps),
             "frame_names": info.get("frame_names", []),
+            "affected_textures": info.get("affected_textures", []),
             "note": f"动画 ← {Path(replacement_path).name}",
             "at": datetime.now().isoformat(timespec="seconds"),
         }

@@ -117,15 +117,29 @@ def _text_asset(env, asset_name: str):
     return matches[0]
 
 
-def _sequence_info(rows) -> dict:
+def _sequence_info(rows, env=None) -> dict:
     editable = all(obj.type.name == "Texture2D" for _, obj, _ in rows)
     data = rows[0][2]
     rect = getattr(data, "m_Rect", None)
     width = int(getattr(data, "m_Width", 0) or getattr(rect, "width", 0))
     height = int(getattr(data, "m_Height", 0) or getattr(rect, "height", 0))
+    reason = "" if editable else SPRITE_NOTICE
     notice = SEQUENCE_NOTICE if editable else SPRITE_NOTICE + " " + SEQUENCE_NOTICE
+    affected_textures = []
+    if not editable and env is not None:
+        from . import sprite_sequence
+        try:
+            layout = sprite_sequence.inspect_layout(env, rows)
+            editable = True
+            reason = ""
+            notice = sprite_sequence.NOTICE + " " + SEQUENCE_NOTICE
+            affected_textures = [atlas["texture"].m_Name for atlas in layout["atlases"].values()]
+        except Exception as exc:
+            reason = str(exc) or "Sprite 图集布局无法核对，暂不能安全替换。"
+            notice = reason + " " + SEQUENCE_NOTICE
     return {"animation_kind": "sequence", "editable": editable,
-            "reason": "" if editable else SPRITE_NOTICE, "notice": notice, "message": notice,
+            "reason": reason, "notice": notice, "message": notice,
+            "affected_textures": affected_textures,
             "frame_names": [row[0] for row in rows], "width": width, "height": height, "total": len(rows)}
 
 
@@ -133,7 +147,7 @@ def _sequence_info(rows) -> dict:
 def inspect_animation(bundle_path: str | Path, asset_name: str, kind: str = "sequence") -> dict:
     env = _load_bundle(bundle_path)
     if kind == "sequence":
-        return _sequence_info(_sequence(env, asset_name))
+        return _sequence_info(_sequence(env, asset_name), env)
     if kind not in IMAGE_KINDS:
         return {"animation_kind": kind, "editable": False, "reason": "此动画格式暂不支持直接替换。"}
     _, data = _text_asset(env, asset_name)
@@ -247,7 +261,7 @@ def read_animation_preview(bundle_path: str | Path, asset_name: str, kind: str =
     env = _load_bundle(bundle_path)
     if kind == "sequence":
         rows = _sequence(env, asset_name)
-        info = _sequence_info(rows)
+        info = _sequence_info(rows, env)
         indices, durations = _preview_indices(len(rows), [1000 / _fps(fps)] * len(rows))
         # UnityPy caches the shared Sprite atlas in this one environment.
         return _preview((rows[index][2].image for index in indices), [rows[index][0] for index in indices],
@@ -307,11 +321,15 @@ def _validate_sequence(env, asset_name, expected_sizes):
             raise ValueError(f"写回校验失败：{name} 无法按原尺寸解码。")
 
 
-def _sequence_sizes(rows):
-    info = _sequence_info(rows)
+def _sequence_sizes(rows, env=None):
+    info = _sequence_info(rows, env)
     if not info["editable"]:
         raise ValueError(info["reason"])
-    sizes = {name: (int(data.m_Width), int(data.m_Height)) for name, _, data in rows}
+    if info["affected_textures"]:
+        from .sprite_sequence import frame_sizes, inspect_layout
+        sizes = frame_sizes(inspect_layout(env, rows))
+    else:
+        sizes = {name: (int(data.m_Width), int(data.m_Height)) for name, _, data in rows}
     if len(rows) > MAX_SOURCE_FRAMES or sum(w * h for w, h in sizes.values()) > MAX_TOTAL_PIXELS:
         raise ValueError("目标序列超过 512 帧或总像素超过 6400 万，本次不写入。")
     for size in sizes.values():
@@ -336,13 +354,13 @@ def read_adapted_replacement(bundle_path: str | Path, asset_name: str, replaceme
     env = _load_bundle(bundle_path)
     if kind == "sequence":
         rows = _sequence(env, asset_name)
-        sizes = _sequence_sizes(rows)
+        sizes = _sequence_sizes(rows, env)
         frames, durations, _ = _read_replacement(replacement_path, rate)
         sampled = _resample_indices(durations, len(rows))
         indices, preview_durations = _preview_indices(len(rows), [1000 / rate] * len(rows))
         adapted = (frames[sampled[index]].resize(sizes[rows[index][0]], Image.Resampling.LANCZOS)
                    for index in indices)
-        info = _sequence_info(rows)
+        info = _sequence_info(rows, env)
         info.update({"source_frame_count": len(frames), "source_duration": sum(durations),
                      "notice": f"已按目标的 {len(rows)} 帧和每帧尺寸适配，展示写入前的采样效果；游戏内播放时序保持原样。"})
         return _preview(adapted, [rows[index][0] for index in indices], preview_durations, len(rows), info=info)
@@ -365,14 +383,23 @@ def replace_bundle_sequence(src_bundle: str | Path, asset_name: str, replacement
     rate = _fps(fps)
     env = _load_bundle(src_bundle)
     rows = _sequence(env, asset_name)
-    info = _sequence_info(rows)
-    expected_sizes = _sequence_sizes(rows)
+    info = _sequence_info(rows, env)
+    expected_sizes = _sequence_sizes(rows, env)
     frames, durations, _ = _read_replacement(replacement_path, rate)
     sampled = _resample_indices(durations, len(rows))
-    for index, (name, _, data) in enumerate(rows):
-        frame = frames[sampled[index]].resize(expected_sizes[name], Image.Resampling.LANCZOS)
-        _set_image(data, frame)
-    _atomic_save(env, out_bundle, lambda saved: _validate_sequence(saved, asset_name, expected_sizes))
+    if info["affected_textures"]:
+        from . import sprite_sequence
+        layout = sprite_sequence.inspect_layout(env, rows)
+        images = sprite_sequence.atlas_images(layout)
+        unchanged = sprite_sequence.object_snapshot(env, images)
+        sprite_sequence.write_frames(layout, images, [frames[index] for index in sampled])
+        _atomic_save(env, out_bundle, lambda saved: sprite_sequence.validate_write(
+            saved, _sequence(saved, asset_name), layout, images, unchanged))
+    else:
+        for index, (name, _, data) in enumerate(rows):
+            frame = frames[sampled[index]].resize(expected_sizes[name], Image.Resampling.LANCZOS)
+            _set_image(data, frame)
+        _atomic_save(env, out_bundle, lambda saved: _validate_sequence(saved, asset_name, expected_sizes))
     info.update({"source_frame_count": len(frames), "source_duration": sum(durations), "fps": rate,
                  "frame_count": len(rows), "names": info["frame_names"]})
     return info
@@ -410,8 +437,19 @@ def restore_bundle_animation(draft_bundle: str | Path, original_bundle: str | Pa
     if kind == "sequence":
         current_rows = _sequence(draft, asset_name)
         source_rows = _sequence(original, asset_name)
-        if not _sequence_info(current_rows)["editable"] or not _sequence_info(source_rows)["editable"]:
-            raise ValueError(SPRITE_NOTICE)
+        current_info = _sequence_info(current_rows, draft)
+        source_info = _sequence_info(source_rows, original)
+        if not current_info["editable"] or not source_info["editable"]:
+            raise ValueError(current_info["reason"] or source_info["reason"])
+        if current_info["affected_textures"] or source_info["affected_textures"]:
+            from . import sprite_sequence
+            layout = sprite_sequence.inspect_layout(draft, current_rows)
+            original_layout = sprite_sequence.inspect_layout(original, source_rows)
+            unchanged = sprite_sequence.object_snapshot(draft, layout["atlases"])
+            images = sprite_sequence.restore_frames(layout, original_layout)
+            _atomic_save(draft, draft_bundle, lambda saved: sprite_sequence.validate_write(
+                saved, _sequence(saved, asset_name), layout, images, unchanged))
+            return
         sources = {name: (obj, data) for name, obj, data in source_rows}
         if set(sources) != {name for name, _, _ in current_rows}:
             raise ValueError("原包和草稿帧名不一致，未执行恢复。")

@@ -1,10 +1,10 @@
-吉星派对 Mod 助手 v1.3.11
+吉星派对 Mod 助手 v1.4.0-preview.1
 
 一、第一次使用
 1. 将整个 ZIP 解压到你有写入权限的新文件夹，保留 _internal 和 tools。
-2. 双击 JiXingModHelper.exe，确认窗口顶部显示 v1.3.11。
+2. 双击 JiXingModHelper.exe，确认窗口顶部显示 v1.4.0-preview.1。
 3. 首页会自动连接游戏；未找到或连接了另一服时，使用「选择游戏位置」指定安装目录或实际游戏 EXE。
-4. 到「浏览资源」刷新索引，再选择要预览或制作的资源。
+4. 到「浏览资源」刷新索引，按中文分类看缩略图，也可搜索中文用途、编号或原始名称。
 
 二、怎么发给别人
 直接转发原始的完整 ZIP。对方完整解压后运行，不要只发送单个 EXE。
@@ -22,7 +22,8 @@
 不要反复清理游戏缓存，也不要手动覆盖 catalog 或删除备份。
 
 五、系统与组件
-适用于 Windows 10/11 x64，已包含 Python 和 .NET，无需另行安装。
+适用于 Windows 10/11 x64，运行助手所需的 Python 和 .NET 已随包提供。
+编译功能插件另外需要 .NET SDK，并在「功能插件」下载官方 CesiumLoader SDK。
 界面需要 Microsoft Edge WebView2 Runtime。若系统缺少，请从微软官方页面安装 Evergreen Windows x64 Runtime：
 https://developer.microsoft.com/microsoft-edge/webview2/
 材质表情的 GIF/APNG/WebP 输入和预览不需要 FFmpeg。
@@ -36,3 +37,8 @@ https://developer.microsoft.com/microsoft-edge/webview2/
 七、临时暂停与工坊连接
 临时恢复本助手修改前的资源，可在 Mod 管理暂停全部 Mod，记录和安装副本保留，之后能逐个启用。完全还原会清空安装记录与安装副本，原文件备份保留。
 工坊连接失败时可重试；已有完整 ZIP 可前往 Mod 管理导入。软件不会修改系统代理或关闭证书验证。
+
+八、功能插件
+在「功能插件」创建帧率或加载通知工程，可编辑源码并编译为独立 ZIP。
+工程与成品保存在 made_mods/plugins，配合 CesiumLoader 加载，游戏内效果待实测。
+这是预览版，完整操作与支持范围见「使用说明.md」。
