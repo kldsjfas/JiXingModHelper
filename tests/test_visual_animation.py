@@ -569,6 +569,171 @@ class SharedVideoWorkspaceTests(unittest.TestCase):
         clip = next(row for row in package["movieclips"] if row["id"] == animation_identity(names[2]))
         self.assertEqual([sprites[frame["sprite_id"]]["rect"] for frame in clip["frames"]], matching_rects)
 
+    def test_legacy_profile_over_current_pixel_budget_does_not_block_a_valid_profile(self):
+        from astral_party_auto.modkit import emote_media
+
+        names = list(self.targets)
+        self.save_legacy_video(names[0], (20, 20))
+        matching_rects = self.save_legacy_video(names[1], (14, 14))
+        self.controller.draft_items.insert(0, dict(self.controller.draft_items[0], name=None))
+        adapt_video = emote_media.adapt_video_source.side_effect
+
+        def enforce_output_budget(source, reference, *, source_planner, **options):
+            def checked_plan(info):
+                plan = source_planner(info)
+                pixels = plan["width"] * plan["height"]
+                if pixels > emote_media.MAX_VIDEO_FRAME_PIXELS or pixels * 2 > emote_media.MAX_OUTPUT_PIXELS:
+                    raise ValueError("转码后的帧数据超过像素限制。")
+                return plan
+
+            return adapt_video(source, reference, source_planner=checked_plan, **options)
+
+        for frame_budget, total_budget in ((1000, 600), (300, 2000)):
+            with self.subTest(frame_budget=frame_budget, total_budget=total_budget):
+                self.decoded_sizes.clear()
+                with patch.object(emote_media, "MAX_VIDEO_FRAME_PIXELS", frame_budget), \
+                        patch.object(emote_media, "MAX_OUTPUT_PIXELS", total_budget), \
+                        patch.object(emote_media, "adapt_video_source", side_effect=enforce_output_budget):
+                    item = self.save_video(names[2], self.alias)
+                self.assertEqual(self.decoded_sizes, [(17, 17), (14, 14)])
+                self.assertEqual((item["content_width"], item["content_height"]), (14, 14))
+        package = self.package()
+        sprites = {row["id"]: row for row in package["sprites"]}
+        clip = next(row for row in package["movieclips"] if row["id"] == animation_identity(names[2]))
+        self.assertEqual([sprites[frame["sprite_id"]]["rect"] for frame in clip["frames"]], matching_rects)
+
+    def test_unidentified_legacy_item_does_not_block_verified_frame_reuse(self):
+        names = list(self.targets)
+        self.save_video(names[0])
+        first_rects = self.assert_saved_frames(names[:1])
+        for bad_name in (None, 123, ""):
+            with self.subTest(name=bad_name):
+                legacy_item = dict(self.controller.draft_items[-1], name=bad_name)
+                legacy_item.pop("frame_content_sha256", None)
+                self.controller.draft_items.insert(0, legacy_item)
+                try:
+                    item = self.save_video(names[1], self.alias)
+                    self.assertEqual((item["content_width"], item["content_height"]), (28, 28))
+                    self.assertEqual(self.controller.draft_items[0], legacy_item)
+                    self.assert_saved_frames(names[:2], first_rects)
+                finally:
+                    self.controller.draft_items.pop(0)
+        legacy_item = dict(self.controller.draft_items[-1])
+        legacy_item.pop("name")
+        legacy_item.pop("frame_content_sha256", None)
+        self.controller.draft_items.insert(0, legacy_item)
+        self.save_video(names[1], self.alias)
+        self.assertEqual(self.controller.draft_items[0], legacy_item)
+        self.assert_saved_frames(names[:2], first_rects)
+
+    def test_unknown_overlapping_sprite_cannot_be_used_as_a_shared_frame_donor(self):
+        from astral_party_auto.modkit import fairygui_movieclip
+
+        names = list(self.targets)
+        self.save_video(names[0])
+        ui_path = self.draft / "ui.bundle"
+        package = fairygui_movieclip._parse(ui_path.read_bytes())
+        donor = package.sprites[1]
+        unknown_index = package.strings.index("unused duplicate")
+        unknown_record = unknown_index.to_bytes(2, "big") + donor["_record"][2:]
+        ui_path.write_bytes(fairygui_movieclip._write(
+            package, [item["_record"] for item in package.items],
+            [sprite["_record"] for sprite in package.sprites] + [unknown_record]))
+        before_items = copy.deepcopy(self.controller.draft_items)
+        before_files = {path.name: path.read_bytes() for path in self.draft.glob("*.bundle")}
+        self.select(names[1])
+        with TemporaryDirectory(prefix="candidate-", dir=self.root) as folder, self.assertRaises(ValueError):
+            self.workspace.prepare(self.alias, Path(folder))
+        self.assertEqual(self.controller.draft_items, before_items)
+        self.assertEqual({path.name: path.read_bytes() for path in self.draft.glob("*.bundle")}, before_files)
+
+    def test_decoded_frames_are_closed_after_prepare_and_after_write_failure(self):
+        from astral_party_auto.modkit import emote_media, visual_animation
+
+        adapt_video = emote_media.adapt_video_source.side_effect
+        decoded = []
+
+        def track_frames(*args, **options):
+            frames, info = adapt_video(*args, **options)
+            decoded.extend(frames)
+            return frames, info
+
+        names = list(self.targets)
+        with patch.object(emote_media, "adapt_video_source", side_effect=track_frames):
+            self.save_video(names[0])
+            for frame in decoded:
+                with self.assertRaises(ValueError):
+                    frame.getpixel((0, 0))
+            decoded.clear()
+            self.select(names[1])
+            with patch.object(visual_animation, "write_descriptor", side_effect=OSError("isolated write failure")), \
+                    TemporaryDirectory(prefix="candidate-", dir=self.root) as folder, self.assertRaises(OSError):
+                self.workspace.prepare(self.alias, Path(folder))
+            for frame in decoded:
+                with self.assertRaises(ValueError):
+                    frame.getpixel((0, 0))
+
+    def test_legacy_retry_frames_are_closed_when_content_validation_raises(self):
+        from astral_party_auto.modkit import emote_media, visual_animation
+
+        names = list(self.targets)
+        self.save_legacy_video(names[0], (20, 20))
+        adapt_video = emote_media.adapt_video_source.side_effect
+        content_hash = visual_animation._frame_content_hash
+        decoded = []
+
+        def track_frames(*args, **options):
+            frames, info = adapt_video(*args, **options)
+            decoded.extend(frames)
+            return frames, info
+
+        def fail_retry_hash(frames, durations):
+            if len(decoded) > 2:
+                raise ValueError("isolated retry validation failure")
+            return content_hash(frames, durations)
+
+        self.select(names[1])
+        before_items = copy.deepcopy(self.controller.draft_items)
+        before_files = {path.name: path.read_bytes() for path in self.draft.glob("*.bundle")}
+        with patch.object(emote_media, "adapt_video_source", side_effect=track_frames), \
+                patch.object(visual_animation, "_frame_content_hash", side_effect=fail_retry_hash), \
+                TemporaryDirectory(prefix="candidate-", dir=self.root) as folder, self.assertRaisesRegex(ValueError, "retry"):
+            self.workspace.prepare(self.alias, Path(folder))
+        self.assertEqual(len(decoded), 4)
+        for frame in decoded:
+            with self.assertRaises(ValueError):
+                frame.getpixel((0, 0))
+        self.assertEqual(self.controller.draft_items, before_items)
+        self.assertEqual({path.name: path.read_bytes() for path in self.draft.glob("*.bundle")}, before_files)
+
+    def test_switching_one_shared_video_to_gif_preserves_the_other_clip(self):
+        from astral_party_auto.modkit import emote_media, visual_animation
+
+        names = list(self.targets)
+        self.save_video(names[0])
+        first_rects = self.assert_saved_frames(names[:1])
+        self.save_video(names[1])
+        gif_frames = [Image.new("RGBA", (8, 8), color) for color in ((10, 200, 30, 255), (180, 20, 210, 255))]
+        with patch.object(emote_media, "detect_emote_media", return_value="gif"), \
+                patch.object(visual_animation, "_read_replacement", return_value=(gif_frames, [70, 130], "gif")):
+            item = self.save_video(names[0])
+        self.assertNotIn("frame_content_sha256", item)
+        self.assertNotIn("video_source_width", item)
+        with Image.open(self.draft / "atlas.bundle") as image:
+            before = image.convert("RGBA")
+        package = self.package()
+        sprites = {row["id"]: row for row in package["sprites"]}
+        clip = next(row for row in package["movieclips"] if row["id"] == animation_identity(names[0]))
+        gif_rects = [sprites[frame["sprite_id"]]["rect"] for frame in clip["frames"]]
+        self.workspace.remove(next(index for index, row in enumerate(self.controller.draft_items) if row["name"] == names[1]))
+        with Image.open(self.draft / "atlas.bundle") as image:
+            after = image.convert("RGBA")
+        for x, y, width, height in gif_rects:
+            box = (x, y, x + width, y + height)
+            self.assertEqual(after.crop(box).tobytes(), before.crop(box).tobytes())
+        for x, y, width, height in first_rects:
+            self.assertIsNone(after.crop((x, y, x + width, y + height)).getbbox())
+
 
 class FrameContentIdentityTests(unittest.TestCase):
     def test_content_hash_uses_rgba_pixels_geometry_order_and_timing(self):
@@ -704,6 +869,45 @@ class VisualCandidateApiTests(unittest.TestCase):
         self.assertTrue(result["ok"], result.get("error"))
         self.assertIn("已经保存", result["data"]["animation"]["notice"])
         self.workspace.save.assert_called_once()
+
+    def test_draft_list_failure_after_save_keeps_committed_response(self):
+        self.choose()
+        candidate_folder = Path(self.api._visual_candidate_dir.name)
+        self.api._draft_state.side_effect = OSError("draft list unavailable")
+        result = self.api.save_visual_animation()
+        self.assertTrue(result["ok"], result.get("error"))
+        self.assertEqual(result["data"]["item"], self.workspace.save.return_value)
+        self.assertEqual(result["data"]["animation"], self.animation)
+        self.assertIsNone(result["data"]["draft"])
+        self.assertIn("已经保存", result["data"]["notice"])
+        self.assertIn("draft list unavailable", result["data"]["notice"])
+        self.assertFalse(candidate_folder.exists())
+        self.assertIsNone(self.api._visual_candidate)
+        self.assertFalse(self.api.save_visual_animation()["ok"])
+        self.workspace.save.assert_called_once()
+
+    def test_draft_list_and_preview_failures_after_save_keep_both_notices(self):
+        self.choose()
+        self.workspace.draft_preview.side_effect = ValueError("preview unavailable")
+        self.api._draft_state.side_effect = TypeError("invalid draft metadata")
+        result = self.api.save_visual_animation()
+        self.assertTrue(result["ok"], result.get("error"))
+        self.assertIsNone(result["data"]["draft"])
+        self.assertEqual(result["data"]["animation"]["frames"], [])
+        self.assertIn("preview unavailable", result["data"]["animation"]["notice"])
+        self.assertIn("invalid draft metadata", result["data"]["notice"])
+        self.workspace.save.assert_called_once()
+
+    def test_commit_failure_stays_failed_without_reading_response_state(self):
+        self.choose()
+        self.workspace.save.side_effect = OSError("draft write failed")
+        result = self.api.save_visual_animation()
+        self.assertFalse(result["ok"])
+        self.assertIn("draft write failed", result["error"])
+        self.workspace.draft_preview.assert_not_called()
+        self.api._draft_state.assert_not_called()
+        self.assertIsNone(self.api._visual_candidate)
+        self.assertIsNone(self.api._visual_candidate_dir)
 
     def test_saved_item_remains_available_when_its_dynamic_preview_fails(self):
         bundle = self.root / "config.bundle"

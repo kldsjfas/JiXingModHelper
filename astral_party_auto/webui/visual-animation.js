@@ -46,7 +46,8 @@
     status.textContent = !editable ? "" : state.error || (state.working ? "正在制作并检查动画，请稍等…"
       : state.loading ? "正在读取作品集里的动画…"
       : state.candidate ? `${state.candidate.name || "已导入动画"}。${state.candidate.notice || "可以先播放，再保存到作品集。"}`
-      : state.savedAnimation ? "正在显示作品集保存后的实际动态效果。"
+      : hasFrames(state.savedAnimation) ? "正在显示作品集保存后的实际动态效果。"
+      : state.savedAnimation ? `已保存，但预览未加载。${state.savedAnimation.notice || "可以打开作品集重新检查。"}`
       : "导入后先检查播放效果，保存只更新作品集。安装后请在游戏里测试。" );
     status.classList.toggle("is-error", Boolean(state.error));
     const media = $("visual-animation-preview");
@@ -55,7 +56,7 @@
       : state.savedAnimation ? "作品集中的动态效果" : "你的动态效果";
     if (hasFrames(animation)) bridge.renderAnimation(media, animation);
     else bridge.renderAnimationState(media, !editable ? "动态制作暂不可用，具体原因见上方说明。" : state.working ? "正在制作动画…"
-      : state.loading ? "正在读取动画…" : state.error || "导入动图或视频后，在这里播放和逐帧检查。");
+      : state.loading ? "正在读取动画…" : state.error || animation?.notice || "导入动图或视频后，在这里播放和逐帧检查。");
   }
 
   function leave() {
@@ -72,15 +73,18 @@
 
   async function refresh(selection) {
     const key = selectionKey(selection);
+    const hadDraft = state.selection?.visual_animation?.draft;
     if (key !== state.key || !supported(selection)) leave();
     state.selection = selection;
     state.key = key;
-    if (!selection?.visual_animation?.draft && state.savedAnimation) {
+    if (!selection?.visual_animation?.draft && (state.savedAnimation || state.loading || hadDraft)) {
+      if (state.loading) state.request += 1;
+      state.loading = false;
       state.savedAnimation = null;
       state.error = "";
     }
     render();
-    if (!supported() || !selection.visual_animation.draft || state.candidate || state.savedAnimation || state.working || state.loading) return;
+    if (!supported() || !selection.visual_animation.draft || state.candidate || hasFrames(state.savedAnimation) || state.working || state.loading) return;
     const request = ++state.request;
     state.loading = true;
     state.error = "";
@@ -108,7 +112,6 @@
     const key = state.key;
     const request = ++state.request;
     state.candidate = null;
-    state.savedAnimation = null;
     state.error = "";
     state.working = true;
     render();
@@ -140,24 +143,32 @@
     state.working = true;
     state.error = "";
     render();
+    let committed = false;
     try {
       const data = await bridge.call("save_visual_animation", { busy: true, busyText: "保存动态卡面 / 立绘到作品集…" });
       if (!current(request, key)) return;
+      committed = true;
       state.candidate = null;
-      bridge.onSave?.(data);
       state.selection.visual_animation.draft = true;
       state.savedAnimation = data?.animation || { frames: [] };
+      state.error = data?.notice || "";
       if (!hasFrames(state.savedAnimation)) {
-        state.error = `已保存，但预览未加载。${state.savedAnimation.notice || "保存后的动画暂时无法播放。"}可打开作品集重新加载。`;
-        bridge.toast("动态作品已保存，预览暂未加载；可以打开作品集重新检查");
-        return;
+        state.error += `已保存，但预览未加载。${state.savedAnimation.notice || "保存后的动画暂时无法播放。"}可打开作品集重新加载。`;
       }
-      bridge.toast("已保存到作品集。当前显示保存后的实际效果，安装后请在游戏里测试");
+      render();
+      await bridge.onSave?.(data);
+      if (!current(request, key)) return;
+      bridge.toast(state.error ? "动态作品已保存，部分界面未能刷新；可以打开作品集重新检查"
+        : "已保存到作品集。当前显示保存后的实际效果，安装后请在游戏里测试");
     } catch (error) {
       if (current(request, key)) {
         state.candidate = null;
-        state.savedAnimation = null;
-        state.error = `保存未能完成检查：${error.message || error}。请重新导入或查看作品集。`;
+        if (committed) {
+          state.error = `${state.error || "已保存。"}作品集界面刷新失败：${error.message || error}。可打开作品集重新检查。`;
+          bridge.toast("动态作品已保存，作品集界面刷新未完成；可以打开作品集重新检查");
+        } else {
+          state.error = `保存未能完成检查：${error.message || error}。请重新导入或查看作品集。`;
+        }
       }
     } finally {
       if (current(request, key)) {

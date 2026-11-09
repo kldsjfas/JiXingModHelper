@@ -1347,7 +1347,14 @@ class DesktopApi:
                 animation = self.controller.visual_animation_workspace.draft_preview()
             except (OSError, ValueError, KeyError) as exc:
                 animation = {"frames": [], "notice": f"动态作品已经保存，重新加载预览失败：{exc}"}
-            return {"item": item, "animation": animation, "draft": self._draft_state()}
+            result = {"item": item, "animation": animation}
+            try:
+                result["draft"] = self._draft_state()
+            except Exception as exc:
+                # 提交已经完成，列表读取失败不能把保存结果改成失败。
+                result["draft"] = None
+                result["notice"] = f"动态作品已经保存，作品集列表未刷新：{exc}。可打开作品集重新加载。"
+            return result
         finally:
             self._clear_visual_candidate()
 

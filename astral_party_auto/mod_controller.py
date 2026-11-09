@@ -1380,10 +1380,11 @@ class ModController:
             return []
 
     @contextmanager
-    def _texture_draft_change(self, bundle: Path):
+    def _draft_bundle_change(self, bundle: Path):
+        """单个资源包保存失败时，恢复文件和作品集记录。"""
         old_items = deepcopy(self.draft_items)
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        recovery = Path(tempfile.mkdtemp(prefix="texture-change-", dir=DATA_DIR))
+        recovery = Path(tempfile.mkdtemp(prefix="draft-change-", dir=DATA_DIR))
         previous = recovery / "previous.bundle"
         existed = bundle.exists()
         keep_recovery = False
@@ -1434,7 +1435,7 @@ class ModController:
         backup = DATA_DIR / "backups" / bundle_name
         base = backup if backup.exists() else game_b
         src = out_bundle if out_bundle.exists() else base
-        with self._texture_draft_change(out_bundle):
+        with self._draft_bundle_change(out_bundle):
             if item.get("from_anim"):
                 from .modkit.clip_atlas import inspect_clip_atlas, replace_clip_atlas_checked
 
@@ -1623,7 +1624,7 @@ class ModController:
         # 文字、贴图和动画在同一份草稿上累积，重复编辑也保留其它对象。
         src = out_bundle if out_bundle.exists() else base
         self._check_sequence_overlap(bundle_name, [texture_name] if texture_name else [], "texture", texture_name)
-        with self._texture_draft_change(out_bundle):
+        with self._draft_bundle_change(out_bundle):
             replaced = replace_bundle_texture(
                 src, image_path, out_bundle, target_name=texture_name, crop_box=crop_box, match_original_size=True
             )
@@ -1661,19 +1662,20 @@ class ModController:
         # 若作品集里已有同 bundle，基于作品集版本继续改，否则用原版
         src = out_bundle if out_bundle.exists() else bundle_path
         reference = self.original_bundle_path(bundle_name) or bundle_path
-        replaced = replace_bundle_text(src, asset_name, new_text, out_bundle, reference_bundle=reference)
-        item = {
-            "kind": "text",
-            "bundle": bundle_name,
-            "name": replaced,
-            "note": f"文本 {len(new_text)} 字",
-            "at": datetime.now().isoformat(timespec="seconds"),
-        }
-        self.draft_items = [x for x in self.draft_items if not (
-            x.get("bundle") == item["bundle"] and x.get("name") == item["name"] and x.get("kind") == "text"
-        )]
-        self.draft_items.append(item)
-        self._save_draft()
+        with self._draft_bundle_change(out_bundle):
+            replaced = replace_bundle_text(src, asset_name, new_text, out_bundle, reference_bundle=reference)
+            item = {
+                "kind": "text",
+                "bundle": bundle_name,
+                "name": replaced,
+                "note": f"文本 {len(new_text)} 字",
+                "at": datetime.now().isoformat(timespec="seconds"),
+            }
+            self.draft_items = [x for x in self.draft_items if not (
+                x.get("bundle") == item["bundle"] and x.get("name") == item["name"] and x.get("kind") == "text"
+            )]
+            self.draft_items.append(item)
+            self._save_draft()
         self.log(f"已加入作品集（文本）：{replaced}（共 {len(self.draft_items)} 项）")
         return item
 
@@ -1703,25 +1705,26 @@ class ModController:
         self._check_sequence_overlap(bundle_name, affected, "dynamic", asset_name)
         out = self._draft_dir() / bundle_name
         source = out if out.exists() else source
-        if animation_kind == "sequence":
-            result = replace_bundle_sequence(source, asset_name, replacement_path, out, fps=float(fps))
-        elif animation_kind in ("gif", "webp", "apng"):
-            result = replace_bundle_animated_image(source, asset_name, replacement_path, out)
-        else:
-            raise RuntimeError("该资源需要游戏运行时，暂不支持动画替换。")
-        item = {
-            "kind": "dynamic", "bundle": bundle_name, "name": asset_name,
-            "animation_kind": animation_kind, "fps": float(fps),
-            "frame_names": info.get("frame_names", []),
-            "affected_textures": info.get("affected_textures", []),
-            "note": f"动画 ← {Path(replacement_path).name}",
-            "at": datetime.now().isoformat(timespec="seconds"),
-        }
-        self.draft_items = [old for old in self.draft_items if not (
-            old.get("bundle") == bundle_name and old.get("name") == asset_name and old.get("kind") == "dynamic"
-        )]
-        self.draft_items.append(item)
-        self._save_draft()
+        with self._draft_bundle_change(out):
+            if animation_kind == "sequence":
+                replace_bundle_sequence(source, asset_name, replacement_path, out, fps=float(fps))
+            elif animation_kind in ("gif", "webp", "apng"):
+                replace_bundle_animated_image(source, asset_name, replacement_path, out)
+            else:
+                raise RuntimeError("该资源需要游戏运行时，暂不支持动画替换。")
+            item = {
+                "kind": "dynamic", "bundle": bundle_name, "name": asset_name,
+                "animation_kind": animation_kind, "fps": float(fps),
+                "frame_names": info.get("frame_names", []),
+                "affected_textures": info.get("affected_textures", []),
+                "note": f"动画 ← {Path(replacement_path).name}",
+                "at": datetime.now().isoformat(timespec="seconds"),
+            }
+            self.draft_items = [old for old in self.draft_items if not (
+                old.get("bundle") == bundle_name and old.get("name") == asset_name and old.get("kind") == "dynamic"
+            )]
+            self.draft_items.append(item)
+            self._save_draft()
         self.log(f"动画已加入作品集：{asset_name}；尚未安装到游戏。")
         return item
 
@@ -1756,59 +1759,60 @@ class ModController:
             raise RuntimeError(f"找不到资源包：{bundle_name}")
         src = out_bundle if out_bundle.exists() else base
 
-        if raw_path:
-            raw = Path(raw_path).read_bytes()
-            replaced = replace_bundle_animation_raw(src, anim_name, raw, out_bundle, reference_bundle=base)
-            item = {
-                "kind": "anim",
-                "bundle": out_bundle.name,
-                "name": replaced,
-                "note": f"动画数据 ← {Path(raw_path).name}",
-                "at": datetime.now().isoformat(timespec="seconds"),
-            }
-        elif image_path:
-            from .modkit.clip_atlas import inspect_clip_atlas, replace_clip_atlas_checked
+        with self._draft_bundle_change(out_bundle):
+            if raw_path:
+                raw = Path(raw_path).read_bytes()
+                replaced = replace_bundle_animation_raw(src, anim_name, raw, out_bundle, reference_bundle=base)
+                item = {
+                    "kind": "anim",
+                    "bundle": out_bundle.name,
+                    "name": replaced,
+                    "note": f"动画数据 ← {Path(raw_path).name}",
+                    "at": datetime.now().isoformat(timespec="seconds"),
+                }
+            elif image_path:
+                from .modkit.clip_atlas import inspect_clip_atlas, replace_clip_atlas_checked
 
-            atlas = inspect_clip_atlas(src, anim_name)
-            if not atlas["atlas_editable"]:
-                raise RuntimeError(atlas["atlas_reason"])
-            tex = atlas["atlas_name"]
-            self._check_sequence_overlap(bundle_name, [tex], "texture", tex)
-            if crop_box:
-                raise RuntimeError("动画完整图集不能裁剪，请保留原图集尺寸和布局。")
-            replaced_tex = replace_clip_atlas_checked(src, anim_name, image_path, out_bundle)
-            item = {
-                "kind": "texture",
-                "bundle": out_bundle.name,
-                "name": replaced_tex,
-                "note": f"动画 {anim_name} 关联图集 ← {Path(image_path).name}",
-                "from_anim": anim_name,
-                "at": datetime.now().isoformat(timespec="seconds"),
-            }
-            # 去重按贴图名
+                atlas = inspect_clip_atlas(src, anim_name)
+                if not atlas["atlas_editable"]:
+                    raise RuntimeError(atlas["atlas_reason"])
+                tex = atlas["atlas_name"]
+                self._check_sequence_overlap(bundle_name, [tex], "texture", tex)
+                if crop_box:
+                    raise RuntimeError("动画完整图集不能裁剪，请保留原图集尺寸和布局。")
+                replaced_tex = replace_clip_atlas_checked(src, anim_name, image_path, out_bundle)
+                item = {
+                    "kind": "texture",
+                    "bundle": out_bundle.name,
+                    "name": replaced_tex,
+                    "note": f"动画 {anim_name} 关联图集 ← {Path(image_path).name}",
+                    "from_anim": anim_name,
+                    "at": datetime.now().isoformat(timespec="seconds"),
+                }
+                # 去重按贴图名
+                self.draft_items = [
+                    x
+                    for x in self.draft_items
+                    if not (
+                        x.get("bundle") == item["bundle"]
+                        and x.get("name") == item["name"]
+                        and x.get("kind") == "texture"
+                    )
+                ]
+                self.draft_items.append(item)
+                self._save_draft()
+                self.log(f"已加入作品集（动画预览图）：{anim_name} → {replaced_tex}")
+                return item
+            else:
+                raise RuntimeError("请提供替换图片，或 .animbin 动画字节文件。")
+
             self.draft_items = [
                 x
                 for x in self.draft_items
-                if not (
-                    x.get("bundle") == item["bundle"]
-                    and x.get("name") == item["name"]
-                    and x.get("kind") == "texture"
-                )
+                if not (x.get("bundle") == item["bundle"] and x.get("name") == item["name"] and x.get("kind") == "anim")
             ]
             self.draft_items.append(item)
             self._save_draft()
-            self.log(f"已加入作品集（动画预览图）：{anim_name} → {replaced_tex}")
-            return item
-        else:
-            raise RuntimeError("请提供替换图片，或 .animbin 动画字节文件。")
-
-        self.draft_items = [
-            x
-            for x in self.draft_items
-            if not (x.get("bundle") == item["bundle"] and x.get("name") == item["name"] and x.get("kind") == "anim")
-        ]
-        self.draft_items.append(item)
-        self._save_draft()
         self.log(f"已加入作品集（动画数据）：{replaced}")
         return item
 
@@ -1881,25 +1885,26 @@ class ModController:
         draft_dir = self._draft_dir()
         draft_bundle = draft_dir / str(bundle_name)
 
-        if same_bundle:
-            original_bundle = self.original_bundle_path(str(bundle_name))
-            if not draft_bundle.exists() or original_bundle is None:
-                raise RuntimeError(f"找不到作品集资源包：{bundle_name}")
-            self._restore_removed_draft_item(item, draft_bundle, original_bundle)
-        else:
-            draft_bundle.unlink(missing_ok=True)
+        workspace = self.emote_workspace
+        workspace.data_dir.mkdir(parents=True, exist_ok=True)
+        with workspace._prepare_folder("draft-remove-") as folder:
+            staged = {}
+            if same_bundle:
+                original_bundle = self.original_bundle_path(str(bundle_name))
+                if not draft_bundle.exists() or original_bundle is None:
+                    raise RuntimeError(f"找不到作品集资源包：{bundle_name}")
+                restored = folder / str(bundle_name)
+                shutil.copy2(draft_bundle, restored)
+                self._restore_removed_draft_item(item, restored, original_bundle)
+                staged[str(bundle_name)] = restored
+            else:
+                staged[str(bundle_name)] = None
 
-        self.draft_items = remaining
-        active_bundles = set().union(*(item_bundle_names(entry) for entry in remaining)) if remaining else set()
-        for bundle_path in draft_dir.glob("*.bundle"):
-            if bundle_path.name not in active_bundles:
-                bundle_path.unlink(missing_ok=True)
-        self._save_draft()
-        if remaining:
-            self.emote_workspace.write_address_manifest()
-            export_mod_pack(draft_dir, None, pack_name=self.draft_name, items=remaining)
-        else:
-            (draft_dir / "mod_info.json").unlink(missing_ok=True)
+            active_bundles = set().union(*(item_bundle_names(entry) for entry in remaining)) if remaining else set()
+            for bundle_path in draft_dir.glob("*.bundle"):
+                if bundle_path.name not in active_bundles:
+                    staged[bundle_path.name] = None
+            workspace._commit(staged, remaining)
 
         self.log(f"已从作品集移除：{item.get('name')}")
 

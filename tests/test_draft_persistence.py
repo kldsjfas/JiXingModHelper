@@ -137,11 +137,63 @@ class TextureDraftTransactionTests(unittest.TestCase):
         self.assertEqual(self.controller.draft_items, [])
         self.assertEqual(list(self.data.iterdir()), [])
 
+    def test_failed_text_save_restores_existing_bundle_and_items(self):
+        self.controller.original_bundle_path = Mock(return_value=self.game)
+
+        def replace_text(_source, _name, _text, output, **_kwargs):
+            Path(output).write_bytes(b"new candidate text")
+            return "caption"
+
+        with patch.object(mod_controller, "replace_bundle_text", side_effect=replace_text):
+            with self.assertRaises(OSError):
+                self.controller.add_text_to_draft(self.game, "caption", "new words")
+        self.assert_rolled_back()
+
+    def test_failed_dynamic_save_restores_existing_bundle_and_items(self):
+        from astral_party_auto.modkit import animation
+
+        def replace_sequence(_source, _name, _replacement, output, **_kwargs):
+            Path(output).write_bytes(b"new candidate frames")
+
+        with patch.object(animation, "inspect_animation", return_value={"editable": True, "frame_names": ["frame"]}), \
+                patch.object(animation, "replace_bundle_sequence", side_effect=replace_sequence):
+            with self.assertRaises(OSError):
+                self.controller.add_dynamic_to_draft(
+                    self.game, "sequence", self.root / "frames", bundle_name="card.bundle", animation_kind="sequence",
+                )
+        self.assert_rolled_back()
+
+    def test_failed_raw_animation_save_restores_existing_bundle_and_items(self):
+        replacement = self.root / "replacement.animbin"
+        replacement.write_bytes(b"replacement animation")
+
+        def replace_animation(_source, _name, _raw, output, **_kwargs):
+            Path(output).write_bytes(b"new candidate animation")
+            return "clip"
+
+        with patch.object(mod_controller, "replace_bundle_animation_raw", side_effect=replace_animation):
+            with self.assertRaises(OSError):
+                self.controller.add_anim_to_draft(self.game, "clip", raw_path=replacement)
+        self.assert_rolled_back()
+
+    def test_failed_animation_atlas_save_restores_existing_bundle_and_items(self):
+        from astral_party_auto.modkit import clip_atlas
+
+        def replace_atlas(_source, _name, _image, output):
+            Path(output).write_bytes(b"new candidate atlas")
+            return "atlas"
+
+        with patch.object(clip_atlas, "inspect_clip_atlas", return_value={"atlas_editable": True, "atlas_name": "atlas"}), \
+                patch.object(clip_atlas, "replace_clip_atlas_checked", side_effect=replace_atlas):
+            with self.assertRaises(OSError):
+                self.controller.add_anim_to_draft(self.game, "clip", image_path=self.root / "atlas.png")
+        self.assert_rolled_back()
+
     def test_failed_rollback_keeps_previous_bundle_and_reports_recovery_path(self):
         with patch.object(mod_controller.os, "replace", side_effect=PermissionError("bundle is locked")):
             with self.assertRaisesRegex(RuntimeError, "恢复副本保留在") as raised:
                 self.controller.update_draft_texture(0, self.root / "replacement.png")
-        recovery = next(self.data.glob("texture-change-*"))
+        recovery = next(self.data.glob("draft-change-*"))
         self.assertIn(str(recovery), str(raised.exception))
         self.assertEqual((recovery / "previous.bundle").read_bytes(), b"previous complete draft")
         self.assertEqual(json.loads((recovery / "recovery.json").read_text(encoding="utf-8"))["target"], str(self.target))
