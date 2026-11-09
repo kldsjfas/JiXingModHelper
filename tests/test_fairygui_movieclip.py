@@ -120,6 +120,47 @@ class MovieClipWriterTests(unittest.TestCase):
         self.assertEqual([clip["id"] for clip in info["movieclips"]], ["jmsecond"])
         self.assertEqual([sprite["id"] for sprite in info["sprites"]], ["official", "jmsecond_0", "jmsecond_1"])
 
+    def test_shared_atlas_pixels_keep_independent_sprites_through_removal(self):
+        original = movieclip._parse(package_fixture())
+        shared_rects = [[0, 32, 4, 5], [4, 32, 4, 5]]
+        layouts = [("jmfirst", 8, 8, 0, 0), ("jmsecond", 12, 10, 2, 1), ("jmthird", 16, 12, 6, 4)]
+        raw = package_fixture()
+        for item_id, width, height, offset_x, offset_y in layouts:
+            frames = [{"rect": [offset_x, offset_y, 4, 5], "atlas_rect": atlas_rect, "duration_ms": duration}
+                      for atlas_rect, duration in zip(shared_rects, (30, 90))]
+            raw = append(raw, item_id=item_id, width=width, height=height, frames=frames)
+
+        info = movieclip.inspect_movieclip_package(raw)
+        self.assertEqual(len(info["movieclips"]), 3)
+        sprite_rects = {sprite["id"]: sprite["rect"] for sprite in info["sprites"]}
+        self.assertEqual(len(sprite_rects), 7)
+        for clip, (item_id, width, height, offset_x, offset_y) in zip(info["movieclips"], layouts):
+            with self.subTest(item_id=item_id):
+                sprite_ids = [f"{item_id}_{index}" for index in range(2)]
+                self.assertEqual((clip["id"], clip["width"], clip["height"]), (item_id, width, height))
+                self.assertEqual([frame["rect"] for frame in clip["frames"]], [[offset_x, offset_y, 4, 5]] * 2)
+                self.assertEqual([frame["sprite_id"] for frame in clip["frames"]], sprite_ids)
+                self.assertEqual([sprite_rects[sprite_id] for sprite_id in sprite_ids], shared_rects)
+
+        added = movieclip._parse(raw)
+        item_records = {item["id"]: item["_record"] for item in added.items}
+        sprite_records = {sprite["id"]: sprite["_record"] for sprite in added.sprites}
+        remaining_ids = [item_id for item_id, *_ in layouts]
+        for item_id, *_ in layouts:
+            raw = movieclip.remove_movieclip(raw, item_id=item_id)
+            remaining_ids.remove(item_id)
+            remaining = movieclip._parse(raw)
+            expected_item_ids = [item["id"] for item in original.items] + remaining_ids
+            expected_sprite_ids = [sprite["id"] for sprite in original.sprites] + [
+                f"{clip_id}_{index}" for clip_id in remaining_ids for index in range(2)]
+            with self.subTest(removed=item_id):
+                self.assertEqual([item["id"] for item in remaining.items], expected_item_ids)
+                self.assertEqual([sprite["id"] for sprite in remaining.sprites], expected_sprite_ids)
+                self.assertEqual([item["_record"] for item in remaining.items],
+                                 [item_records[remaining_id] for remaining_id in expected_item_ids])
+                self.assertEqual([sprite["_record"] for sprite in remaining.sprites],
+                                 [sprite_records[remaining_id] for remaining_id in expected_sprite_ids])
+
     def test_can_use_trimmed_frame_without_resizing_its_pixels(self):
         written = append(package_fixture(), frames=[{"rect": [2, 1, 4, 5], "atlas_rect": [0, 32, 4, 5], "duration_ms": 100}])
         self.assertEqual(movieclip.inspect_movieclip_package(written)["movieclips"][0]["frames"][0]["rect"], [2, 1, 4, 5])

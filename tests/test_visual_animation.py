@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import copy
 import threading
 import unittest
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
@@ -320,6 +321,277 @@ class VisualVideoPreparationTests(unittest.TestCase):
                     self.assertTrue(all(frame["rect"] == [0, 0, 40, 64] for frame in clip["frames"]))
 
 
+class SharedVideoWorkspaceTests(unittest.TestCase):
+    def setUp(self):
+        from astral_party_auto.modkit import emote_media, visual_animation, visual_config
+        from test_visual_config import card, table
+
+        temporary = TemporaryDirectory(prefix="jixing-shared-video-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        originals = self.root / "originals"
+        originals.mkdir()
+        self.paths = {name: originals / name for name in ("config.bundle", "ui.bundle", "atlas.bundle", "image.bundle")}
+        self.targets = {"UT_HandCard_20018": (40, 64), "UT_HandCard_21001": (42, 64), "UT_HandCard_21007": (32, 64)}
+        rows = [(number, card(number, {6: name})) for number, name in enumerate(self.targets, 20000)]
+        self.paths["config.bundle"].write_bytes(table(rows))
+        self.paths["ui.bundle"].write_bytes(package_fixture().replace(b"test1234", b"xuaw6o8j", 1))
+        self.paths["image.bundle"].write_bytes(b"isolated source texture")
+        Image.new("RGBA", (32, 32), (50, 70, 90, 255)).save(self.paths["atlas.bundle"], format="PNG")
+        self.original_bytes = {name: path.read_bytes() for name, path in self.paths.items()}
+        self.source = self.root / "first-container.mkv"
+        self.alias = self.root / "same-frames-another-container.mov"
+        self.source.write_bytes(b"first source container")
+        self.alias.write_bytes(b"different source bytes with identical decoded frames")
+        self.frames = [Image.new("RGBA", (28, 28), color) for color in ((220, 30, 40, 255), (20, 50, 230, 255))]
+        self.draft = self.root / "draft"
+        self.draft.mkdir()
+        self.controller = Mock(selection=None, draft_items=[])
+        self.controller.original_bundle_path.side_effect = self.paths.get
+        self.controller._draft_dir.return_value = self.draft
+        self.controller.emote_workspace._commit.side_effect = self.commit
+        self.written_atlases = []
+        self.decoded_sizes = []
+
+        @contextmanager
+        def prepare_folder(prefix):
+            with TemporaryDirectory(prefix=prefix, dir=self.root) as folder:
+                yield Path(folder)
+
+        self.controller.emote_workspace._prepare_folder.side_effect = prepare_folder
+        self.workspace = VisualAnimationWorkspace(self.controller)
+        self.context = {"config_bundle": "config.bundle", "ui_bundle": "ui.bundle", "atlas_bundle": "atlas.bundle",
+                        "base_size": (32, 32), "package_id": "xuaw6o8j",
+                        "originals": {name: self.paths[name] for name in ("config.bundle", "ui.bundle", "atlas.bundle")},
+                        "tables": {"Card": visual_config.inspect_visual_config(table(rows), "Card")}}
+        self.workspace.context = Mock(return_value=self.context)
+        self.workspace._source_key = ("isolated bundles", "isolated catalog")
+
+        def read_atlas(path):
+            with Image.open(path) as image:
+                return image.convert("RGBA")
+
+        def write_atlas(source, output, image):
+            self.written_atlases.append(image.copy())
+            image.save(output, format="PNG")
+
+        def replace_config(source, output, table_name, old, new, *, restore_from=None):
+            original = restore_from.read_bytes() if restore_from else None
+            output.write_bytes(visual_config.replace_visual_address(source.read_bytes(), table_name, old, new,
+                                                                   original_raw=original))
+
+        def adapt_video(source, reference, *, source_planner, **_options):
+            plan = source_planner({"width": 28, "height": 28, "display_aspect": 1, "duration_ms": 100})
+            size = (plan["width"], plan["height"])
+            self.decoded_sizes.append(size)
+            return [emote_media._fit_frame(frame, *size) for frame in self.frames], {
+                "width": size[0], "height": size[1], "fps": plan["fps"], "source_width": 28,
+                "source_height": 28, "source_duration_ms": 100,
+            }
+
+        self.enterContext(patch.object(visual_animation, "MAX_ATLAS_EDGE", 64))
+        self.enterContext(patch.object(emote_media, "detect_emote_media", return_value="video"))
+        self.enterContext(patch.object(emote_media, "adapt_video_source", side_effect=adapt_video))
+        self.enterContext(patch.object(visual_animation, "read_descriptor", side_effect=lambda path: path.read_bytes()))
+        self.enterContext(patch.object(visual_animation, "read_atlas", side_effect=read_atlas))
+        self.enterContext(patch.object(visual_animation, "write_descriptor",
+                                     side_effect=lambda source, output, raw: output.write_bytes(raw)))
+        self.enterContext(patch.object(visual_animation, "write_atlas", side_effect=write_atlas))
+        self.enterContext(patch.object(visual_config, "replace_visual_config_bundle", side_effect=replace_config))
+
+    def commit(self, staged, items):
+        for name, source in staged.items():
+            destination = self.draft / name
+            if source is None:
+                destination.unlink(missing_ok=True)
+            else:
+                destination.write_bytes(source.read_bytes())
+        self.controller.draft_items = copy.deepcopy(items)
+
+    def select(self, name):
+        width, height = self.targets[name]
+        self.controller.selection = {"asset_type": "texture", "bundle": "image.bundle", "name": name,
+                                     "width": width, "height": height}
+
+    def save_video(self, name, source=None):
+        self.select(name)
+        with TemporaryDirectory(prefix="candidate-", dir=self.root) as folder:
+            candidate = self.workspace.prepare(source or self.source, Path(folder))
+            item = self.workspace.save(candidate)
+            self.assertEqual(self.workspace.draft_preview(), candidate["animation"])
+        return item
+
+    def package(self):
+        from astral_party_auto.modkit.fairygui_movieclip import inspect_movieclip_package
+
+        return inspect_movieclip_package((self.draft / "ui.bundle").read_bytes())
+
+    def save_legacy_video(self, name, size):
+        from astral_party_auto.modkit import visual_animation
+
+        with patch.object(visual_animation, "plan_card_video", return_value={"width": size[0], "height": size[1], "fps": 20}):
+            self.save_video(name)
+        self.controller.draft_items[-1].pop("frame_content_sha256", None)
+        package = self.package()
+        sprites = {row["id"]: row for row in package["sprites"]}
+        clip = next(row for row in package["movieclips"] if row["id"] == animation_identity(name))
+        return [sprites[frame["sprite_id"]]["rect"] for frame in clip["frames"]]
+
+    def assert_saved_frames(self, names, expected_rects=None):
+        package = self.package()
+        sprites = {row["id"]: row for row in package["sprites"]}
+        with Image.open(self.draft / "atlas.bundle") as image:
+            atlas = image.convert("RGBA")
+        self.assertEqual(atlas.crop((0, 0, 32, 32)).tobytes(), Image.new("RGBA", (32, 32), (50, 70, 90, 255)).tobytes())
+        self.assertEqual(len(package["movieclips"]), len(names))
+        for name in names:
+            identity = animation_identity(name)
+            clip = next(row for row in package["movieclips"] if row["id"] == identity)
+            rects = [sprites[frame["sprite_id"]]["rect"] for frame in clip["frames"]]
+            if expected_rects is not None:
+                self.assertEqual(rects, expected_rects)
+            for index, (frame, rect) in enumerate(zip(clip["frames"], rects)):
+                self.assertEqual(frame["sprite_id"], f"{identity}_{index}")
+                self.assertEqual(frame["rect"][2:], [28, 28])
+                x, y, width, height = rect
+                self.assertEqual(atlas.crop((x, y, x + width, y + height)).tobytes(), self.frames[index].tobytes())
+        return [sprites[frame["sprite_id"]]["rect"] for frame in package["movieclips"][0]["frames"]]
+
+    def test_same_video_and_container_alias_share_pixels_across_one_draft_lifecycle(self):
+        names = list(self.targets)
+        first = self.save_video(names[0])
+        first_rects = self.assert_saved_frames(names[:1])
+        self.assertLess(len(pack_frames((32, 32), first_rects, (28, 28), 2)), 2)
+        for name in names[1:]:
+            item = self.save_video(name, self.alias)
+            self.assertEqual((item["content_width"], item["content_height"]), (28, 28))
+            self.assertEqual(item["frame_content_sha256"], first["frame_content_sha256"])
+            self.assert_saved_frames([row["name"] for row in self.controller.draft_items], first_rects)
+        self.save_video(names[0], self.alias)
+        self.assert_saved_frames(names, first_rects)
+        for name in names[:-1]:
+            index = next(index for index, item in enumerate(self.controller.draft_items) if item["name"] == name)
+            self.workspace.remove(index)
+            remaining = [item["name"] for item in self.controller.draft_items]
+            self.assert_saved_frames(remaining, first_rects)
+        self.workspace.remove(0)
+        self.assertEqual(self.controller.draft_items, [])
+        self.assertFalse(list(self.draft.glob("*.bundle")))
+        last_atlas = self.written_atlases[-1]
+        for x, y, width, height in first_rects:
+            self.assertEqual(last_atlas.crop((x - 1, y - 1, x + width + 1, y + height + 1)).getbbox(), None)
+        self.assertEqual({name: path.read_bytes() for name, path in self.paths.items()}, self.original_bytes)
+
+    def test_legacy_item_without_content_hash_reuses_verified_pixels(self):
+        names = list(self.targets)
+        self.save_video(names[0])
+        first_rects = self.assert_saved_frames(names[:1])
+        self.controller.draft_items[0].pop("frame_content_sha256", None)
+        item = self.save_video(names[1], self.alias)
+        self.assertEqual((item["content_width"], item["content_height"]), (28, 28))
+        self.assert_saved_frames(names[:2], first_rects)
+
+    def test_different_video_fails_before_reducing_quality_or_changing_the_draft(self):
+        names = list(self.targets)
+        self.save_video(names[0])
+        previous_items = copy.deepcopy(self.controller.draft_items)
+        previous_files = {path.name: path.read_bytes() for path in self.draft.glob("*.bundle")}
+        self.frames[0] = Image.new("RGBA", (28, 28), (5, 200, 80, 255))
+        self.select(names[1])
+        with TemporaryDirectory(prefix="candidate-", dir=self.root) as folder, self.assertRaises(ValueError):
+            self.workspace.prepare(self.alias, Path(folder))
+        self.assertEqual(self.controller.draft_items, previous_items)
+        self.assertEqual({path.name: path.read_bytes() for path in self.draft.glob("*.bundle")}, previous_files)
+
+    def test_matching_metadata_cannot_reuse_changed_atlas_pixels(self):
+        names = list(self.targets)
+        self.save_video(names[0])
+        first_rects = self.assert_saved_frames(names[:1])
+        with Image.open(self.draft / "atlas.bundle") as image:
+            atlas = image.convert("RGBA")
+        atlas.putpixel(tuple(first_rects[0][:2]), (1, 2, 3, 255))
+        atlas.save(self.draft / "atlas.bundle", format="PNG")
+        previous_files = {path.name: path.read_bytes() for path in self.draft.glob("*.bundle")}
+        self.select(names[1])
+        with TemporaryDirectory(prefix="candidate-", dir=self.root) as folder, self.assertRaises(ValueError):
+            self.workspace.prepare(self.alias, Path(folder))
+        self.assertEqual(len(self.controller.draft_items), 1)
+        self.assertEqual({path.name: path.read_bytes() for path in self.draft.glob("*.bundle")}, previous_files)
+
+    def test_matching_hash_cannot_bypass_actual_frame_timing_or_sprite_geometry(self):
+        from astral_party_auto.modkit.visual_animation import _find_shared_frames, _frame_content_hash
+
+        self.save_video(next(iter(self.targets)))
+        package = self.package()
+        with Image.open(self.draft / "atlas.bundle") as image:
+            atlas = image.convert("RGBA")
+        changed_timing = [25, 75]
+        forged_hash = _frame_content_hash(self.frames, changed_timing)
+        self.controller.draft_items[0]["frame_content_sha256"] = forged_hash
+        self.assertEqual(_find_shared_frames(package, atlas, self.frames, changed_timing, (32, 32),
+                                             self.controller.draft_items, forged_hash), [])
+        content_hash = _frame_content_hash(self.frames, [50, 50])
+        self.controller.draft_items[0]["frame_content_sha256"] = content_hash
+        sprite_id = package["movieclips"][0]["frames"][0]["sprite_id"]
+        for changes in ({"rect": [1, 1, 28, 28]}, {"rotated": True}, {"trimmed": True}, {"atlas_id": "other"}):
+            with self.subTest(changes=changes):
+                altered = copy.deepcopy(package)
+                sprite = next(row for row in altered["sprites"] if row["id"] == sprite_id)
+                sprite.update(changes)
+                self.assertEqual(_find_shared_frames(altered, atlas, self.frames, [50, 50], (32, 32),
+                                                     self.controller.draft_items, content_hash), [])
+
+    def test_legacy_profiles_redecode_and_reuse_the_highest_verified_resolution(self):
+        names = list(self.targets)
+        highest_rects = self.save_legacy_video(names[0], (20, 20))
+        self.save_legacy_video(names[1], (14, 14))
+        self.decoded_sizes.clear()
+        item = self.save_video(names[2], self.alias)
+        self.assertEqual(self.decoded_sizes, [(28, 28), (20, 20)])
+        self.assertEqual((item["content_width"], item["content_height"]), (20, 20))
+        package = self.package()
+        sprites = {row["id"]: row for row in package["sprites"]}
+        clip = next(row for row in package["movieclips"] if row["id"] == animation_identity(names[2]))
+        self.assertEqual([sprites[frame["sprite_id"]]["rect"] for frame in clip["frames"]], highest_rects)
+        self.assertEqual(len(package["sprites"]), 7)
+
+    def test_legacy_profile_pixels_are_checked_before_trying_a_lower_matching_profile(self):
+        names = list(self.targets)
+        self.save_legacy_video(names[0], (20, 20))
+        self.frames[0] = Image.new("RGBA", (28, 28), (5, 200, 80, 255))
+        matching_rects = self.save_legacy_video(names[1], (14, 14))
+        self.decoded_sizes.clear()
+        item = self.save_video(names[2], self.alias)
+        self.assertEqual(self.decoded_sizes, [(28, 28), (20, 20), (14, 14)])
+        self.assertEqual((item["content_width"], item["content_height"]), (14, 14))
+        package = self.package()
+        sprites = {row["id"]: row for row in package["sprites"]}
+        clip = next(row for row in package["movieclips"] if row["id"] == animation_identity(names[2]))
+        self.assertEqual([sprites[frame["sprite_id"]]["rect"] for frame in clip["frames"]], matching_rects)
+
+
+class FrameContentIdentityTests(unittest.TestCase):
+    def test_content_hash_uses_rgba_pixels_geometry_order_and_timing(self):
+        from astral_party_auto.modkit.visual_animation import _frame_content_hash
+
+        frames = [Image.new("RGBA", (4, 2), (200, 20, 40, 255)), Image.new("RGBA", (4, 2), (20, 40, 200, 255))]
+        original = _frame_content_hash(frames, [100, 200])
+        self.assertEqual(original, _frame_content_hash([frame.convert("RGB") for frame in frames], [100, 200]))
+        self.assertNotEqual(original, _frame_content_hash(frames, [200, 100]))
+        self.assertNotEqual(original, _frame_content_hash(list(reversed(frames)), [100, 200]))
+        reshaped = [Image.frombytes("RGBA", (2, 4), frame.tobytes()) for frame in frames]
+        self.assertNotEqual(original, _frame_content_hash(reshaped, [100, 200]))
+
+    def test_content_hash_rejects_missing_or_invalid_timing(self):
+        from astral_party_auto.modkit.visual_animation import _frame_content_hash
+
+        frame = Image.new("RGBA", (2, 2))
+        for frames, durations in (([], []), ([frame], []), ([frame], [0]), ([frame], [True]),
+                                  ([frame], [1.5]), ([frame], [60001])):
+            with self.subTest(durations=durations), self.assertRaises(ValueError):
+                _frame_content_hash(frames, durations)
+
+
 class VisualSelectionTests(unittest.TestCase):
     def test_saved_candidate_cannot_cross_a_catalog_source_change(self):
         selection = {"asset_type": "texture", "bundle": "card.bundle", "name": "UT_HandCard_1"}
@@ -487,6 +759,58 @@ class VisualRemovalGuardTests(unittest.TestCase):
         before = self.atlas.tobytes()
         with self.assertRaises(ValueError):
             _clear_clip_pixels(self.atlas, self.package, self.clip, (8, 8))
+        self.assertEqual(self.atlas.tobytes(), before)
+
+    def test_identical_rect_alias_keeps_pixels_until_the_final_clip_is_removed(self):
+        self.package["sprites"][0]["id"] = "jmowner_0"
+        owner = {"id": "jmowner", "path": "/JiXingModHelper/Animations/", "frames": [{"sprite_id": "jmowner_0"}]}
+        alias = {"id": "jmalias", "path": "/JiXingModHelper/Animations/", "frames": [{"sprite_id": "jmalias_0"}]}
+        alias_sprite = dict(self.package["sprites"][0], id="jmalias_0")
+        self.package["sprites"].append(alias_sprite)
+        self.package["movieclips"] = [owner, alias]
+        before = self.atlas.tobytes()
+        _clear_clip_pixels(self.atlas, self.package, owner, (8, 8))
+        self.assertEqual(self.atlas.tobytes(), before)
+        self.package["sprites"] = [row for row in self.package["sprites"] if row["id"] != "jmowner_0"]
+        self.package["movieclips"] = [alias]
+        _clear_clip_pixels(self.atlas, self.package, alias, (8, 8))
+        self.assertIsNone(self.atlas.crop((11, 11, 17, 17)).getbbox())
+        self.assertEqual(self.atlas.getpixel((0, 0)), (45, 90, 120, 255))
+        self.assertEqual(self.atlas.getpixel((20, 20)), (45, 90, 120, 255))
+
+    def test_self_reimport_can_retain_its_exact_verified_rectangles(self):
+        before = self.atlas.tobytes()
+        _clear_clip_pixels(self.atlas, self.package, self.clip, (8, 8), retained_rects=[[12, 12, 4, 4]])
+        self.assertEqual(self.atlas.tobytes(), before)
+
+    def test_alias_cleanup_rejects_partial_overlap_unreferenced_and_modified_sprites(self):
+        cases = [({"rect": [13, 12, 4, 4]}, True, "/JiXingModHelper/Animations/"),
+                 ({}, False, "/JiXingModHelper/Animations/"), ({}, True, "/External/"),
+                 ({"rotated": True}, True, "/JiXingModHelper/Animations/"),
+                 ({"trimmed": True}, True, "/JiXingModHelper/Animations/"),
+                 ({"atlas_id": "other"}, True, "/JiXingModHelper/Animations/")]
+        for changes, referenced, path in cases:
+            with self.subTest(changes=changes, referenced=referenced, path=path):
+                package = copy.deepcopy(self.package)
+                alias = dict(package["sprites"][0], id="jmalias_0")
+                alias.update(changes)
+                package["sprites"].append(alias)
+                package["movieclips"] = ([{"id": "jmalias", "path": path, "frames": [{"sprite_id": "jmalias_0"}]}]
+                                         if referenced else [])
+                before = self.atlas.tobytes()
+                with self.assertRaises(ValueError):
+                    _clear_clip_pixels(self.atlas, package, self.clip, (8, 8))
+                self.assertEqual(self.atlas.tobytes(), before)
+
+    def test_allowed_alias_does_not_hide_another_partially_overlapping_resource(self):
+        package = copy.deepcopy(self.package)
+        package["sprites"].append(dict(package["sprites"][0], id="jmalias_0"))
+        package["sprites"].append(dict(package["sprites"][0], id="unknown", rect=[16, 12, 4, 4]))
+        package["movieclips"] = [{"id": "jmalias", "path": "/JiXingModHelper/Animations/",
+                                  "frames": [{"sprite_id": "jmalias_0"}]}]
+        before = self.atlas.tobytes()
+        with self.assertRaises(ValueError):
+            _clear_clip_pixels(self.atlas, package, self.clip, (8, 8))
         self.assertEqual(self.atlas.tobytes(), before)
 
     def test_incomplete_or_forged_table_list_cannot_start_removal(self):
