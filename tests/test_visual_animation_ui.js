@@ -56,7 +56,7 @@ function selection(name = "Card_A", changes = {}) {
     ...changes };
 }
 
-function loadUi() {
+function loadUi(overrides = {}) {
   const elements = new Map();
   const find = (id) => {
     if (!elements.has(id)) elements.set(id, element(id));
@@ -80,6 +80,7 @@ function loadUi() {
     renderAnimation: (media, value) => rendered.push({ id: media.id, animation: value }),
     renderAnimationState: (media, message) => rendered.push({ id: media.id, message }),
     onSave: (data) => saved.push(data), toast: (message) => toasts.push(message),
+    ...overrides,
   });
   return { ...context.ui, editor, find, requests, responses, rendered, saved, toasts,
     async refresh(value) { selected = value; return editor.refresh(value); },
@@ -293,6 +294,179 @@ async function checkSavedPreviewAndFailure() {
   assert.equal(ui.find("visual-animation-import").disabled, false);
 }
 
+async function checkCancelledOrFailedImportKeepsSavedPreview() {
+  for (const response of [null, new Error("新视频无法解码")]) {
+    const ui = loadUi();
+    const saved = animation("already-saved");
+    ui.responses.push(saved);
+    await ui.refresh(selection("Card_A", { visual_animation: { editable: true, draft: true } }));
+    ui.responses.push({ name: "candidate.webp", animation: animation("candidate") });
+    await ui.choose();
+    ui.responses.push(response);
+    await ui.choose();
+    assert.equal(ui.state.candidate, null, "Cancelled or failed selection reused an invalidated candidate");
+    assert.equal(ui.state.savedAnimation, saved, "Cancelled or failed selection discarded the saved preview");
+    assert.equal(ui.rendered.at(-1).animation, saved);
+    assert.equal(ui.find("visual-animation-save").disabled, true);
+    assert.equal(ui.find("visual-animation-import").disabled, false);
+    if (response instanceof Error) assert.match(ui.find("visual-animation-status").textContent, /无法解码/);
+  }
+}
+
+async function checkRemovedDraftInvalidatesPendingPreview() {
+  const ui = loadUi();
+  const late = deferred();
+  ui.responses.push(late.promise);
+  const loading = ui.refresh(selection("Card_A", { visual_animation: { editable: true, draft: true } }));
+  await ui.refresh(selection("Card_A", { visual_animation: { editable: true, draft: false } }));
+  assert.equal(ui.state.loading, false, "Removed draft left the editor waiting for an obsolete preview");
+  assert.equal(ui.find("visual-animation-import").disabled, false);
+  late.resolve(animation("removed-draft"));
+  await loading;
+  assert.equal(ui.state.savedAnimation, null, "Late preview restored a removed draft");
+  assert.equal(ui.rendered.at(-1).animation, undefined);
+}
+
+async function checkCommittedSaveSurvivesRefreshFailure() {
+  const ui = loadUi({ onSave() { throw new Error("作品集列表刷新失败"); } });
+  const source = selection();
+  await ui.refresh(source);
+  ui.responses.push({ name: "candidate.webp", animation: animation("candidate") });
+  await ui.choose();
+  const saved = { animation: animation("actual-saved"), draft: { items: [{ name: source.name }] } };
+  ui.responses.push(saved);
+  await ui.save();
+  assert.equal(source.visual_animation.draft, true, "Committed save was not marked as saved after refresh failed");
+  assert.equal(ui.state.candidate, null);
+  assert.equal(ui.state.savedAnimation, saved.animation);
+  assert.equal(ui.rendered.at(-1).animation, saved.animation);
+  assert.match(ui.find("visual-animation-status").textContent, /已保存/);
+  assert.match(ui.find("visual-animation-status").textContent, /列表刷新失败/);
+  assert.doesNotMatch(ui.find("visual-animation-status").textContent, /保存未能完成检查/);
+  assert.match(ui.toasts.at(-1), /已保存/);
+  const calls = ui.requests.length;
+  await ui.save();
+  assert.equal(ui.requests.length, calls);
+}
+
+async function checkFailedSaveKeepsPreviousSavedPreview() {
+  const ui = loadUi();
+  const original = animation("previous-saved");
+  ui.responses.push(original);
+  await ui.refresh(selection("Card_A", { visual_animation: { editable: true, draft: true } }));
+  ui.responses.push({ name: "replacement.webp", animation: animation("replacement") });
+  await ui.choose();
+  ui.responses.push(new Error("草稿写入失败，已回滚"));
+  await ui.save();
+  assert.equal(ui.state.candidate, null);
+  assert.equal(ui.state.savedAnimation, original, "Failed commit discarded the unchanged saved draft preview");
+  assert.equal(ui.rendered.at(-1).animation, original);
+  assert.match(ui.find("visual-animation-status").textContent, /草稿写入失败/);
+  assert.equal(ui.find("visual-animation-save").disabled, true);
+  assert.equal(ui.find("visual-animation-import").disabled, false);
+}
+
+async function checkCommittedSaveAwaitsRefreshFailure() {
+  const updating = deferred();
+  const started = deferred();
+  const ui = loadUi({ onSave() { started.resolve(); return updating.promise; } });
+  const source = selection();
+  await ui.refresh(source);
+  ui.responses.push({ name: "candidate.webp", animation: animation("candidate") });
+  await ui.choose();
+  const saved = { animation: animation("actual-saved"), draft: { items: [{ name: source.name }] } };
+  ui.responses.push(saved);
+  const saving = ui.save();
+  await started.promise;
+  assert.equal(ui.state.working, true, "Save finished before the refresh callback settled");
+  assert.equal(ui.state.candidate, null);
+  assert.equal(ui.rendered.at(-1).animation, saved.animation);
+  updating.reject(new Error("异步作品集刷新失败"));
+  await saving;
+  assert.equal(ui.state.working, false);
+  assert.equal(source.visual_animation.draft, true);
+  assert.equal(ui.state.savedAnimation, saved.animation);
+  assert.match(ui.find("visual-animation-status").textContent, /已保存/);
+  assert.match(ui.find("visual-animation-status").textContent, /异步作品集刷新失败/);
+}
+
+async function checkCommittedSaveReportsUnavailableDraftList() {
+  const ui = loadUi();
+  await ui.refresh(selection());
+  ui.responses.push({ name: "candidate.webp", animation: animation("candidate") });
+  await ui.choose();
+  const data = { item: { name: "Card_A" }, animation: animation("actual-saved"), draft: null,
+    notice: "动态作品已经保存，作品集列表未刷新：草稿状态不可用。可打开作品集重新加载。" };
+  ui.responses.push(data);
+  await ui.save();
+  assert.equal(ui.saved[0], data);
+  assert.equal(ui.saved[0].draft, null);
+  assert.equal(ui.state.savedAnimation, data.animation);
+  assert.equal(ui.rendered.at(-1).animation, data.animation);
+  assert.match(ui.find("visual-animation-status").textContent, /已经保存/);
+  assert.match(ui.find("visual-animation-status").textContent, /作品集列表未刷新/);
+  assert.equal(ui.find("visual-animation-save").disabled, true);
+}
+
+async function checkCommittedPreviewCanBeRetried() {
+  const ui = loadUi();
+  const source = selection();
+  await ui.refresh(source);
+  ui.responses.push({ name: "candidate.webp", animation: animation("candidate") });
+  await ui.choose();
+  ui.responses.push({ animation: { frames: [], notice: "回读超时" }, draft: { items: [{ name: source.name }] } });
+  await ui.save();
+  ui.responses.push(animation("retry-readback"));
+  await ui.refresh(source);
+  assert.equal(ui.state.savedAnimation.frames[0], "retry-readback-1", "An empty saved preview prevented a retry");
+  assert.equal(ui.state.error, "");
+  assert.equal(ui.find("visual-animation-save").disabled, true);
+}
+
+async function checkRepeatedActionsAreSerialized() {
+  const ui = loadUi();
+  await ui.refresh(selection());
+  const importing = deferred();
+  ui.responses.push(importing.promise);
+  const choosing = ui.choose();
+  await ui.choose();
+  await ui.save();
+  assert.deepEqual(ui.requests, ["choose_visual_animation"]);
+  importing.resolve({ name: "candidate.webp", animation: animation("candidate") });
+  await choosing;
+  const result = deferred();
+  ui.responses.push(result.promise);
+  const saving = ui.save();
+  await ui.save();
+  await ui.choose();
+  assert.deepEqual(ui.requests, ["choose_visual_animation", "save_visual_animation"]);
+  result.resolve({ animation: animation("actual-saved"), draft: { items: [] } });
+  await saving;
+  assert.equal(ui.find("visual-animation-save").disabled, true);
+}
+
+async function checkLateRefreshCallbackCannotChangeNewCandidate() {
+  const updating = deferred();
+  const started = deferred();
+  const ui = loadUi({ onSave() { started.resolve(); return updating.promise; } });
+  await ui.refresh(selection("Card_A"));
+  ui.responses.push({ name: "A.webp", animation: animation("A") });
+  await ui.choose();
+  ui.responses.push({ animation: animation("A-saved"), draft: { items: [{ name: "Card_A" }] } });
+  const saving = ui.save();
+  await started.promise;
+  await ui.refresh(selection("Card_B"));
+  ui.responses.push({ name: "B.webp", animation: animation("B") });
+  await ui.choose();
+  updating.reject(new Error("旧资源的刷新失败"));
+  await saving;
+  assert.equal(ui.state.candidate.name, "B.webp");
+  assert.equal(ui.state.savedAnimation, null);
+  assert.equal(ui.state.error, "");
+  assert.equal(ui.rendered.at(-1).animation.frames[0], "B-1");
+  assert.equal(ui.find("visual-animation-save").disabled, false);
+}
+
 async function checkLateImportAndPageLeave() {
   const ui = loadUi();
   await ui.refresh(selection("Card_A"));
@@ -367,7 +541,10 @@ async function checkProductionAppIntegration() {
       const name = url.split("/").at(-1);
       const queue = responses.get(name);
       assert.ok(queue?.length, `Unexpected API request: ${name}`);
-      return { json: async () => ({ ok: true, data: await queue.shift() }) };
+      return { json: async () => {
+        const data = await queue.shift();
+        return data instanceof Error ? { ok: false, error: data.message } : { ok: true, data };
+      } };
     },
   });
   const folder = path.join(__dirname, "../astral_party_auto/webui");
@@ -386,13 +563,34 @@ async function checkProductionAppIntegration() {
   answer("choose_visual_animation", { name: "test.webp", animation: animation("production-candidate") });
   await find("visual-animation-import").trigger("click");
   assert.equal(ui.state.animationPlayers.get("visual-animation-preview").animation.frames[0], "production-candidate-1");
-  const actual = animation("production-saved");
+  let actual = animation("production-saved");
   const item = { kind: "visual_animation", name: "Card_A", bundle: "config.bundle", note: "test.webp" };
   answer("save_visual_animation", { item, animation: actual, draft: { name: "测试作品", items: [item] } });
   await find("visual-animation-save").trigger("click");
   assert.equal(ui.state.draft.items[0], item);
   assert.equal(ui.state.animationPlayers.get("visual-animation-preview").animation, actual);
   assert.match(find("draft-list").children[0].innerHTML, /\[动\]/);
+  answer("choose_visual_animation", null);
+  await find("visual-animation-import").trigger("click");
+  assert.equal(ui.state.animationPlayers.get("visual-animation-preview").animation, actual,
+    "Cancelled file dialog discarded the saved player through the normal app entry");
+  answer("choose_visual_animation", new Error("新视频解码失败"));
+  await find("visual-animation-import").trigger("click");
+  assert.equal(ui.state.animationPlayers.get("visual-animation-preview").animation, actual,
+    "Failed import discarded the saved player through the normal app entry");
+  assert.match(find("visual-animation-status").textContent, /新视频解码失败/);
+  assert.equal(find("visual-animation-save").disabled, true);
+  const previousDraft = ui.state.draft;
+  answer("choose_visual_animation", { name: "updated.webp", animation: animation("updated-candidate") });
+  await find("visual-animation-import").trigger("click");
+  actual = animation("production-saved-list-unavailable");
+  answer("save_visual_animation", { item, animation: actual, draft: null,
+    notice: "动态作品已经保存，作品集列表未刷新：读取失败。可打开作品集重新加载。" });
+  await find("visual-animation-save").trigger("click");
+  assert.equal(ui.state.draft, previousDraft, "Unavailable draft response replaced the previous list with an empty draft");
+  assert.equal(ui.state.animationPlayers.get("visual-animation-preview").animation, actual);
+  assert.match(find("visual-animation-status").textContent, /已经保存/);
+  assert.match(find("visual-animation-status").textContent, /列表未刷新/);
   context.window.VisualAnimation.leave();
   ui.state.page = "pack";
   answer("get_draft_detail", { item, original_data: source.preview_data, modified_animation: actual,
@@ -420,11 +618,15 @@ async function main() {
   for (const check of [checkSupportedScope, checkUnavailableResourceStaysVisible, checkUnavailableRefreshInvalidatesCandidates,
     checkCandidateInvalidation, checkSaveReadsActualOutput, checkSaveFailureCannotReuseCandidate,
     checkCommittedSaveWithUnavailablePreview, checkRemovedSavedAnimationIsCleared,
-    checkSavedPreviewAndFailure, checkLateImportAndPageLeave, checkLateSavedPreviewCannotReplaceNewCandidate, checkLateSaveCannotReplaceNewSelection,
+    checkSavedPreviewAndFailure, checkCancelledOrFailedImportKeepsSavedPreview, checkRemovedDraftInvalidatesPendingPreview,
+    checkCommittedSaveSurvivesRefreshFailure, checkFailedSaveKeepsPreviousSavedPreview,
+    checkCommittedSaveAwaitsRefreshFailure, checkCommittedSaveReportsUnavailableDraftList, checkCommittedPreviewCanBeRetried,
+    checkRepeatedActionsAreSerialized, checkLateRefreshCallbackCannotChangeNewCandidate,
+    checkLateImportAndPageLeave, checkLateSavedPreviewCannotReplaceNewCandidate, checkLateSaveCannotReplaceNewSelection,
     checkProductionAppIntegration]) {
     await check();
   }
-  console.log("PASS: 动态卡面/立绘入口显示可用状态和原因；不可用资源禁止导入、保存及预览请求；取消、失败、切资源、切页和迟到响应清空候选；保存显示实际回读并更新作品集。");
+  console.log("PASS: 动态卡面/立绘22项回归通过，覆盖取消与失败回退、迟到响应、提交后的刷新失败、空预览重试、防重复操作及真实app入口。");
 }
 
 main().catch((error) => { console.error(error); process.exitCode = 1; });

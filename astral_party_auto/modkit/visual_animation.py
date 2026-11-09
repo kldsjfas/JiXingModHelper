@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+from contextlib import ExitStack
 from datetime import datetime
 import copy
 from pathlib import Path
@@ -189,6 +190,10 @@ def _owned_sprite_area(sprite: dict, base_size: tuple[int, int], atlas_size: tup
 
 
 def _clip_pixel_rects(package: dict, clip: dict, base_size: tuple[int, int], atlas_size: tuple[int, int]) -> list[list[int]]:
+    from .fairygui_movieclip import _OWN_PATH
+
+    if clip.get("path") != _OWN_PATH:
+        raise ValueError("动画资源不属于当前工具生成的片段。")
     sprites = {row["id"]: row for row in package["sprites"]}
     rects = []
     for index, frame in enumerate(clip["frames"]):
@@ -211,11 +216,16 @@ def _find_shared_frames(package: dict, atlas: Image.Image, frames: list[Image.Im
     for item in draft_items:
         if item.get("kind") != "visual_animation" or item.get("frame_content_sha256") not in (None, content_hash):
             continue
-        clip = clips.get(animation_identity(item["name"]))
+        name = item.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        clip = clips.get(animation_identity(name))
         if clip is None or [row["duration_ms"] for row in clip["frames"]] != durations:
             continue
         try:
             rects = _clip_pixel_rects(package, clip, base_size, atlas.size)
+            # 保留全部候选区域，只执行与删除入口相同的共享几何检查。
+            _clear_clip_pixels(atlas, package, clip, base_size, retained_rects=rects)
         except ValueError:
             continue
         if len(rects) != len(frames) or any(tuple(rect[2:]) != frame.size for rect, frame in zip(rects, frames)):
@@ -235,13 +245,19 @@ def _find_shared_frames(package: dict, atlas: Image.Image, frames: list[Image.Im
 def _legacy_video_profiles(package: dict, atlas: Image.Image, draft_items: list[dict], video_info: dict,
                            durations: list[int], base_size: tuple[int, int], reference_size: tuple[int, int]) -> list[tuple[int, int]]:
     """旧草稿未记录内容摘要，只把现有尺寸作为候选，后续仍逐帧核对。"""
+    from .emote_media import MAX_OUTPUT_PIXELS, MAX_VIDEO_FRAME_PIXELS
+
     clips = {row["id"]: row for row in package["movieclips"]}
     profiles = set()
+    pixel_budget = min(MAX_VIDEO_FRAME_PIXELS, MAX_OUTPUT_PIXELS // len(durations))
     for item in draft_items:
         if (item.get("kind") != "visual_animation" or item.get("video_source_width") != video_info["source_width"]
                 or item.get("video_source_height") != video_info["source_height"]):
             continue
-        clip = clips.get(animation_identity(item["name"]))
+        name = item.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        clip = clips.get(animation_identity(name))
         if clip is None or [row["duration_ms"] for row in clip["frames"]] != durations:
             continue
         try:
@@ -250,6 +266,8 @@ def _legacy_video_profiles(package: dict, atlas: Image.Image, draft_items: list[
             if len(sizes) != 1:
                 continue
             size = sizes.pop()
+            if size[0] * size[1] > pixel_budget:
+                continue
             card_video_canvas(reference_size, size)
         except ValueError:
             continue
@@ -503,118 +521,123 @@ class VisualAnimationWorkspace:
             package = inspect_movieclip_package(raw)
         source_size = (selection["width"], selection["height"])
         occupied = [list(rect) for rect in dict.fromkeys(tuple(row["rect"]) for row in package["sprites"] if row["id"].startswith("jm"))]
-        decoded_size = source_size
-        video_info = None
-        kind = detect_emote_media(source)
-        if kind == "video":
-            frames, video_info = adapt_video_source(
-                source, {"width": source_size[0], "height": source_size[1], "fps": 12}, work_dir=folder,
-                source_planner=lambda info: plan_card_video(
-                    context["base_size"], [], source_size, info["duration_ms"],
-                    video_size=(info["width"], info["height"]), display_aspect=info["display_aspect"]))
-            decoded_size = (video_info["width"], video_info["height"])
-            total_ms = round(video_info["source_duration_ms"])
-            durations = [round((index + 1) * total_ms / len(frames)) - round(index * total_ms / len(frames))
-                         for index in range(len(frames))]
-        elif kind == "usm":
-            raise ValueError("卡面和立绘目前使用逐帧图片，请导入 GIF、APNG、WebP 或普通视频。")
-        else:
-            frames, durations, _ = _read_replacement(source)
-        original_count = len(frames)
-        current_atlas = read_atlas(sources[context["atlas_bundle"]])
-        content_hash = None
-        reused_frames = False
-        if video_info is not None:
-            size = decoded_size
-            content_hash = _frame_content_hash(frames, durations)
-            placements = _find_shared_frames(existing_package, current_atlas, frames, durations,
-                                              context["base_size"], draft_items, content_hash)
-            reused_frames = bool(placements)
-            if not placements:
-                placements = pack_frames(context["base_size"], occupied, size, len(frames))
-            if len(placements) != len(frames):
-                profiles = _legacy_video_profiles(existing_package, current_atlas, draft_items, video_info,
-                                                   durations, context["base_size"], source_size)
-                for frame in frames:
-                    frame.close()
-                for profile in profiles:
-                    if profile == size:
-                        continue
-                    possible_frames, possible_info = adapt_video_source(
-                        source, {"width": profile[0], "height": profile[1], "fps": video_info["fps"]}, work_dir=folder,
-                        source_planner=lambda info, profile=profile: {
-                            "width": profile[0], "height": profile[1], "fps": original_count * 1000 / info["duration_ms"],
-                        })
-                    possible_hash = _frame_content_hash(possible_frames, durations)
-                    shared = _find_shared_frames(existing_package, current_atlas, possible_frames, durations,
-                                                  context["base_size"], draft_items, possible_hash)
-                    if shared:
-                        frames, video_info, size = possible_frames, possible_info, profile
-                        content_hash, placements, reused_frames = possible_hash, shared, True
-                        break
-                    for frame in possible_frames:
+        with ExitStack() as images:
+            decoded_size = source_size
+            video_info = None
+            kind = detect_emote_media(source)
+            if kind == "video":
+                frames, video_info = adapt_video_source(
+                    source, {"width": source_size[0], "height": source_size[1], "fps": 12}, work_dir=folder,
+                    source_planner=lambda info: plan_card_video(
+                        context["base_size"], [], source_size, info["duration_ms"],
+                        video_size=(info["width"], info["height"]), display_aspect=info["display_aspect"]))
+                decoded_size = (video_info["width"], video_info["height"])
+                total_ms = round(video_info["source_duration_ms"])
+                durations = [round((index + 1) * total_ms / len(frames)) - round(index * total_ms / len(frames))
+                             for index in range(len(frames))]
+            elif kind == "usm":
+                raise ValueError("卡面和立绘目前使用逐帧图片，请导入 GIF、APNG、WebP 或普通视频。")
+            else:
+                frames, durations, _ = _read_replacement(source)
+            for frame in frames:
+                images.callback(frame.close)
+            original_count = len(frames)
+            current_atlas = images.enter_context(read_atlas(sources[context["atlas_bundle"]]))
+            content_hash = None
+            reused_frames = False
+            if video_info is not None:
+                size = decoded_size
+                content_hash = _frame_content_hash(frames, durations)
+                placements = _find_shared_frames(existing_package, current_atlas, frames, durations,
+                                                  context["base_size"], draft_items, content_hash)
+                reused_frames = bool(placements)
+                if not placements:
+                    placements = pack_frames(context["base_size"], occupied, size, len(frames))
+                if len(placements) != len(frames):
+                    profiles = _legacy_video_profiles(existing_package, current_atlas, draft_items, video_info,
+                                                       durations, context["base_size"], source_size)
+                    for frame in frames:
                         frame.close()
+                    for profile in profiles:
+                        if profile == size:
+                            continue
+                        possible_frames, possible_info = adapt_video_source(
+                            source, {"width": profile[0], "height": profile[1], "fps": video_info["fps"]}, work_dir=folder,
+                            source_planner=lambda info, profile=profile: {
+                                "width": profile[0], "height": profile[1], "fps": original_count * 1000 / info["duration_ms"],
+                            })
+                        for frame in possible_frames:
+                            images.callback(frame.close)
+                        possible_hash = _frame_content_hash(possible_frames, durations)
+                        shared = _find_shared_frames(existing_package, current_atlas, possible_frames, durations,
+                                                      context["base_size"], draft_items, possible_hash)
+                        if shared:
+                            frames, video_info, size = possible_frames, possible_info, profile
+                            content_hash, placements, reused_frames = possible_hash, shared, True
+                            break
+                        for frame in possible_frames:
+                            frame.close()
+                    if not reused_frames:
+                        raise ValueError(f"图集空间不足，无法保存 {size[0]} × {size[1]} 像素的 {original_count} 帧视频。请移除其它动态作品或另建作品集。")
+            else:
+                size, placements = fit_animation_frames(context["base_size"], occupied, decoded_size, len(frames))
+            canvas_size, frame_rect = card_video_canvas(source_size, size) if video_info is not None else (size, [0, 0, *size])
+            frames, durations = sample_frames(frames, durations, len(placements))
+            placements = placements[:len(frames)]
+            atlas = images.enter_context(Image.new("RGBA", (MAX_ATLAS_EDGE, MAX_ATLAS_EDGE)))
+            atlas.paste(current_atlas, (0, 0))
+            before_original = current_atlas.crop((0, 0, *context["base_size"])).tobytes()
+            if existing:
+                _clear_clip_pixels(atlas, existing_package, existing, context["base_size"],
+                                   retained_rects=placements if reused_frames else ())
+            records = []
+            for frame, duration, rect in zip(frames, durations, placements):
                 if not reused_frames:
-                    raise ValueError(f"图集空间不足，无法保存 {size[0]} × {size[1]} 像素的 {original_count} 帧视频。请移除其它动态作品或另建作品集。")
-        else:
-            size, placements = fit_animation_frames(context["base_size"], occupied, decoded_size, len(frames))
-        canvas_size, frame_rect = card_video_canvas(source_size, size) if video_info is not None else (size, [0, 0, *size])
-        frames, durations = sample_frames(frames, durations, len(placements))
-        placements = placements[:len(frames)]
-        atlas = Image.new("RGBA", (MAX_ATLAS_EDGE, MAX_ATLAS_EDGE))
-        atlas.paste(current_atlas, (0, 0))
-        before_original = current_atlas.crop((0, 0, *context["base_size"])).tobytes()
-        if existing:
-            _clear_clip_pixels(atlas, existing_package, existing, context["base_size"],
-                               retained_rects=placements if reused_frames else ())
-        records = []
-        for frame, duration, rect in zip(frames, durations, placements):
-            if not reused_frames:
-                fitted = _fit_frame(frame, *size)
-                atlas.paste(fitted, tuple(rect[:2]))
-            records.append({"rect": frame_rect, "atlas_rect": rect, "duration_ms": duration})
-        if atlas.crop((0, 0, *context["base_size"])).tobytes() != before_original:
-            raise ValueError("动态帧覆盖了原版界面像素，未保存。")
-        raw = append_movieclip(raw, item_id=item_id, atlas_id="atlas0", width=canvas_size[0], height=canvas_size[1],
-                               frames=records, atlas_width=MAX_ATLAS_EDGE, atlas_height=MAX_ATLAS_EDGE)
-        ui_output = folder / context["ui_bundle"]
-        atlas_output = folder / context["atlas_bundle"]
-        write_descriptor(sources[context["ui_bundle"]], ui_output, raw)
-        write_atlas(sources[context["atlas_bundle"]], atlas_output, atlas)
-        url = "ui://" + context["package_id"] + item_id
-        config_output = folder / context["config_bundle"]
-        config_source = sources[context["config_bundle"]]
-        old_item = next((item for item in self.controller.draft_items if item.get("kind") == "visual_animation" and item.get("name") == selection["name"]), None)
-        for index, table in enumerate(support["tables"]):
-            old_address = old_item["movieclip_url"] if old_item else selection["name"]
-            destination = config_output if index == len(support["tables"]) - 1 else folder / f"config-{index}.bundle"
-            replace_visual_config_bundle(config_source, destination, table, old_address, url)
-            config_source = destination
-        item = {"kind": "visual_animation", "bundle": context["config_bundle"], "name": selection["name"],
-                "source_bundle": selection["bundle"], "extra_bundles": [context["ui_bundle"], context["atlas_bundle"]],
-                "tables": support["tables"], "movieclip_url": url, "frame_count": len(frames), "duration_ms": sum(durations),
-                "width": canvas_size[0], "height": canvas_size[1], "source_width": source_size[0], "source_height": source_size[1],
-                "content_width": size[0], "content_height": size[1],
-                "note": source.name, "at": datetime.now().isoformat(timespec="seconds")}
-        if any(_digest(Path(path)) != digest for path, digest in fingerprints.items()):
-            raise ValueError("素材或草稿在制作过程中改变，请重新导入。")
-        preview = self.preview(selection["name"], ui_output, atlas_output)
-        notice = f"输出 {len(frames)} 帧 · {sum(durations) / 1000:.2f} 秒 · 画布 {canvas_size[0]} × {canvas_size[1]}，实际帧像素 {size[0]} × {size[1]}。"
-        if len(frames) < original_count:
-            notice += "已按图集剩余空间抽帧。"
-        if video_info is not None:
-            item.update(video_source_width=video_info["source_width"], video_source_height=video_info["source_height"],
-                        frame_content_sha256=content_hash)
-            notice += f"源视频 {video_info['source_width']} × {video_info['source_height']}，按实际时长采样为 {video_info['fps']:.2f} 帧/秒，忽略音轨。"
-            if reused_frames:
-                notice += "已复用作品集中的相同视频帧。"
-        elif size != source_size:
-            notice += f"原卡面 {source_size[0]} × {source_size[1]}，动画已等比缩小，由游戏按显示框缩放。"
-        return {"item": item, "staged": {context["config_bundle"]: config_output, context["ui_bundle"]: ui_output, context["atlas_bundle"]: atlas_output},
-                "catalog_source_key": self._source_key,
-                "fingerprints": fingerprints, "output_hashes": {str(path): _digest(path) for path in (config_output, ui_output, atlas_output)},
-                "draft_items": draft_items, "source_paths": {name: str(path) for name, path in sources.items()},
-                "animation": preview, "notice": notice}
+                    with _fit_frame(frame, *size) as fitted:
+                        atlas.paste(fitted, tuple(rect[:2]))
+                records.append({"rect": frame_rect, "atlas_rect": rect, "duration_ms": duration})
+            if atlas.crop((0, 0, *context["base_size"])).tobytes() != before_original:
+                raise ValueError("动态帧覆盖了原版界面像素，未保存。")
+            raw = append_movieclip(raw, item_id=item_id, atlas_id="atlas0", width=canvas_size[0], height=canvas_size[1],
+                                   frames=records, atlas_width=MAX_ATLAS_EDGE, atlas_height=MAX_ATLAS_EDGE)
+            ui_output = folder / context["ui_bundle"]
+            atlas_output = folder / context["atlas_bundle"]
+            write_descriptor(sources[context["ui_bundle"]], ui_output, raw)
+            write_atlas(sources[context["atlas_bundle"]], atlas_output, atlas)
+            url = "ui://" + context["package_id"] + item_id
+            config_output = folder / context["config_bundle"]
+            config_source = sources[context["config_bundle"]]
+            old_item = next((item for item in self.controller.draft_items if item.get("kind") == "visual_animation" and item.get("name") == selection["name"]), None)
+            for index, table in enumerate(support["tables"]):
+                old_address = old_item["movieclip_url"] if old_item else selection["name"]
+                destination = config_output if index == len(support["tables"]) - 1 else folder / f"config-{index}.bundle"
+                replace_visual_config_bundle(config_source, destination, table, old_address, url)
+                config_source = destination
+            item = {"kind": "visual_animation", "bundle": context["config_bundle"], "name": selection["name"],
+                    "source_bundle": selection["bundle"], "extra_bundles": [context["ui_bundle"], context["atlas_bundle"]],
+                    "tables": support["tables"], "movieclip_url": url, "frame_count": len(frames), "duration_ms": sum(durations),
+                    "width": canvas_size[0], "height": canvas_size[1], "source_width": source_size[0], "source_height": source_size[1],
+                    "content_width": size[0], "content_height": size[1],
+                    "note": source.name, "at": datetime.now().isoformat(timespec="seconds")}
+            if any(_digest(Path(path)) != digest for path, digest in fingerprints.items()):
+                raise ValueError("素材或草稿在制作过程中改变，请重新导入。")
+            preview = self.preview(selection["name"], ui_output, atlas_output)
+            notice = f"输出 {len(frames)} 帧 · {sum(durations) / 1000:.2f} 秒 · 画布 {canvas_size[0]} × {canvas_size[1]}，实际帧像素 {size[0]} × {size[1]}。"
+            if len(frames) < original_count:
+                notice += "已按图集剩余空间抽帧。"
+            if video_info is not None:
+                item.update(video_source_width=video_info["source_width"], video_source_height=video_info["source_height"],
+                            frame_content_sha256=content_hash)
+                notice += f"源视频 {video_info['source_width']} × {video_info['source_height']}，按实际时长采样为 {video_info['fps']:.2f} 帧/秒，忽略音轨。"
+                if reused_frames:
+                    notice += "已复用作品集中的相同视频帧。"
+            elif size != source_size:
+                notice += f"原卡面 {source_size[0]} × {source_size[1]}，动画已等比缩小，由游戏按显示框缩放。"
+            return {"item": item, "staged": {context["config_bundle"]: config_output, context["ui_bundle"]: ui_output, context["atlas_bundle"]: atlas_output},
+                    "catalog_source_key": self._source_key,
+                    "fingerprints": fingerprints, "output_hashes": {str(path): _digest(path) for path in (config_output, ui_output, atlas_output)},
+                    "draft_items": draft_items, "source_paths": {name: str(path) for name, path in sources.items()},
+                    "animation": preview, "notice": notice}
 
     def save(self, candidate: dict) -> dict:
         selection, _ = self._selection()

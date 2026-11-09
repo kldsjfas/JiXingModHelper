@@ -47,6 +47,30 @@ class AnimationChecks(unittest.TestCase):
         self.assertEqual(frames[0].getpixel((0, 0)), (0, 0, 255, 255))
         self.assertEqual(durations, [100, 300])
 
+    def test_apng_cover_does_not_consume_the_animation_frame_or_total_pixel_budget(self):
+        raw = make_animation("PNG", default_image=True)
+        with patch.object(animation, "MAX_SOURCE_FRAMES", 2), patch.object(animation, "MAX_TOTAL_PIXELS", 16 * 12 * 2):
+            frames, durations, kind = animation._decode_animation(raw)
+        self.assertEqual((len(frames), durations, kind), (2, [100, 300], "apng"))
+        with patch.object(animation, "MAX_TOTAL_PIXELS", 16 * 12 * 2 - 1):
+            with self.assertRaisesRegex(ValueError, "总像素"):
+                animation._decode_animation(raw)
+        with patch.object(animation, "MAX_SOURCE_FRAMES", 1):
+            with self.assertRaisesRegex(ValueError, "512 帧"):
+                animation._decode_animation(raw)
+
+    def test_rejected_image_is_closed_when_its_single_frame_exceeds_the_budget(self):
+        raw = make_animation("PNG", default_image=True)
+        opened = Image.open(io.BytesIO(raw))
+        try:
+            with patch.object(animation.Image, "open", return_value=opened), patch.object(animation, "MAX_FRAME_PIXELS", 1):
+                with self.assertRaisesRegex(ValueError, "单帧"):
+                    animation._decode_animation(raw)
+            with self.assertRaises(ValueError):
+                opened.getpixel((0, 0))
+        finally:
+            opened.close()
+
     def test_animated_webp_is_readable(self):
         frames, durations, kind = animation._decode_animation(make_animation("WEBP"))
         self.assertEqual(kind, "webp")

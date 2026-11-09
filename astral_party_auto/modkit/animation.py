@@ -166,12 +166,15 @@ def _open_image(raw: bytes):
     if len(raw) > MAX_FILE_BYTES:
         raise ValueError("动画文件超过 64 MB，请先缩小素材。")
     image = Image.open(io.BytesIO(raw))
-    _size_limit(*image.size)
-    count = getattr(image, "n_frames", 1)
-    if count > MAX_SOURCE_FRAMES or image.width * image.height * count > MAX_TOTAL_PIXELS:
+    try:
+        _size_limit(*image.size)
+        count = getattr(image, "n_frames", 1) - int(bool(image.info.get("default_image")))
+        if count > MAX_SOURCE_FRAMES or image.width * image.height * count > MAX_TOTAL_PIXELS:
+            raise ValueError("动画超过 512 帧或总像素超过 6400 万，请先缩小或减少帧数。")
+        return image
+    except Exception:
         image.close()
-        raise ValueError("动画超过 512 帧或总像素超过 6400 万，请先缩小或减少帧数。")
-    return image
+        raise
 
 
 def _decode_animation(raw: bytes) -> tuple[list[Image.Image], list[int], str]:

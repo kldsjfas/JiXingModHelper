@@ -243,6 +243,70 @@ class EmoteWorkspaceTests(unittest.TestCase):
         self.assertEqual(self.state(), before)
         self.assertFalse(list(self.controller.data_dir.glob("emote-change-*")))
 
+    def test_ordinary_removal_metadata_failure_restores_bundle_and_items(self):
+        self.edit.save("VEmoji_101_09", self.custom)
+        self.controller.draft_items.append({"kind": "texture", "bundle": "other.bundle", "name": "ordinary"})
+        (self.controller.pack / "other.bundle").write_bytes(b"ordinary draft")
+        self.controller._save_draft()
+        before = self.state()
+        with mock.patch.object(self.controller, "_save_draft", side_effect=OSError("metadata failed")):
+            with self.assertRaisesRegex(OSError, "metadata failed"):
+                ModController.remove_draft_item(self.controller, 1)
+        self.assertEqual(self.state(), before)
+
+    def test_shared_ordinary_removal_failure_keeps_modified_pixels(self):
+        self.edit.save("VEmoji_101_09", self.custom)
+        video_path = self.controller.pack / "video9.bundle"
+        edited = read_json(video_path)
+        edited["other"]["texture"] = "modified icon"
+        write_json(video_path, edited)
+        self.controller.draft_items.append({"kind": "texture", "bundle": "video9.bundle", "name": "shared icon"})
+        self.controller._save_draft()
+        before = self.state()
+        with mock.patch.object(self.controller, "_save_draft", side_effect=OSError("metadata failed")):
+            with self.assertRaisesRegex(OSError, "metadata failed"):
+                ModController.remove_draft_item(self.controller, 1)
+        self.assertEqual(self.state(), before)
+
+    def test_ordinary_removal_manifest_failure_restores_metadata_and_bundle(self):
+        self.edit.save("VEmoji_101_09", self.custom)
+        self.controller.draft_items.append({"kind": "texture", "bundle": "other.bundle", "name": "ordinary"})
+        (self.controller.pack / "other.bundle").write_bytes(b"ordinary draft")
+        self.controller._save_draft()
+        before = self.state()
+        with mock.patch.object(self.edit, "write_address_manifest", side_effect=OSError("manifest failed")):
+            with self.assertRaisesRegex(OSError, "manifest failed"):
+                ModController.remove_draft_item(self.controller, 1)
+        self.assertEqual(self.state(), before)
+
+    def test_shared_ordinary_restore_failure_does_not_touch_draft(self):
+        self.edit.save("VEmoji_101_09", self.custom)
+        self.controller.draft_items.append({"kind": "texture", "bundle": "video9.bundle", "name": "shared icon"})
+        self.controller._save_draft()
+        before = self.state()
+
+        def fail_after_partial_restore(_item, target, _original):
+            Path(target).write_bytes(b"incomplete restored bundle")
+            raise OSError("restore interrupted")
+
+        with mock.patch.object(self.controller, "_restore_removed_draft_item", side_effect=fail_after_partial_restore):
+            with self.assertRaisesRegex(OSError, "restore interrupted"):
+                ModController.remove_draft_item(self.controller, 1)
+        self.assertEqual(self.state(), before)
+        self.assertEqual(list(self.controller.data_dir.glob("draft-remove-*")), [])
+
+    def test_ordinary_removal_export_failure_restores_metadata_and_bundle(self):
+        self.edit.save("VEmoji_101_09", self.custom)
+        self.controller.draft_items.append({"kind": "texture", "bundle": "other.bundle", "name": "ordinary"})
+        (self.controller.pack / "other.bundle").write_bytes(b"ordinary draft")
+        self.controller._save_draft()
+        before = self.state()
+        with mock.patch.object(workspace, "export_mod_pack", side_effect=OSError("export failed")), \
+                mock.patch.object(controller_module, "export_mod_pack", side_effect=OSError("export failed")):
+            with self.assertRaisesRegex(OSError, "export failed"):
+                ModController.remove_draft_item(self.controller, 1)
+        self.assertEqual(self.state(), before)
+
     def test_metadata_write_failure_restores_files_metadata_and_memory(self):
         self.edit.save("VEmoji_101_09", self.custom)
         before = self.state()
