@@ -161,24 +161,133 @@ def plan_card_video(base_size: tuple[int, int], occupied: list[list[int]],
     return {"width": size[0], "height": size[1], "fps": fps}
 
 
-def _clear_clip_pixels(atlas: Image.Image, package: dict, clip: dict, base_size: tuple[int, int]) -> None:
+def _frame_content_hash(frames: list[Image.Image], durations: list[int]) -> str:
+    """内容身份包含每帧像素、尺寸与时序，文件改名不影响复用。"""
+    if not frames or len(frames) != len(durations):
+        raise ValueError("视频帧和时序不完整。")
+    digest = hashlib.sha256(b"jixing-visual-video-v1\0")
+    digest.update(len(frames).to_bytes(4, "little"))
+    for frame, duration in zip(frames, durations):
+        if type(duration) is not int or not 1 <= duration <= 60000:
+            raise ValueError("视频帧时长无效。")
+        for value in (*frame.size, duration):
+            digest.update(value.to_bytes(4, "little"))
+        with frame.convert("RGBA") as rgba:
+            digest.update(rgba.tobytes())
+    return digest.hexdigest()
+
+
+def _owned_sprite_area(sprite: dict, base_size: tuple[int, int], atlas_size: tuple[int, int]) -> list[int]:
+    x, y, width, height = sprite["rect"]
+    if (sprite["atlas_id"] != "atlas0" or sprite["rotated"] or sprite["trimmed"]
+            or min(x, y, width, height) < 1 or x + width >= atlas_size[0] or y + height >= atlas_size[1]):
+        raise ValueError("动画帧或留边已被外部修改，已停止操作。")
+    area = [x - 1, y - 1, width + 2, height + 2]
+    if area[0] < base_size[0] and area[1] < base_size[1]:
+        raise ValueError("动画帧或留边与原版界面重叠，已停止操作。")
+    return area
+
+
+def _clip_pixel_rects(package: dict, clip: dict, base_size: tuple[int, int], atlas_size: tuple[int, int]) -> list[list[int]]:
+    sprites = {row["id"]: row for row in package["sprites"]}
+    rects = []
+    for index, frame in enumerate(clip["frames"]):
+        sprite_id = frame["sprite_id"]
+        if sprite_id != f"{clip['id']}_{index}" or sprite_id not in sprites:
+            raise ValueError("动画帧引用不属于当前工具片段。")
+        sprite = sprites[sprite_id]
+        _owned_sprite_area(sprite, base_size, atlas_size)
+        x, y, width, height = frame["rect"]
+        if (min(x, y) < 0 or x + width > clip["width"] or y + height > clip["height"]
+                or frame["rect"][2:] != sprite["rect"][2:]):
+            raise ValueError("动画画布与帧像素尺寸不一致。")
+        rects.append(list(sprite["rect"]))
+    return rects
+
+
+def _find_shared_frames(package: dict, atlas: Image.Image, frames: list[Image.Image], durations: list[int],
+                        base_size: tuple[int, int], draft_items: list[dict], content_hash: str) -> list[list[int]]:
+    clips = {row["id"]: row for row in package["movieclips"]}
+    for item in draft_items:
+        if item.get("kind") != "visual_animation" or item.get("frame_content_sha256") not in (None, content_hash):
+            continue
+        clip = clips.get(animation_identity(item["name"]))
+        if clip is None or [row["duration_ms"] for row in clip["frames"]] != durations:
+            continue
+        try:
+            rects = _clip_pixel_rects(package, clip, base_size, atlas.size)
+        except ValueError:
+            continue
+        if len(rects) != len(frames) or any(tuple(rect[2:]) != frame.size for rect, frame in zip(rects, frames)):
+            continue
+        matches = True
+        for rect, frame in zip(rects, frames):
+            x, y, width, height = rect
+            with atlas.crop((x, y, x + width, y + height)) as pixels, frame.convert("RGBA") as rgba:
+                if pixels.tobytes() != rgba.tobytes():
+                    matches = False
+                    break
+        if matches:
+            return rects
+    return []
+
+
+def _legacy_video_profiles(package: dict, atlas: Image.Image, draft_items: list[dict], video_info: dict,
+                           durations: list[int], base_size: tuple[int, int], reference_size: tuple[int, int]) -> list[tuple[int, int]]:
+    """旧草稿未记录内容摘要，只把现有尺寸作为候选，后续仍逐帧核对。"""
+    clips = {row["id"]: row for row in package["movieclips"]}
+    profiles = set()
+    for item in draft_items:
+        if (item.get("kind") != "visual_animation" or item.get("video_source_width") != video_info["source_width"]
+                or item.get("video_source_height") != video_info["source_height"]):
+            continue
+        clip = clips.get(animation_identity(item["name"]))
+        if clip is None or [row["duration_ms"] for row in clip["frames"]] != durations:
+            continue
+        try:
+            rects = _clip_pixel_rects(package, clip, base_size, atlas.size)
+            sizes = {tuple(rect[2:]) for rect in rects}
+            if len(sizes) != 1:
+                continue
+            size = sizes.pop()
+            card_video_canvas(reference_size, size)
+        except ValueError:
+            continue
+        profiles.add(size)
+    return sorted(profiles, key=lambda size: (size[0] * size[1], size), reverse=True)
+
+
+def _clear_clip_pixels(atlas: Image.Image, package: dict, clip: dict, base_size: tuple[int, int], *,
+                       retained_rects=()) -> None:
     """Check every owned rectangle before clearing its pixels and transparent border."""
     sprites = {row["id"]: row for row in package["sprites"]}
     owned = {frame["sprite_id"] for frame in clip["frames"]}
-    protected = [[0, 0, *base_size]] + [row["rect"] for row in package["sprites"] if row["id"] not in owned]
+    from .fairygui_movieclip import _OWN_PATH
+
+    other_owned = set()
+    for other in package.get("movieclips", []):
+        if other["id"] != clip.get("id") and other.get("path") == _OWN_PATH and other["id"].startswith("jm"):
+            other_owned.update(frame["sprite_id"] for frame in other["frames"]
+                               if frame["sprite_id"].startswith(other["id"] + "_"))
+    protected = [row for row in package["sprites"] if row["id"] not in owned]
+    retained = {tuple(rect) for rect in retained_rects}
     areas = []
     for sprite_id in owned:
         sprite = sprites[sprite_id]
         x, y, width, height = sprite["rect"]
-        if (sprite["atlas_id"] != "atlas0" or sprite["rotated"] or sprite["trimmed"]
-                or min(x, y, width, height) < 1 or x + width >= atlas.width or y + height >= atlas.height):
-            raise ValueError("动画帧或留边已被外部修改，已停止操作。")
-        area = [x - 1, y - 1, width + 2, height + 2]
+        area = _owned_sprite_area(sprite, base_size, atlas.size)
         left, top, w, h = area
-        if any(left < px + pw and left + w > px and top < py + ph and top + h > py
-               for px, py, pw, ph in protected):
-            raise ValueError("动画帧或留边与其它资源重叠，已停止操作。")
-        areas.append(area)
+        shared = False
+        for other in protected:
+            px, py, pw, ph = other["rect"]
+            if left < px + pw and left + w > px and top < py + ph and top + h > py:
+                if (other["id"] in other_owned and other["atlas_id"] == sprite["atlas_id"]
+                        and other["rect"] == sprite["rect"] and not other["rotated"] and not other["trimmed"]):
+                    shared = True
+                else:
+                    raise ValueError("动画帧或留边与其它资源重叠，已停止操作。")
+        if not shared and tuple(sprite["rect"]) not in retained and area not in areas:
+            areas.append(area)
     for x, y, width, height in areas:
         atlas.paste((0, 0, 0, 0), (x, y, x + width, y + height))
 
@@ -393,7 +502,7 @@ class VisualAnimationWorkspace:
             raw = remove_movieclip(raw, item_id=item_id)
             package = inspect_movieclip_package(raw)
         source_size = (selection["width"], selection["height"])
-        occupied = [row["rect"] for row in package["sprites"] if row["id"].startswith("jm")]
+        occupied = [list(rect) for rect in dict.fromkeys(tuple(row["rect"]) for row in package["sprites"] if row["id"].startswith("jm"))]
         decoded_size = source_size
         video_info = None
         kind = detect_emote_media(source)
@@ -401,7 +510,7 @@ class VisualAnimationWorkspace:
             frames, video_info = adapt_video_source(
                 source, {"width": source_size[0], "height": source_size[1], "fps": 12}, work_dir=folder,
                 source_planner=lambda info: plan_card_video(
-                    context["base_size"], occupied, source_size, info["duration_ms"],
+                    context["base_size"], [], source_size, info["duration_ms"],
                     video_size=(info["width"], info["height"]), display_aspect=info["display_aspect"]))
             decoded_size = (video_info["width"], video_info["height"])
             total_ms = round(video_info["source_duration_ms"])
@@ -412,20 +521,57 @@ class VisualAnimationWorkspace:
         else:
             frames, durations, _ = _read_replacement(source)
         original_count = len(frames)
-        size, placements = fit_animation_frames(context["base_size"], occupied, decoded_size, len(frames))
+        current_atlas = read_atlas(sources[context["atlas_bundle"]])
+        content_hash = None
+        reused_frames = False
+        if video_info is not None:
+            size = decoded_size
+            content_hash = _frame_content_hash(frames, durations)
+            placements = _find_shared_frames(existing_package, current_atlas, frames, durations,
+                                              context["base_size"], draft_items, content_hash)
+            reused_frames = bool(placements)
+            if not placements:
+                placements = pack_frames(context["base_size"], occupied, size, len(frames))
+            if len(placements) != len(frames):
+                profiles = _legacy_video_profiles(existing_package, current_atlas, draft_items, video_info,
+                                                   durations, context["base_size"], source_size)
+                for frame in frames:
+                    frame.close()
+                for profile in profiles:
+                    if profile == size:
+                        continue
+                    possible_frames, possible_info = adapt_video_source(
+                        source, {"width": profile[0], "height": profile[1], "fps": video_info["fps"]}, work_dir=folder,
+                        source_planner=lambda info, profile=profile: {
+                            "width": profile[0], "height": profile[1], "fps": original_count * 1000 / info["duration_ms"],
+                        })
+                    possible_hash = _frame_content_hash(possible_frames, durations)
+                    shared = _find_shared_frames(existing_package, current_atlas, possible_frames, durations,
+                                                  context["base_size"], draft_items, possible_hash)
+                    if shared:
+                        frames, video_info, size = possible_frames, possible_info, profile
+                        content_hash, placements, reused_frames = possible_hash, shared, True
+                        break
+                    for frame in possible_frames:
+                        frame.close()
+                if not reused_frames:
+                    raise ValueError(f"图集空间不足，无法保存 {size[0]} × {size[1]} 像素的 {original_count} 帧视频。请移除其它动态作品或另建作品集。")
+        else:
+            size, placements = fit_animation_frames(context["base_size"], occupied, decoded_size, len(frames))
         canvas_size, frame_rect = card_video_canvas(source_size, size) if video_info is not None else (size, [0, 0, *size])
         frames, durations = sample_frames(frames, durations, len(placements))
         placements = placements[:len(frames)]
         atlas = Image.new("RGBA", (MAX_ATLAS_EDGE, MAX_ATLAS_EDGE))
-        current_atlas = read_atlas(sources[context["atlas_bundle"]])
         atlas.paste(current_atlas, (0, 0))
         before_original = current_atlas.crop((0, 0, *context["base_size"])).tobytes()
         if existing:
-            _clear_clip_pixels(atlas, existing_package, existing, context["base_size"])
+            _clear_clip_pixels(atlas, existing_package, existing, context["base_size"],
+                               retained_rects=placements if reused_frames else ())
         records = []
         for frame, duration, rect in zip(frames, durations, placements):
-            fitted = _fit_frame(frame, *size)
-            atlas.paste(fitted, tuple(rect[:2]))
+            if not reused_frames:
+                fitted = _fit_frame(frame, *size)
+                atlas.paste(fitted, tuple(rect[:2]))
             records.append({"rect": frame_rect, "atlas_rect": rect, "duration_ms": duration})
         if atlas.crop((0, 0, *context["base_size"])).tobytes() != before_original:
             raise ValueError("动态帧覆盖了原版界面像素，未保存。")
@@ -457,8 +603,11 @@ class VisualAnimationWorkspace:
         if len(frames) < original_count:
             notice += "已按图集剩余空间抽帧。"
         if video_info is not None:
-            item.update(video_source_width=video_info["source_width"], video_source_height=video_info["source_height"])
+            item.update(video_source_width=video_info["source_width"], video_source_height=video_info["source_height"],
+                        frame_content_sha256=content_hash)
             notice += f"源视频 {video_info['source_width']} × {video_info['source_height']}，按实际时长采样为 {video_info['fps']:.2f} 帧/秒，忽略音轨。"
+            if reused_frames:
+                notice += "已复用作品集中的相同视频帧。"
         elif size != source_size:
             notice += f"原卡面 {source_size[0]} × {source_size[1]}，动画已等比缩小，由游戏按显示框缩放。"
         return {"item": item, "staged": {context["config_bundle"]: config_output, context["ui_bundle"]: ui_output, context["atlas_bundle"]: atlas_output},
