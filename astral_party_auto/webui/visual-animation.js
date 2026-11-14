@@ -126,7 +126,7 @@
     } catch (error) {
       if (current(request, key)) {
         state.candidate = null;
-        state.error = `导入没有通过：${error.message || error}。请重新选择动图或视频。`;
+        state.error = `导入没有通过：${String(error.message || error).replace(/[。.\s]+$/, "")}。请重新选择动图或视频。`;
       }
     } finally {
       if (current(request, key)) {
