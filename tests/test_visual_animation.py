@@ -289,6 +289,9 @@ class VisualVideoPreparationTests(unittest.TestCase):
                     patches.enter_context(patch.object(visual_animation, "write_atlas",
                                                      side_effect=lambda source, output, image: image.save(output, format="PNG")))
                     patches.enter_context(patch.object(visual_config, "replace_visual_config_bundle", side_effect=replace_config))
+                    patches.enter_context(patch.object(visual_animation, "_config_has_address", side_effect=lambda path, tables, address: all(
+                        any(target["name"] == address for target in visual_config.inspect_visual_config(path.read_bytes(), name)["targets"])
+                        for name in tables)))
                     candidate = workspace.prepare(source, candidate_folder)
                     item = workspace.save(candidate)
                     actual_preview = workspace.draft_preview()
@@ -832,9 +835,10 @@ class StaleDraftConfigTests(unittest.TestCase):
              "extra_bundles": ["ui.bundle", "atlas.bundle"], "tables": ["Card"], "movieclip_url": "ui://xuaw6o8jjmold"},
             {"kind": "texture", "bundle": "other.bundle", "name": "UT_Other"},
         ])
+        self.controller._draft_dir.return_value = self.draft.parent
         self.workspace = VisualAnimationWorkspace(self.controller)
-        self.workspace._source = Mock(return_value=self.draft)
         self.calls = []
+        self.matches_game = True
 
     def tearDown(self):
         self.temp.cleanup()
@@ -845,18 +849,21 @@ class StaleDraftConfigTests(unittest.TestCase):
             Path(output).write_bytes(b"rebuilt")
         return write
 
-    def _run(self, has_address):
+    def _run(self, has_address, addresses=None):
         with patch("astral_party_auto.modkit.visual_animation._config_has_address", side_effect=has_address), \
+                patch("astral_party_auto.modkit.draft_config.config_matches_game",
+                      side_effect=lambda draft, original: self.matches_game), \
                 patch("astral_party_auto.modkit.emote_config.replace_emote_config_bundle", side_effect=self._replay("emote")), \
                 patch("astral_party_auto.modkit.visual_config.replace_visual_config_bundle", side_effect=self._replay("visual")):
-            return self.workspace._config_base(self.context, ["Card"], "UT_HandCard_New", self.folder)
+            return self.workspace._config_base(self.context, ["Card"], addresses or ["UT_HandCard_New"], self.folder)
 
     def test_current_draft_config_is_used_directly(self):
-        self.assertEqual(self._run(lambda path, tables, address: True), self.draft)
+        self.assertEqual(self._run(lambda path, tables, address: True), (self.draft, "UT_HandCard_New"))
         self.assertEqual(self.calls, [])
 
     def test_stale_draft_is_rebuilt_from_current_game_and_keeps_existing_edits(self):
-        result = self._run(lambda path, tables, address: path != self.draft)
+        result, address = self._run(lambda path, tables, address: path != self.draft)
+        self.assertEqual(address, "UT_HandCard_New")
         self.assertNotEqual(result, self.draft)
         self.assertEqual(self.calls[0], ("emote", self.original, 7, "Video_7"))
         self.assertEqual(self.calls[1][0], "visual")
@@ -864,14 +871,89 @@ class StaleDraftConfigTests(unittest.TestCase):
         self.assertTrue(result.is_relative_to(self.folder))
         self.controller.log.assert_called_once()
 
+    def test_outdated_draft_is_rebuilt_even_when_it_still_has_the_card(self):
+        # 游戏更新但包名不变：草稿里是整份旧 GameData，继续使用会把新版配置退回旧版本。
+        self.matches_game = False
+        result, _ = self._run(lambda path, tables, address: True)
+        self.assertNotEqual(result, self.draft)
+        self.assertEqual([call[0] for call in self.calls], ["emote", "visual"])
+        self.assertEqual(self.calls[0][1], self.original)
+
+    def test_outdated_draft_with_other_config_edits_keeps_previous_behaviour(self):
+        self.matches_game = False
+        self.controller.draft_items.append({"kind": "text", "bundle": "config.bundle", "name": "Language"})
+        self.assertEqual(self._run(lambda path, tables, address: True), (self.draft, "UT_HandCard_New"))
+        self.assertEqual(self.calls, [])
+
     def test_unknown_config_edit_reports_clear_reason_instead_of_dropping_it(self):
         self.controller.draft_items.append({"kind": "text", "bundle": "config.bundle", "name": "Language"})
-        with self.assertRaisesRegex(ValueError, "旧版本游戏.*Language.*另建作品集"):
+        with self.assertRaisesRegex(ValueError, "旧版本游戏.*无法自动合并.*另建作品集"):
             self._run(lambda path, tables, address: path != self.draft)
 
     def test_name_missing_from_current_game_too_is_reported(self):
         with self.assertRaisesRegex(ValueError, "重建后的配置仍找不到"):
             self._run(lambda path, tables, address: False)
+
+    def test_saved_item_from_older_config_falls_back_to_the_card_name(self):
+        url = "ui://xuaw6o8jjmstale"
+        self.assertEqual(self._run(lambda path, tables, address: address == "UT_HandCard_New",
+                                   [url, "UT_HandCard_New"]), (self.draft, "UT_HandCard_New"))
+
+    def test_original_config_without_the_card_explains_how_to_recover(self):
+        self.draft.unlink()
+        with self.assertRaisesRegex(ValueError, "游戏原始配置里找不到这张卡面.*刷新检测"):
+            self._run(lambda path, tables, address: False)
+        self.assertEqual(self.calls, [])
+
+
+class VisualContextRefreshTests(unittest.TestCase):
+    """安装 Mod 会改写游戏目录并生成备份；缓存的卡面列表不能继续指向被改写的文件。"""
+
+    def test_context_is_rebuilt_when_the_original_file_moves_to_a_backup_or_changes(self):
+        from astral_party_auto.modkit import visual_animation
+
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            game = {name: root / "game" / name for name in ("config.bundle", "ui.bundle", "atlas.bundle")}
+            backups = root / "backups"
+            for path in game.values():
+                path.parent.mkdir(exist_ok=True)
+                path.write_bytes(b"original")
+            backups.mkdir()
+
+            def original_bundle_path(name):
+                backup = backups / name
+                return backup if backup.exists() else game[name]
+
+            controller = Mock(aa_dirs=(root / "game",), game_executable=None)
+            controller.original_bundle_path.side_effect = original_bundle_path
+            workspace = VisualAnimationWorkspace(controller)
+            catalog = Mock()
+            catalog.fingerprint.return_value = "catalog"
+            catalog.read.return_value.locations = {"GameData_CN": "config.bundle", "Common_fui": "ui.bundle",
+                                                   "Common_atlas0": "atlas.bundle"}
+            workspace._catalog_source = Mock(return_value=catalog)
+            loaded = []
+
+            def load_bundle(path):
+                loaded.append(Path(path))
+                return Mock()
+
+            package = {"package_name": "Common", "package_id": "xuaw6o8j", "atlases": [{"id": "atlas0", "width": 4, "height": 4}]}
+            with patch.object(visual_animation, "bundle_source_key", return_value="bundles"),                     patch.object(visual_animation, "read_descriptor", return_value=b""),                     patch("astral_party_auto.modkit.fairygui_movieclip.inspect_movieclip_package", return_value=package),                     patch.object(visual_animation, "read_atlas", return_value=Image.new("RGBA", (4, 4))),                     patch.object(visual_animation, "_load_bundle", side_effect=load_bundle),                     patch.object(visual_animation, "_object"),                     patch.object(visual_animation, "text_asset_bytes", return_value=b""),                     patch("astral_party_auto.modkit.visual_config.inspect_visual_config", return_value={"targets": []}):
+                first = workspace.context()
+                self.assertIs(workspace.context(), first)
+                self.assertEqual(loaded, [game["config.bundle"]])
+                # 安装 Mod：先备份原文件，再改写游戏目录。
+                (backups / "config.bundle").write_bytes(b"original")
+                game["config.bundle"].write_bytes(b"modded config")
+                second = workspace.context()
+                self.assertEqual(second["originals"]["config.bundle"], backups / "config.bundle")
+                self.assertEqual(loaded[-1], backups / "config.bundle")
+                self.assertIs(workspace.context(), second)
+                # 还原后备份被移除，回到游戏目录文件。
+                (backups / "config.bundle").unlink()
+                self.assertEqual(workspace.context()["originals"]["config.bundle"], game["config.bundle"])
 
 
 class VisualCandidateApiTests(unittest.TestCase):

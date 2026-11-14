@@ -93,6 +93,16 @@ class EmoteWorkspace:
             self._context_key = key
         return self._context
 
+    def _current_config(self, context: dict, folder: Path) -> Path:
+        """作品集配置早于当前游戏版本时先重建，避免把旧版 GameData 带进新作品。"""
+        from .draft_config import current_draft_config
+        config_name = context["config_bundle"]
+        try:
+            return current_draft_config(self.controller.draft_items, config_name, self.controller._draft_dir() / config_name,
+                                        context["config_path"], folder, self.controller.log)
+        except (OSError, ValueError, KeyError) as exc:
+            raise ValueError(f"作品集里的游戏配置早于当前游戏版本，按当前版本自动重建失败：{exc}。请另建作品集后再制作。") from exc
+
     def source_key(self) -> tuple:
         """导入候选绑定目录内容；更换游戏或 catalog 后不能沿用旧候选。"""
         return self.context()["source_key"]
@@ -337,8 +347,7 @@ class EmoteWorkspace:
                 create_independent_emote_bundle(reference, template_video, replacement_path, video_output, emote_id=identifier)
             staged[identity["bundle_name"]] = video_output
             config_name = context["config_bundle"]
-            current = self.controller._draft_dir() / config_name
-            source = current if current.exists() else context["config_path"]
+            source = self._current_config(context, folder)
             output = folder / config_name
             replace_emote_config_bundle(source, output, identifier, identity["video_name"])
             staged[config_name] = output
@@ -403,8 +412,7 @@ class EmoteWorkspace:
             if existing and existing.get("custom_video"):
                 self._restore_video(existing, staged, folder)
             config_name = context["config_bundle"]
-            current = self.controller._draft_dir() / config_name
-            source = current if current.exists() else context["config_path"]
+            source = self._current_config(context, folder)
             output = folder / config_name
             replace_emote_config_bundle(source, output, identifier, video_name)
             staged[config_name] = output
@@ -435,7 +443,7 @@ class EmoteWorkspace:
             if not current.exists():
                 raise ValueError("表情配置草稿缺失。")
             output = folder / config_name
-            replace_emote_config_bundle(current, output, item["emote_id"], original["video_name"])
+            replace_emote_config_bundle(self._current_config(context, folder), output, item["emote_id"], original["video_name"])
             staged = {config_name: output}
             self._restore_video(item, staged, folder)
             active = set().union(*(item_bundle_names(entry) for entry in items)) if items else set()

@@ -1463,9 +1463,35 @@ class ModController:
         if not self.draft_items:
             raise RuntimeError("作品集是空的。")
         pack = self._draft_dir()
+        self._refresh_draft_config()
         self.emote_workspace.write_address_manifest()
         export_mod_pack(pack, None, pack_name=self.draft_name, items=self.draft_items)
         self.install(pack, name=self.draft_name)
+
+    def _refresh_draft_config(self) -> None:
+        """安装前把过时的作品集 GameData 按当前版本重建，避免把整份旧配置装回游戏。"""
+        from .modkit.draft_config import current_draft_config
+        # 直接取作品项记录的配置包名，不依赖表情目录：只做动态卡面的作品集也必须核对。
+        config_names = sorted({item["bundle"] for item in self.draft_items
+                               if isinstance(item, dict) and item.get("kind") in ("emote", "visual_animation")
+                               and isinstance(item.get("bundle"), str)
+                               and re.fullmatch(r"[A-Za-z0-9_.-]+\.bundle", item["bundle"])})
+        for config_name in config_names:
+            draft = self._draft_dir() / config_name
+            original = self.original_bundle_path(config_name)
+            if not draft.is_file() or original is None:
+                # 当前游戏已没有这个包名时，安装会跳过它，不会覆盖现有配置。
+                continue
+            workspace = self.emote_workspace
+            workspace.data_dir.mkdir(parents=True, exist_ok=True)
+            with workspace._prepare_folder("draft-config-refresh-") as folder:
+                try:
+                    current = current_draft_config(self.draft_items, config_name, draft, original, folder, self.log)
+                except (OSError, ValueError, KeyError) as exc:
+                    raise RuntimeError(f"作品集里的游戏配置早于当前游戏版本，自动重建失败：{exc}。"
+                                       "请移除相关动态作品或另建作品集后再安装，避免把旧版配置装回游戏。") from exc
+                if current != draft:
+                    workspace._commit({config_name: current}, deepcopy(self.draft_items))
 
 
     def quick_create_sfw_texture_mod(self) -> dict:

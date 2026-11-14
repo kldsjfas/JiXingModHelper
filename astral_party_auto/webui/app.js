@@ -1461,7 +1461,7 @@ ${row.bundle}`;
     } catch (err) {
       if (current()) {
         resetEmoteReplacement();
-        state.emoteImportError = `导入没有通过：${err.message || err}。请重新选择动图或视频。`;
+        state.emoteImportError = `导入没有通过：${String(err.message || err).replace(/[。.\s]+$/, "")}。请重新选择动图或视频。`;
         renderEmoteSettings();
       }
     }
@@ -1503,7 +1503,7 @@ ${row.bundle}`;
     } catch (err) {
       if (request === state.emoteRequest && selectionRequest === state.selectionRequest && key === selectionKey()) {
         resetEmoteReplacement();
-        state.emoteImportError = `保存没有通过：${err.message || err}。请重新选择动图或视频。`;
+        state.emoteImportError = `保存没有通过：${String(err.message || err).replace(/[。.\s]+$/, "")}。请重新选择动图或视频。`;
         renderEmoteSettings();
       }
     } finally {
