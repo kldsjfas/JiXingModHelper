@@ -47,5 +47,70 @@ class CurrentDraftConfigTests(unittest.TestCase):
             matches.assert_not_called()
 
 
+
+class InstallRefreshTests(unittest.TestCase):
+    """安装前的版本核对不能依赖表情目录；只做动态卡面的作品集也必须重建过时配置。"""
+
+    def setUp(self):
+        from contextlib import contextmanager
+        from tempfile import TemporaryDirectory
+        from unittest.mock import Mock
+
+        self.temp = TemporaryDirectory()
+        root = Path(self.temp.name)
+        self.draft_dir = root / "draft"
+        self.draft_dir.mkdir()
+        self.original = root / "original.bundle"
+        self.original.write_bytes(b"current game")
+        (self.draft_dir / "config.bundle").write_bytes(b"old game")
+
+        @contextmanager
+        def prepare_folder(prefix):
+            folder = root / prefix
+            folder.mkdir()
+            yield folder
+
+        workspace = Mock(data_dir=root / "data")
+        workspace.context.side_effect = ValueError("表情视频资源尚未下载")
+        workspace._prepare_folder.side_effect = prepare_folder
+        self.controller = SimpleNamespace(
+            draft_items=[{"kind": "visual_animation", "bundle": "config.bundle", "name": "UT_HandCard_1",
+                          "tables": ["Card"], "movieclip_url": "ui://xuaw6o8jjmone"},
+                         {"kind": "texture", "bundle": "image.bundle", "name": "UT_HandCard_1"}],
+            emote_workspace=workspace, log=Mock(), _draft_dir=lambda: self.draft_dir,
+            original_bundle_path=lambda name: self.original if name == "config.bundle" else None)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def refresh(self, rebuilt):
+        from astral_party_auto.mod_controller import ModController
+
+        with patch.object(draft_config, "config_matches_game", return_value=False),                 patch.object(draft_config, "rebuild_draft_config", side_effect=rebuilt):
+            ModController._refresh_draft_config(self.controller)
+
+    def test_visual_only_draft_is_rebuilt_without_the_emote_catalog(self):
+        def rebuilt(items, name, original, folder):
+            self.assertEqual((name, original), ("config.bundle", self.original))
+            output = folder / "rebuilt.bundle"
+            output.write_bytes(b"current game + animation")
+            return output
+
+        self.refresh(rebuilt)
+        commit = self.controller.emote_workspace._commit
+        commit.assert_called_once()
+        staged, items = commit.call_args.args
+        self.assertEqual(list(staged), ["config.bundle"])
+        self.assertEqual(items, self.controller.draft_items)
+        self.controller.emote_workspace.context.assert_not_called()
+
+    def test_failed_rebuild_stops_the_install(self):
+        def rebuilt(*_):
+            raise ValueError("表情编号已不存在")
+
+        with self.assertRaisesRegex(RuntimeError, "自动重建失败"):
+            self.refresh(rebuilt)
+        self.controller.emote_workspace._commit.assert_not_called()
+
 if __name__ == "__main__":
     unittest.main()
