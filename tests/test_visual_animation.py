@@ -398,6 +398,9 @@ class SharedVideoWorkspaceTests(unittest.TestCase):
                                      side_effect=lambda source, output, raw: output.write_bytes(raw)))
         self.enterContext(patch.object(visual_animation, "write_atlas", side_effect=write_atlas))
         self.enterContext(patch.object(visual_config, "replace_visual_config_bundle", side_effect=replace_config))
+        self.enterContext(patch.object(visual_animation, "_config_has_address", side_effect=lambda path, tables, address: all(
+            any(target["name"] == address for target in visual_config.inspect_visual_config(path.read_bytes(), name)["targets"])
+            for name in tables)))
 
     def commit(self, staged, items):
         for name, source in staged.items():
@@ -481,6 +484,23 @@ class SharedVideoWorkspaceTests(unittest.TestCase):
         for x, y, width, height in first_rects:
             self.assertEqual(last_atlas.crop((x - 1, y - 1, x + width + 1, y + height + 1)).getbbox(), None)
         self.assertEqual({name: path.read_bytes() for name, path in self.paths.items()}, self.original_bytes)
+
+    def test_card_added_by_game_update_can_be_animated_with_an_older_draft_config(self):
+        from astral_party_auto.modkit import visual_config
+        from test_visual_config import card, table
+
+        names = list(self.targets)
+        first = self.save_video(names[0])
+        # 草稿配置来自更新前的游戏：只有第一张卡，后两张是新版本新增的。
+        older = visual_config.replace_visual_address(table([(20000, card(20000, {6: names[0]}))]), "Card",
+                                                     names[0], first["movieclip_url"])
+        (self.draft / "config.bundle").write_bytes(older)
+        second = self.save_video(names[1], self.alias)
+        saved = {row["name"] for row in visual_config.inspect_visual_config(
+            (self.draft / "config.bundle").read_bytes(), "Card")["targets"]}
+        self.assertEqual(saved, {first["movieclip_url"], second["movieclip_url"], names[2]})
+        self.controller.log.assert_any_call(
+            "作品集中的游戏配置与当前游戏版本不一致，已按当前版本重建并保留已有的表情和动态作品。")
 
     def test_legacy_item_without_content_hash_reuses_verified_pixels(self):
         names = list(self.targets)
@@ -790,6 +810,68 @@ class VisualSelectionTests(unittest.TestCase):
                 self.assertTrue(result["recognized"])
                 self.assertFalse(result["editable"])
                 self.assertIn("加载", result["reason"])
+
+
+class StaleDraftConfigTests(unittest.TestCase):
+    """作品集配置早于当前游戏版本时（新卡牌），需按当前版本重建，不能报找不到资源名。"""
+
+    def setUp(self):
+        self.temp = TemporaryDirectory()
+        root = Path(self.temp.name)
+        self.folder = root / "work"
+        self.folder.mkdir()
+        self.original = root / "original" / "config.bundle"
+        self.draft = root / "draft" / "config.bundle"
+        for path in (self.original, self.draft):
+            path.parent.mkdir()
+            path.write_bytes(b"bundle")
+        self.context = {"config_bundle": "config.bundle", "originals": {"config.bundle": self.original}}
+        self.controller = Mock(draft_items=[
+            {"kind": "emote", "bundle": "config.bundle", "name": "Emote", "emote_id": 7, "video_name": "Video_7"},
+            {"kind": "visual_animation", "bundle": "config.bundle", "name": "UT_HandCard_Old",
+             "extra_bundles": ["ui.bundle", "atlas.bundle"], "tables": ["Card"], "movieclip_url": "ui://xuaw6o8jjmold"},
+            {"kind": "texture", "bundle": "other.bundle", "name": "UT_Other"},
+        ])
+        self.workspace = VisualAnimationWorkspace(self.controller)
+        self.workspace._source = Mock(return_value=self.draft)
+        self.calls = []
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _replay(self, kind):
+        def write(source, output, *args):
+            self.calls.append((kind, Path(source), *args))
+            Path(output).write_bytes(b"rebuilt")
+        return write
+
+    def _run(self, has_address):
+        with patch("astral_party_auto.modkit.visual_animation._config_has_address", side_effect=has_address), \
+                patch("astral_party_auto.modkit.emote_config.replace_emote_config_bundle", side_effect=self._replay("emote")), \
+                patch("astral_party_auto.modkit.visual_config.replace_visual_config_bundle", side_effect=self._replay("visual")):
+            return self.workspace._config_base(self.context, ["Card"], "UT_HandCard_New", self.folder)
+
+    def test_current_draft_config_is_used_directly(self):
+        self.assertEqual(self._run(lambda path, tables, address: True), self.draft)
+        self.assertEqual(self.calls, [])
+
+    def test_stale_draft_is_rebuilt_from_current_game_and_keeps_existing_edits(self):
+        result = self._run(lambda path, tables, address: path != self.draft)
+        self.assertNotEqual(result, self.draft)
+        self.assertEqual(self.calls[0], ("emote", self.original, 7, "Video_7"))
+        self.assertEqual(self.calls[1][0], "visual")
+        self.assertEqual(self.calls[1][2:], ("Card", "UT_HandCard_Old", "ui://xuaw6o8jjmold"))
+        self.assertTrue(result.is_relative_to(self.folder))
+        self.controller.log.assert_called_once()
+
+    def test_unknown_config_edit_reports_clear_reason_instead_of_dropping_it(self):
+        self.controller.draft_items.append({"kind": "text", "bundle": "config.bundle", "name": "Language"})
+        with self.assertRaisesRegex(ValueError, "旧版本游戏.*Language.*另建作品集"):
+            self._run(lambda path, tables, address: path != self.draft)
+
+    def test_name_missing_from_current_game_too_is_reported(self):
+        with self.assertRaisesRegex(ValueError, "重建后的配置仍找不到"):
+            self._run(lambda path, tables, address: False)
 
 
 class VisualCandidateApiTests(unittest.TestCase):

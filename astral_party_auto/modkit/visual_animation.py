@@ -318,6 +318,18 @@ def _object(env, kind: str, name: str):
 
 
 @_release_readers
+def _config_has_address(path: Path, tables: list[str], address: str) -> bool:
+    """确认配置包每个目标表里都有这个精确地址；草稿配置可能早于当前游戏版本。"""
+    from .visual_config import inspect_visual_config
+    env = _load_bundle(path)
+    for table in tables:
+        report = inspect_visual_config(text_asset_bytes(_object(env, "TextAsset", table).read()), table)
+        if not any(target["name"] == address for target in report["targets"]):
+            return False
+    return True
+
+
+@_release_readers
 def read_descriptor(path: Path) -> bytes:
     return text_asset_bytes(_object(_load_bundle(path), "TextAsset", "Common_fui").read())
 
@@ -468,6 +480,48 @@ class VisualAnimationWorkspace:
         draft = self.controller._draft_dir() / name
         return draft if draft.is_file() else context["originals"][name]
 
+    def _rebuild_config(self, context: dict, folder: Path) -> Path:
+        """以当前游戏配置为底，重放作品集里已有的表情和动态卡面配置修改。"""
+        from .emote_config import replace_emote_config_bundle
+        from .visual_config import replace_visual_config_bundle
+        config_name = context["config_bundle"]
+        current = context["originals"][config_name]
+        for position, item in enumerate(self.controller.draft_items):
+            if config_name not in item_bundle_names(item):
+                continue
+            kind = item.get("kind")
+            if item.get("bundle") != config_name or kind not in ("emote", "visual_animation"):
+                raise ValueError(f"作品集中的「{item.get('name') or kind}」也修改了游戏配置，无法自动合并")
+            if kind == "emote":
+                output = folder / f"config-rebuild-{position}.bundle"
+                replace_emote_config_bundle(current, output, item["emote_id"], item["video_name"])
+                current = output
+                continue
+            tables = item.get("tables")
+            if not tables or not isinstance(item.get("name"), str) or not isinstance(item.get("movieclip_url"), str):
+                raise ValueError(f"动态作品「{item.get('name')}」记录不完整")
+            for index, table in enumerate(tables):
+                output = folder / f"config-rebuild-{position}-{index}.bundle"
+                replace_visual_config_bundle(current, output, table, item["name"], item["movieclip_url"])
+                current = output
+        return current
+
+    def _config_base(self, context: dict, tables: list[str], address: str, folder: Path) -> Path:
+        """草稿配置缺少当前卡面时（常见于游戏更新后新增卡牌），按当前版本重建再修改。"""
+        source = self._source(context["config_bundle"], context)
+        original = context["originals"][context["config_bundle"]]
+        if source == original or _config_has_address(source, tables, address):
+            return source
+        try:
+            rebuilt = self._rebuild_config(context, folder)
+            if not _config_has_address(rebuilt, tables, address):
+                raise ValueError("重建后的配置仍找不到这张卡面")
+        except (OSError, ValueError, KeyError) as exc:
+            raise ValueError("作品集里保存的游戏配置来自旧版本游戏或已被改动，缺少这张卡面；"
+                             f"按当前游戏版本自动重建失败：{exc}。请另建作品集后再制作。") from exc
+        self.controller.log("作品集中的游戏配置与当前游戏版本不一致，已按当前版本重建并保留已有的表情和动态作品。")
+        return rebuilt
+
     def preview(self, name: str, descriptor: Path, atlas_path: Path) -> dict:
         from .fairygui_movieclip import inspect_movieclip_package
         package = inspect_movieclip_package(read_descriptor(descriptor))
@@ -606,10 +660,10 @@ class VisualAnimationWorkspace:
             write_atlas(sources[context["atlas_bundle"]], atlas_output, atlas)
             url = "ui://" + context["package_id"] + item_id
             config_output = folder / context["config_bundle"]
-            config_source = sources[context["config_bundle"]]
             old_item = next((item for item in self.controller.draft_items if item.get("kind") == "visual_animation" and item.get("name") == selection["name"]), None)
+            old_address = old_item["movieclip_url"] if old_item else selection["name"]
+            config_source = self._config_base(context, support["tables"], old_address, folder)
             for index, table in enumerate(support["tables"]):
-                old_address = old_item["movieclip_url"] if old_item else selection["name"]
                 destination = config_output if index == len(support["tables"]) - 1 else folder / f"config-{index}.bundle"
                 replace_visual_config_bundle(config_source, destination, table, old_address, url)
                 config_source = destination
