@@ -21,6 +21,9 @@ from .core.config import APP_ROOT, RESOURCE_ROOT
 from . import __version__
 from .core.updates import REPOSITORY_URL, RELEASES_URL, UpdateChecker
 from .mod_controller import DATA_DIR, MADE_DIR, ModController
+from .startup_diagnostics import watch_startup
+
+STARTUP_DIAGNOSTICS_NAME = "startup-diagnostics.txt"
 from .modkit.categories import (
     ASSET_TYPES, annotate_texture_name_duplicates, asset_category,
     category_group, category_label,
@@ -644,22 +647,38 @@ class DesktopApi:
         result = self._run_on_ui(_open_dialog)
         return Path(result) if result else None
 
+    def _startup_phase(self, name: str) -> None:
+        watch = getattr(self, "_startup_watch", None)
+        if watch is not None:
+            watch.phase(name)
+
+    @watch_startup(lambda: DATA_DIR / STARTUP_DIAGNOSTICS_NAME, __version__)
     @exposed
     def bootstrap(self) -> dict:
+        self._startup_phase("等待其它操作完成")
         # 启动时强制再检一次：WebView 冷启动 / 杀软拦截注册表时，构造期检测可能为空
         self.controller.refresh_detection()
+        self._startup_phase("检测游戏位置")
         if not self.controller.has_game:
             # 再试一轮（Steam 库盘刚就绪等情况）
             self.controller.refresh_detection()
+            self._startup_phase("再次检测游戏位置")
         dash = self._dashboard_state()
+        self._startup_phase("读取仪表盘状态")
         if dash.get("has_game"):
             self._append_log(f"已连接游戏：{dash.get('game_exe') or dash.get('game_name')}")
         else:
             self._append_log("未检测到游戏。可点「刷新检测」，或确认已安装 Steam 或 TapTap 版吉星派对。")
+        installed = self.controller.installed_mods()
+        self._startup_phase("读取已安装 Mod")
+        watch = getattr(self, "_startup_watch", None)
+        if watch is not None and watch.elapsed() >= 5:
+            phases = "，".join(f"{name} {seconds:.1f} 秒" for name, seconds in watch.phases)
+            self._append_log(f"本次启动用时 {watch.elapsed():.1f} 秒：{phases}。")
         return {
             "dashboard": dash,
             "app_info": {"version": __version__, "repository_url": REPOSITORY_URL},
-            "installed": self.controller.installed_mods(),
+            "installed": installed,
             "draft": self._draft_state(),
             "logs": list(self._logs),
             "asset_types": [{"id": type_id, "label": label} for type_id, label in ASSET_TYPES],

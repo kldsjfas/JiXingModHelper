@@ -3319,9 +3319,29 @@ ${row.bundle}`;
     renderDashboard();
   }
 
+  function watchSlowStartup() {
+    // 后端卡住时界面只剩转圈；超过 15 秒后说明正在做什么，以及卡住时该发送哪份诊断。
+    const label = $("#loading-overlay span");
+    const started = Date.now();
+    const timer = setInterval(() => {
+      const seconds = Math.round((Date.now() - started) / 1000);
+      if (!label || seconds < 15) return;
+      label.textContent = seconds < 60
+        ? `启动比平时慢，正在检测游戏和资源…（已等待 ${seconds} 秒）`
+        : `启动已等待 ${seconds} 秒。请关闭助手，把助手目录里的 modkit_data\\startup-diagnostics.txt 发给开发者。`;
+    }, 1000);
+    return () => clearInterval(timer);
+  }
+
   async function bootstrap() {
     setHeaderStatus("连接后端…");
-    const boot = await call("bootstrap", { quiet: false });
+    const stopWatching = watchSlowStartup();
+    let boot;
+    try {
+      boot = await call("bootstrap", { quiet: false });
+    } finally {
+      stopWatching();
+    }
     window.ProjectUpdates?.init({ api, toast, appInfo: boot.app_info || {} });
     window.GameLocation?.init({
       api: (name, ...args) => call(name, { busy: true, quiet: true, busyText: "检查游戏位置…" }, ...args),
