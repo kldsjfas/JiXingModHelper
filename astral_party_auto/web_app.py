@@ -21,6 +21,9 @@ from .core.config import APP_ROOT, RESOURCE_ROOT
 from . import __version__
 from .core.updates import REPOSITORY_URL, RELEASES_URL, UpdateChecker
 from .mod_controller import DATA_DIR, MADE_DIR, ModController
+from .startup_diagnostics import watch_startup
+
+STARTUP_DIAGNOSTICS_NAME = "startup-diagnostics.txt"
 from .modkit.categories import (
     ASSET_TYPES, annotate_texture_name_duplicates, asset_category,
     category_group, category_label,
@@ -62,6 +65,23 @@ def exposed(method: Callable) -> Callable:
         try:
             with self._controller_lock:
                 data = method(self, *args, **kwargs)
+            return {"ok": True, "data": _json_safe(data)}
+        except Exception as exc:
+            message = str(exc) or exc.__class__.__name__
+            self._append_log(f"操作失败：{message}")
+            return {"ok": False, "error": message}
+
+    wrapped._exposed = True  # type: ignore[attr-defined]
+    return wrapped
+
+
+def exposed_unlocked(method: Callable) -> Callable:
+    """只读状态的接口不获取控制器锁：启动或其它操作卡住时仍可使用。"""
+
+    @wraps(method)
+    def wrapped(self: "DesktopApi", *args, **kwargs):
+        try:
+            data = method(self, *args, **kwargs)
             return {"ok": True, "data": _json_safe(data)}
         except Exception as exc:
             message = str(exc) or exc.__class__.__name__
@@ -644,22 +664,38 @@ class DesktopApi:
         result = self._run_on_ui(_open_dialog)
         return Path(result) if result else None
 
+    def _startup_phase(self, name: str) -> None:
+        watch = getattr(self, "_startup_watch", None)
+        if watch is not None:
+            watch.phase(name)
+
+    @watch_startup(lambda: DATA_DIR / STARTUP_DIAGNOSTICS_NAME, __version__)
     @exposed
     def bootstrap(self) -> dict:
+        self._startup_phase("等待其它操作完成")
         # 启动时强制再检一次：WebView 冷启动 / 杀软拦截注册表时，构造期检测可能为空
         self.controller.refresh_detection()
+        self._startup_phase("检测游戏位置")
         if not self.controller.has_game:
             # 再试一轮（Steam 库盘刚就绪等情况）
             self.controller.refresh_detection()
+            self._startup_phase("再次检测游戏位置")
         dash = self._dashboard_state()
+        self._startup_phase("读取仪表盘状态")
         if dash.get("has_game"):
             self._append_log(f"已连接游戏：{dash.get('game_exe') or dash.get('game_name')}")
         else:
             self._append_log("未检测到游戏。可点「刷新检测」，或确认已安装 Steam 或 TapTap 版吉星派对。")
+        installed = self.controller.installed_mods()
+        self._startup_phase("读取已安装 Mod")
+        watch = getattr(self, "_startup_watch", None)
+        if watch is not None and watch.elapsed() >= 5:
+            phases = "，".join(f"{name} {seconds:.1f} 秒" for name, seconds in watch.phases)
+            self._append_log(f"本次启动用时 {watch.elapsed():.1f} 秒：{phases}。")
         return {
             "dashboard": dash,
             "app_info": {"version": __version__, "repository_url": REPOSITORY_URL},
-            "installed": self.controller.installed_mods(),
+            "installed": installed,
             "draft": self._draft_state(),
             "logs": list(self._logs),
             "asset_types": [{"id": type_id, "label": label} for type_id, label in ASSET_TYPES],
@@ -2192,6 +2228,27 @@ class DesktopApi:
     def clear_logs(self) -> list[str]:
         self._logs.clear()
         return []
+
+    @exposed_unlocked
+    def export_error_report(self) -> dict | None:
+        """把运行日志、启动诊断和各线程位置导出成一份文本，卡住时也能导出。"""
+        from datetime import datetime
+
+        from .error_report import build_error_report
+        from .modkit.catalog_mods import atomic_bytes
+
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        path = self._pick_path("save", file_types=("文本报告 (*.txt)",),
+                               save_filename=f"吉星派对错误报告-{__version__}-{stamp}.txt")
+        if path is None:
+            return None
+        path = Path(path)
+        if path.suffix.lower() != ".txt":
+            path = path.with_name(path.name + ".txt")
+        text = build_error_report(self, version=__version__, data_dir=DATA_DIR, startup_name=STARTUP_DIAGNOSTICS_NAME)
+        atomic_bytes(path, text.encode("utf-8-sig"))
+        self._append_log(f"已导出错误报告：{path}")
+        return {"path": str(path), "name": path.name, "size": path.stat().st_size}
 
 
 def _set_windows_app_id() -> None:
