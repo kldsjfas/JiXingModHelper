@@ -75,6 +75,23 @@ def exposed(method: Callable) -> Callable:
     return wrapped
 
 
+def exposed_unlocked(method: Callable) -> Callable:
+    """只读状态的接口不获取控制器锁：启动或其它操作卡住时仍可使用。"""
+
+    @wraps(method)
+    def wrapped(self: "DesktopApi", *args, **kwargs):
+        try:
+            data = method(self, *args, **kwargs)
+            return {"ok": True, "data": _json_safe(data)}
+        except Exception as exc:
+            message = str(exc) or exc.__class__.__name__
+            self._append_log(f"操作失败：{message}")
+            return {"ok": False, "error": message}
+
+    wrapped._exposed = True  # type: ignore[attr-defined]
+    return wrapped
+
+
 def _to_tk_filetypes(file_types) -> list:
     """把 pywebview 风格的 file_types（'图片 (*.png;*.jpg)'）转成 tkinter 的 [(label, pattern)]。"""
     result = []
@@ -2211,6 +2228,27 @@ class DesktopApi:
     def clear_logs(self) -> list[str]:
         self._logs.clear()
         return []
+
+    @exposed_unlocked
+    def export_error_report(self) -> dict | None:
+        """把运行日志、启动诊断和各线程位置导出成一份文本，卡住时也能导出。"""
+        from datetime import datetime
+
+        from .error_report import build_error_report
+        from .modkit.catalog_mods import atomic_bytes
+
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        path = self._pick_path("save", file_types=("文本报告 (*.txt)",),
+                               save_filename=f"吉星派对错误报告-{__version__}-{stamp}.txt")
+        if path is None:
+            return None
+        path = Path(path)
+        if path.suffix.lower() != ".txt":
+            path = path.with_name(path.name + ".txt")
+        text = build_error_report(self, version=__version__, data_dir=DATA_DIR, startup_name=STARTUP_DIAGNOSTICS_NAME)
+        atomic_bytes(path, text.encode("utf-8-sig"))
+        self._append_log(f"已导出错误报告：{path}")
+        return {"path": str(path), "name": path.name, "size": path.stat().st_size}
 
 
 def _set_windows_app_id() -> None:

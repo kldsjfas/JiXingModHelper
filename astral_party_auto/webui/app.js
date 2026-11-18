@@ -2634,6 +2634,8 @@ ${row.bundle}`;
       } catch (_) {}
     });
 
+    $("#export-error-report")?.addEventListener("click", () => exportErrorReport({ busy: true }));
+    $("#loading-export-report")?.addEventListener("click", () => exportErrorReport({ busy: false }));
     $("#clear-logs")?.addEventListener("click", async () => {
       await call("clear_logs", { quiet: true });
       $("#log-output").textContent = "（暂无日志）";
@@ -3319,18 +3321,30 @@ ${row.bundle}`;
     renderDashboard();
   }
 
+  async function exportErrorReport({ busy }) {
+    // 后端不为此获取控制器锁，启动卡住时也能从加载遮罩导出。
+    try {
+      const result = await call("export_error_report", { busy, busyText: "正在导出错误报告…" });
+      if (result?.name) toast(`错误报告已导出：${result.name}。请把这个文件发给开发者。`);
+    } catch (_) {}
+  }
+
   function watchSlowStartup() {
-    // 后端卡住时界面只剩转圈；超过 15 秒后说明正在做什么，以及卡住时该发送哪份诊断。
+    // 后端卡住时界面只剩转圈；超过 15 秒后说明正在做什么，并提供导出错误报告。
     const label = $("#loading-overlay span");
     const started = Date.now();
     const timer = setInterval(() => {
       const seconds = Math.round((Date.now() - started) / 1000);
       if (!label || seconds < 15) return;
+      $("#loading-export-report")?.classList.remove("is-hidden");
       label.textContent = seconds < 60
         ? `启动比平时慢，正在检测游戏和资源…（已等待 ${seconds} 秒）`
-        : `启动已等待 ${seconds} 秒。请关闭助手，把助手目录里的 modkit_data\\startup-diagnostics.txt 发给开发者。`;
+        : `启动已等待 ${seconds} 秒。请点下方「导出错误报告」，把文件发给开发者。`;
     }, 1000);
-    return () => clearInterval(timer);
+    return () => {
+      clearInterval(timer);
+      $("#loading-export-report")?.classList.add("is-hidden");
+    };
   }
 
   async function bootstrap() {

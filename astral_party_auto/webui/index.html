@@ -615,7 +615,7 @@
 
         <section id="page-logs" class="page">
           <article class="card log-card">
-            <div class="section-heading"><div><h2>运行日志</h2><p>资源扫描、替换和安装记录都会显示在这里。</p></div><button id="clear-logs" class="button ghost compact">清空日志</button></div>
+            <div class="section-heading"><div><h2>运行日志</h2><p>资源扫描、替换和安装记录都会显示在这里。遇到问题时可导出错误报告发给开发者。</p></div><div class="action-row"><button id="export-error-report" class="button purple compact" type="button">导出错误报告…</button><button id="clear-logs" class="button ghost compact" type="button">清空日志</button></div></div>
             <pre id="log-output"></pre>
           </article>
         </section>
@@ -623,7 +623,7 @@
     </section>
   </div>
 
-  <div id="loading-overlay" class="loading-overlay"><div class="spinner"></div><span>正在连接本地后端…</span></div>
+  <div id="loading-overlay" class="loading-overlay"><div class="spinner"></div><span>正在连接本地后端…</span><button id="loading-export-report" class="button ghost compact is-hidden" type="button">导出错误报告…</button></div>
   <div id="busy-overlay" class="busy-overlay is-hidden"><div class="spinner"></div><span id="busy-text">处理中…</span></div>
   <div id="toast-region" class="toast-region" aria-live="polite"></div>
 
